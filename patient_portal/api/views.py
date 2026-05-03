@@ -244,8 +244,7 @@ class PatientInfoViewSet(viewsets.ModelViewSet):
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
     
-    @action(detail=False, methods=['post'], permission_classes=[AllowAny])
-    @method_decorator(csrf_exempt)
+    @action(detail=False, methods=['post'], permission_classes=[AllowAny], authentication_classes=[])
     def upload_fhir(self, request):
         """Upload patients from FHIR JSON file"""
         if 'file' not in request.FILES:

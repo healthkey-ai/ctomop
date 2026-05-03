@@ -801,3 +801,135 @@ class OmopDocumentsEndpointTest(FhirUploadBase):
         resp = self.client.delete(f'/api/documents/{pk}/')
         self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
         self.assertFalse(PatientDocument.objects.filter(pk=pk).exists())
+
+
+# ---------------------------------------------------------------------------
+# 5. SMART on FHIR tests
+# ---------------------------------------------------------------------------
+
+class SmartConfigurationTest(TestCase):
+    """/.well-known/smart-configuration must return correct SMART metadata."""
+
+    def setUp(self):
+        self.client = APIClient()
+
+    def test_discovery_is_public(self):
+        resp = self.client.get('/.well-known/smart-configuration')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_discovery_shape(self):
+        resp = self.client.get('/.well-known/smart-configuration')
+        data = resp.json()
+        required = {
+            'authorization_endpoint',
+            'token_endpoint',
+            'scopes_supported',
+            'response_types_supported',
+            'capabilities',
+            'code_challenge_methods_supported',
+        }
+        for key in required:
+            self.assertIn(key, data, f'Missing key: {key}')
+
+    def test_discovery_pkce_advertised(self):
+        resp = self.client.get('/.well-known/smart-configuration')
+        self.assertIn('S256', resp.json()['code_challenge_methods_supported'])
+
+    def test_discovery_scopes_include_smart(self):
+        resp = self.client.get('/.well-known/smart-configuration')
+        scopes = resp.json()['scopes_supported']
+        for required_scope in ['openid', 'patient/*.read', 'patient/*.write', 'launch/patient']:
+            self.assertIn(required_scope, scopes, f'Scope missing: {required_scope}')
+
+    def test_discovery_capabilities_include_standalone(self):
+        resp = self.client.get('/.well-known/smart-configuration')
+        caps = resp.json()['capabilities']
+        self.assertIn('launch-standalone', caps)
+        self.assertIn('client-public', caps)
+
+
+class SmartTokenAuthTest(TestCase):
+    """OMOP endpoints accept OAuth2 Bearer tokens with the correct scope."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from oauth2_provider.models import Application, AccessToken
+        from django.utils import timezone as tz
+        import datetime
+
+        cls.user = User.objects.create_user(
+            username='smartuser', password='smartpass'
+        )
+
+        cls.app = Application.objects.create(
+            name='Test SMART App',
+            client_id='test-smart-client',
+            client_type=Application.CLIENT_PUBLIC,
+            authorization_grant_type=Application.GRANT_AUTHORIZATION_CODE,
+            user=cls.user,
+        )
+
+        # Token with patient/*.read — should allow GET
+        cls.read_token = AccessToken.objects.create(
+            user=cls.user,
+            application=cls.app,
+            token='test-read-token-abc123',
+            expires=tz.now() + datetime.timedelta(hours=1),
+            scope='patient/*.read openid',
+        )
+
+        # Token with no useful scope — should be denied
+        cls.empty_scope_token = AccessToken.objects.create(
+            user=cls.user,
+            application=cls.app,
+            token='test-empty-token-xyz789',
+            expires=tz.now() + datetime.timedelta(hours=1),
+            scope='',
+        )
+
+    def _bearer(self, token_str: str) -> APIClient:
+        c = APIClient()
+        c.credentials(HTTP_AUTHORIZATION=f'Bearer {token_str}')
+        return c
+
+    def test_read_token_allows_list_conditions(self):
+        client = self._bearer(self.read_token.token)
+        resp = client.get('/api/conditions/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_read_token_allows_list_observations(self):
+        client = self._bearer(self.read_token.token)
+        resp = client.get('/api/observations/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_read_token_allows_list_procedures(self):
+        client = self._bearer(self.read_token.token)
+        resp = client.get('/api/procedures/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_read_token_allows_list_drug_exposures(self):
+        client = self._bearer(self.read_token.token)
+        resp = client.get('/api/drug-exposures/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_no_token_returns_401(self):
+        resp = self.client.get('/api/conditions/')
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_empty_scope_token_returns_403(self):
+        client = self._bearer(self.empty_scope_token.token)
+        resp = client.get('/api/conditions/')
+        self.assertIn(resp.status_code, [
+            status.HTTP_403_FORBIDDEN,
+            status.HTTP_401_UNAUTHORIZED,
+        ])
+
+    def test_oauth2_token_endpoint_exists(self):
+        resp = self.client.get('/o/token/')
+        # GET is not allowed on token endpoint (returns 405), but it must exist
+        self.assertNotEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_oauth2_authorize_endpoint_exists(self):
+        resp = self.client.get('/o/authorize/')
+        # Redirects to login or returns 200/400 — anything but 404
+        self.assertNotEqual(resp.status_code, status.HTTP_404_NOT_FOUND)

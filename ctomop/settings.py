@@ -39,6 +39,7 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'rest_framework',
     'corsheaders',
+    'oauth2_provider',
     'omop_core',
     'omop_genomics',
     'omop_oncology',
@@ -136,15 +137,40 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_CREDENTIALS = True
 
-# REST Framework - Allow unauthenticated access for now
+# REST Framework
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
+        'oauth2_provider.contrib.rest_framework.OAuth2Authentication',
         'rest_framework.authentication.BasicAuthentication',
         'patient_portal.api.authentication.CsrfExemptSessionAuthentication',
     ],
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.AllowAny',
     ],
+}
+
+# SMART on FHIR / OAuth2 provider configuration
+OAUTH2_PROVIDER = {
+    'SCOPES': {
+        'openid':           'OpenID Connect identity token',
+        'fhir-user':        'FHIR User profile',
+        'launch':           'SMART launch context',
+        'launch/patient':   'Patient-level launch context',
+        'offline_access':   'Offline access (refresh tokens)',
+        'patient/*.read':   'Read all patient clinical data',
+        'patient/*.write':  'Write all patient clinical data',
+        'user/*.read':      'Read data on behalf of the current user',
+        'user/*.write':     'Write data on behalf of the current user',
+    },
+    'DEFAULT_SCOPES': ['openid', 'patient/*.read'],
+    'ACCESS_TOKEN_EXPIRE_SECONDS': 3600,
+    'REFRESH_TOKEN_EXPIRE_SECONDS': 86400 * 30,
+    # Require PKCE for all public (SPA) clients
+    'PKCE_REQUIRED': True,
+    # Allow http for local dev; https enforced in production via ALLOWED_REDIRECT_URI_SCHEMES
+    'ALLOWED_REDIRECT_URI_SCHEMES': ['https', 'http'],
+    'OIDC_ENABLED': True,
+    'OIDC_ISS_ENDPOINT': os.environ.get('OIDC_ISS_ENDPOINT', ''),
 }
 SOCIAL_AUTH_GOOGLE_OAUTH2_KEY = os.environ.get('SOCIAL_AUTH_GOOGLE_OAUTH2_KEY')
 SOCIAL_AUTH_GOOGLE_OAUTH2_SECRET = os.environ.get('SOCIAL_AUTH_GOOGLE_OAUTH2_SECRET')

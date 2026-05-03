@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { ACCESS_TOKEN_KEY, refreshAccessToken, clearTokens } from '../utils/oauth';
 
 const api = axios.create({
   baseURL: '/api',
@@ -8,35 +9,77 @@ const api = axios.create({
   withCredentials: true,
 });
 
-// Add request interceptor to include CSRF token
+// Attach Bearer token (OAuth2) or fall back to CSRF (session auth)
 api.interceptors.request.use(
   (config) => {
-    const csrfToken = document.cookie
-      .split('; ')
-      .find(row => row.startsWith('csrftoken='))
-      ?.split('=')[1];
-    
-    if (csrfToken) {
-      config.headers['X-CSRFToken'] = csrfToken;
+    const accessToken = sessionStorage.getItem(ACCESS_TOKEN_KEY);
+    if (accessToken) {
+      config.headers['Authorization'] = `Bearer ${accessToken}`;
+    } else {
+      // Session-based fallback: attach CSRF token
+      const csrfToken = document.cookie
+        .split('; ')
+        .find(row => row.startsWith('csrftoken='))
+        ?.split('=')[1];
+      if (csrfToken) {
+        config.headers['X-CSRFToken'] = csrfToken;
+      }
     }
-    
     return config;
   },
-  (error) => {
-    return Promise.reject(error);
-  }
+  (error) => Promise.reject(error)
 );
 
-// Add response interceptor for error handling
+// On 401: try a silent token refresh once, then redirect to login
+let isRefreshing = false;
+let failedQueue: Array<{ resolve: (v: unknown) => void; reject: (e: unknown) => void }> = [];
+
+function processQueue(error: unknown, token: string | null) {
+  failedQueue.forEach(({ resolve, reject }) => {
+    if (error) reject(error);
+    else resolve(token);
+  });
+  failedQueue = [];
+}
+
 api.interceptors.response.use(
   (response) => response,
-  (error) => {
-    if (error.response?.status === 401) {
-      // Redirect to login if unauthorized and not already on login page
+  async (error) => {
+    const originalRequest = error.config;
+
+    if (error.response?.status === 401 && !originalRequest._retry) {
+      if (isRefreshing) {
+        return new Promise((resolve, reject) => {
+          failedQueue.push({ resolve, reject });
+        }).then((token) => {
+          originalRequest.headers['Authorization'] = `Bearer ${token}`;
+          return api(originalRequest);
+        });
+      }
+
+      originalRequest._retry = true;
+      isRefreshing = true;
+
+      try {
+        const tokens = await refreshAccessToken();
+        if (tokens) {
+          processQueue(null, tokens.access_token);
+          originalRequest.headers['Authorization'] = `Bearer ${tokens.access_token}`;
+          return api(originalRequest);
+        }
+      } catch (refreshError) {
+        processQueue(refreshError, null);
+      } finally {
+        isRefreshing = false;
+      }
+
+      // Refresh failed — clear tokens and redirect to login
+      clearTokens();
       if (!window.location.pathname.includes('/login')) {
         window.location.href = '/login';
       }
     }
+
     return Promise.reject(error);
   }
 );

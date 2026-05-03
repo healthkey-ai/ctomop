@@ -2,11 +2,18 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
+from oauth2_provider.contrib.rest_framework import (
+    OAuth2Authentication,
+    IsAuthenticatedOrTokenHasScope,
+    TokenHasReadWriteScope,
+    TokenMatchesOASRequirements,
+)
 from django.contrib.auth.models import User
 from django.contrib.auth import logout, login, authenticate
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.utils import timezone
+from django.conf import settings
 from omop_core.models import (
     Person, PatientInfo, Concept,
     ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
@@ -30,6 +37,42 @@ from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# SMART on FHIR discovery endpoint
+# ---------------------------------------------------------------------------
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def smart_configuration(request):
+    """
+    HL7 SMART on FHIR well-known configuration endpoint.
+    Advertises authorization / token endpoints and supported scopes.
+    """
+    base = request.build_absolute_uri('/').rstrip('/')
+    oidc_issuer = getattr(settings, 'OAUTH2_PROVIDER', {}).get('OIDC_ISS_ENDPOINT', '') or base
+    return Response({
+        'issuer': oidc_issuer,
+        'authorization_endpoint': f'{base}/o/authorize/',
+        'token_endpoint': f'{base}/o/token/',
+        'token_endpoint_auth_methods_supported': ['client_secret_basic', 'client_secret_post', 'none'],
+        'revocation_endpoint': f'{base}/o/revoke_token/',
+        'introspection_endpoint': f'{base}/o/introspect/',
+        'scopes_supported': list(settings.OAUTH2_PROVIDER.get('SCOPES', {}).keys()),
+        'response_types_supported': ['code'],
+        'grant_types_supported': ['authorization_code', 'refresh_token'],
+        'code_challenge_methods_supported': ['S256'],
+        'capabilities': [
+            'launch-standalone',
+            'client-public',
+            'sso-openid-connect',
+            'context-standalone-patient',
+            'permission-patient',
+            'permission-user',
+            'authorize-post',
+        ],
+    })
 
 
 def get_gender_concept(gender_str):
@@ -1577,49 +1620,56 @@ class _OmopFilterMixin:
 @method_decorator(csrf_exempt, name='dispatch')
 class ConditionOccurrenceViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ConditionOccurrenceSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticatedOrTokenHasScope]
+    required_scopes = ['patient/*.read']
     queryset = ConditionOccurrence.objects.all()
 
 
 @method_decorator(csrf_exempt, name='dispatch')
 class DrugExposureViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = DrugExposureSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticatedOrTokenHasScope]
+    required_scopes = ['patient/*.read']
     queryset = DrugExposure.objects.all()
 
 
 @method_decorator(csrf_exempt, name='dispatch')
 class MeasurementViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = MeasurementSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticatedOrTokenHasScope]
+    required_scopes = ['patient/*.read']
     queryset = Measurement.objects.all()
 
 
 @method_decorator(csrf_exempt, name='dispatch')
 class ObservationViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ObservationSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticatedOrTokenHasScope]
+    required_scopes = ['patient/*.read']
     queryset = Observation.objects.all()
 
 
 @method_decorator(csrf_exempt, name='dispatch')
 class ProcedureOccurrenceViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = ProcedureOccurrenceSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticatedOrTokenHasScope]
+    required_scopes = ['patient/*.read']
     queryset = ProcedureOccurrence.objects.all()
 
 
 @method_decorator(csrf_exempt, name='dispatch')
 class EpisodeViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = EpisodeSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticatedOrTokenHasScope]
+    required_scopes = ['patient/*.read']
     queryset = Episode.objects.all()
 
 
 @method_decorator(csrf_exempt, name='dispatch')
 class EpisodeEventViewSet(viewsets.ModelViewSet):
     serializer_class = EpisodeEventSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticatedOrTokenHasScope]
+    required_scopes = ['patient/*.read']
 
     def get_queryset(self):
         episode_id = self.request.query_params.get('episode_id')
@@ -1636,5 +1686,6 @@ class EpisodeEventViewSet(viewsets.ModelViewSet):
 @method_decorator(csrf_exempt, name='dispatch')
 class PatientDocumentViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = PatientDocumentSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticatedOrTokenHasScope]
+    required_scopes = ['patient/*.read']
     queryset = PatientDocument.objects.all()

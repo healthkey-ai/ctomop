@@ -57,4 +57,3 @@ export const AuthCallback: React.FC = () => {
     </Box>
   );
 };
-};

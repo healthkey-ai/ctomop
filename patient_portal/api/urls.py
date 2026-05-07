@@ -7,6 +7,10 @@ from .views import (
     ObservationViewSet, ProcedureOccurrenceViewSet, EpisodeViewSet, EpisodeEventViewSet,
     # Document storage
     PatientDocumentViewSet,
+    # Clinical trial enrollment tracker (metadata from EXACT)
+    PatientTrialEnrollmentViewSet,
+    # Controlled vocabulary
+    vocabulary_list,
 )
 
 router = DefaultRouter()
@@ -28,9 +32,13 @@ router.register(r'episode-events', EpisodeEventViewSet, basename='episode-events
 # Document storage (no OMOP equivalent)
 router.register(r'documents', PatientDocumentViewSet, basename='documents')
 
+# Clinical trial enrollment status tracker (trial metadata from EXACT)
+router.register(r'trial-enrollments', PatientTrialEnrollmentViewSet, basename='trial-enrollments')
+
 urlpatterns = [
     path('', include(router.urls)),
     path('auth/login/', login_view, name='login'),
     path('auth/logout/', logout_view, name='logout'),
     path('auth/test/', auth_test, name='auth_test'),
+    path('vocabularies/<str:model_name>/', vocabulary_list, name='vocabulary-list'),
 ]

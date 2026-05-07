@@ -17,7 +17,19 @@ from django.conf import settings
 from omop_core.models import (
     Person, PatientInfo, Concept,
     ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
-    PatientDocument,
+    PatientDocument, PatientTrialEnrollment,
+    # Controlled vocabulary lookup models
+    Ethnicity, StemCellTransplant, HistologicType, EstrogenReceptorStatus,
+    ProgesteroneReceptorStatus, Her2Status, HrStatus, HrdStatus,
+    MutationOrigin, MutationGene, MutationInterpretation, MutationCode,
+    TumorStage, NodesStage, DistantMetastasisStage, StagingModality,
+    ToxicityGrade, Language, LanguageSkillLevel, BinetStage, ProteinExpression,
+    RichterTransformation, TumorBurden, MorphologicVariant, DiseaseActivity,
+    PreExistingConditionCategory,
+    Disease, CancerStage, KarnofskyScore, EcogStatus, PeripheralNeuropathyGrade,
+    InfectionStatus, DiseaseProgression, MeasurableDisease, GelfCriteria,
+    FlipIScore, FollicularLymphomaGrade,
+    BreastCancerFirstLineTherapy, BreastCancerSecondLineTherapy, BreastCancerLaterLineTherapy,
 )
 from omop_oncology.models import Episode, EpisodeEvent
 from omop_core.services.patient_info_service import refresh_patient_info
@@ -31,7 +43,7 @@ from .serializers import (
     ConditionOccurrenceSerializer, DrugExposureSerializer, MeasurementSerializer,
     ObservationSerializer, ProcedureOccurrenceSerializer,
     EpisodeSerializer, EpisodeEventSerializer,
-    PatientDocumentSerializer,
+    PatientDocumentSerializer, PatientTrialEnrollmentSerializer,
 )
 from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
@@ -1643,6 +1655,71 @@ class EpisodeEventViewSet(viewsets.ModelViewSet):
 
 
 # =============================================================================
+# Controlled vocabulary endpoints
+# GET /api/vocabularies/<model_name>/ → [{code, title}, ...]
+# =============================================================================
+
+_VOCABULARY_REGISTRY = {
+    'ethnicity':                     Ethnicity,
+    'stem-cell-transplant':          StemCellTransplant,
+    'histologic-type':               HistologicType,
+    'estrogen-receptor-status':      EstrogenReceptorStatus,
+    'progesterone-receptor-status':  ProgesteroneReceptorStatus,
+    'her2-status':                   Her2Status,
+    'hr-status':                     HrStatus,
+    'hrd-status':                    HrdStatus,
+    'mutation-origin':               MutationOrigin,
+    'mutation-gene':                 MutationGene,
+    'mutation-interpretation':       MutationInterpretation,
+    'mutation-code':                 MutationCode,
+    'tumor-stage':                   TumorStage,
+    'nodes-stage':                   NodesStage,
+    'distant-metastasis-stage':      DistantMetastasisStage,
+    'staging-modality':              StagingModality,
+    'toxicity-grade':                ToxicityGrade,
+    'language':                      Language,
+    'language-skill-level':          LanguageSkillLevel,
+    'binet-stage':                   BinetStage,
+    'protein-expression':            ProteinExpression,
+    'richter-transformation':        RichterTransformation,
+    'tumor-burden':                  TumorBurden,
+    'morphologic-variant':           MorphologicVariant,
+    'disease-activity':              DiseaseActivity,
+    'pre-existing-condition-category': PreExistingConditionCategory,
+    'disease':                         Disease,
+    'cancer-stage':                    CancerStage,
+    'karnofsky-score':                 KarnofskyScore,
+    'ecog-status':                     EcogStatus,
+    'peripheral-neuropathy-grade':     PeripheralNeuropathyGrade,
+    'infection-status':                InfectionStatus,
+    'disease-progression':             DiseaseProgression,
+    'measurable-disease':              MeasurableDisease,
+    'gelf-criteria':                   GelfCriteria,
+    'flipi-score':                     FlipIScore,
+    'follicular-lymphoma-grade':             FollicularLymphomaGrade,
+    'breast-cancer-first-line-therapy':      BreastCancerFirstLineTherapy,
+    'breast-cancer-second-line-therapy':     BreastCancerSecondLineTherapy,
+    'breast-cancer-later-line-therapy':      BreastCancerLaterLineTherapy,
+}
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def vocabulary_list(request, model_name):
+    """Return all entries for a controlled vocabulary model as [{code, title}]."""
+    model = _VOCABULARY_REGISTRY.get(model_name)
+    if model is None:
+        return Response(
+            {'error': f"Unknown vocabulary '{model_name}'. Valid options: {sorted(_VOCABULARY_REGISTRY.keys())}"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+    has_sort_key = any(f.name == 'sort_key' for f in model._meta.get_fields())
+    order_field = 'sort_key' if has_sort_key else 'title'
+    items = list(model.objects.values('code', 'title', 'source_name', 'source_url').order_by(order_field))
+    return Response(items)
+
+
+# =============================================================================
 # HealthTree parity ViewSets
 # =============================================================================
 
@@ -1652,3 +1729,17 @@ class PatientDocumentViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
     permission_classes = [IsAuthenticatedOrTokenHasScope]
     required_scopes = ['patient/*.read']
     queryset = PatientDocument.objects.all()
+
+
+class PatientTrialEnrollmentViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
+    """CRUD for a patient's clinical trial enrollment status.
+
+    Trial metadata (title, phase, eligibility, etc.) is NOT stored here.
+    Use ``trial_id`` to retrieve that data from the EXACT trial-matcher API.
+
+    Filter by person: GET /api/trial-enrollments/?person_id=42
+    """
+    serializer_class = PatientTrialEnrollmentSerializer
+    permission_classes = [IsAuthenticatedOrTokenHasScope]
+    required_scopes = ['patient/*.read']
+    queryset = PatientTrialEnrollment.objects.all()

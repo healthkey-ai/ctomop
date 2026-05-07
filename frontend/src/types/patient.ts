@@ -28,7 +28,7 @@ export interface PatientInfo {
   ecog_performance_status?: number;
   active_malignancies?: string;
   active_infection?: boolean;
-  preexisting_conditions?: string;
+  preexisting_conditions?: string[];
   peripheral_neuropathy_grade?: number;
   
   // Follicular Lymphoma specific

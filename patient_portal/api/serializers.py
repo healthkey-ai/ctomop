@@ -3,7 +3,7 @@ from django.contrib.auth.models import User
 from omop_core.models import (
     PatientInfo,
     ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
-    PatientDocument,
+    PatientDocument, PatientTrialEnrollment,
 )
 from omop_oncology.models import Episode, EpisodeEvent
 from datetime import date
@@ -60,7 +60,7 @@ class PatientInfoSerializer(serializers.ModelSerializer):
     class Meta:
         model = PatientInfo
         fields = '__all__'
-        read_only_fields = '__all__'
+        read_only_fields = []
 
     def get_patient_name(self, obj):
         if obj.person:
@@ -139,4 +139,14 @@ class EpisodeEventSerializer(serializers.ModelSerializer):
 class PatientDocumentSerializer(serializers.ModelSerializer):
     class Meta:
         model = PatientDocument
+        fields = '__all__'
+
+
+# ---------------------------------------------------------------------------
+# Clinical trial enrollment (status tracker — metadata from EXACT)
+# ---------------------------------------------------------------------------
+
+class PatientTrialEnrollmentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PatientTrialEnrollment
         fields = '__all__'

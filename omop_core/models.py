@@ -432,6 +432,267 @@ class AlbuminUnits(models.TextChoices):
     G_L = 'G/L', 'g/L'
 
 
+# ---------------------------------------------------------------------------
+# Controlled vocabulary / lookup models (parity with cancerbot)
+# Each model mirrors cancerbot's OptionsListMixin: code + title + llm_hint
+# ---------------------------------------------------------------------------
+
+class VocabularyLookup(models.Model):
+    """Abstract base for all controlled-vocabulary lookup tables."""
+    code = models.TextField(blank=False, null=False, db_index=True, unique=True)
+    title = models.TextField(blank=False, null=False, db_index=True, unique=True)
+    llm_hint = models.TextField(blank=True, null=True)
+    source_name = models.TextField(blank=True, null=True, help_text="Authoritative vocabulary source name")
+    source_url  = models.TextField(blank=True, null=True, help_text="URL to the vocabulary standard")
+
+    class Meta:
+        abstract = True
+
+    def __str__(self):
+        return self.title
+
+
+class Ethnicity(VocabularyLookup):
+    class Meta:
+        db_table = 'vocabulary_ethnicity'
+
+
+class StemCellTransplant(VocabularyLookup):
+    class Meta:
+        db_table = 'vocabulary_stem_cell_transplant'
+
+
+class HistologicType(VocabularyLookup):
+    sort_key = models.IntegerField(blank=True, null=True)
+
+    class Meta:
+        db_table = 'vocabulary_histologic_type'
+        ordering = ['sort_key']
+
+
+class EstrogenReceptorStatus(VocabularyLookup):
+    class Meta:
+        db_table = 'vocabulary_estrogen_receptor_status'
+
+
+class ProgesteroneReceptorStatus(VocabularyLookup):
+    class Meta:
+        db_table = 'vocabulary_progesterone_receptor_status'
+
+
+class Her2Status(VocabularyLookup):
+    class Meta:
+        db_table = 'vocabulary_her2_status'
+
+
+class HrStatus(VocabularyLookup):
+    class Meta:
+        db_table = 'vocabulary_hr_status'
+
+
+class HrdStatus(VocabularyLookup):
+    class Meta:
+        db_table = 'vocabulary_hrd_status'
+
+
+class MutationOrigin(VocabularyLookup):
+    class Meta:
+        db_table = 'vocabulary_mutation_origin'
+
+
+class MutationGene(VocabularyLookup):
+    class Meta:
+        db_table = 'vocabulary_mutation_gene'
+
+
+class MutationInterpretation(VocabularyLookup):
+    class Meta:
+        db_table = 'vocabulary_mutation_interpretation'
+
+
+class MutationCode(VocabularyLookup):
+    gene = models.ForeignKey(
+        MutationGene,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='mutation_codes',
+    )
+
+    class Meta:
+        db_table = 'vocabulary_mutation_code'
+
+
+class TumorStage(VocabularyLookup):
+    sort_key = models.IntegerField(blank=True, null=True)
+
+    class Meta:
+        db_table = 'vocabulary_tumor_stage'
+        ordering = ['sort_key']
+
+
+class NodesStage(VocabularyLookup):
+    sort_key = models.IntegerField(blank=True, null=True)
+
+    class Meta:
+        db_table = 'vocabulary_nodes_stage'
+        ordering = ['sort_key']
+
+
+class DistantMetastasisStage(VocabularyLookup):
+    sort_key = models.IntegerField(blank=True, null=True)
+
+    class Meta:
+        db_table = 'vocabulary_distant_metastasis_stage'
+        ordering = ['sort_key']
+
+
+class StagingModality(VocabularyLookup):
+    class Meta:
+        db_table = 'vocabulary_staging_modality'
+
+
+class ToxicityGrade(models.Model):
+    """Toxicity grade uses integer codes, not text codes."""
+    code = models.IntegerField(blank=False, null=False, db_index=True, unique=True)
+    title = models.TextField(blank=False, null=False, db_index=True, unique=True)
+    llm_hint = models.TextField(blank=True, null=True)
+    source_name = models.TextField(blank=True, null=True, help_text="Authoritative vocabulary source name")
+    source_url  = models.TextField(blank=True, null=True, help_text="URL to the vocabulary standard")
+
+    class Meta:
+        db_table = 'vocabulary_toxicity_grade'
+        ordering = ['code']
+
+    def __str__(self):
+        return self.title
+
+
+class Language(VocabularyLookup):
+    class Meta:
+        db_table = 'vocabulary_language'
+
+
+class LanguageSkillLevel(VocabularyLookup):
+    class Meta:
+        db_table = 'vocabulary_language_skill_level'
+
+
+class BinetStage(VocabularyLookup):
+    class Meta:
+        db_table = 'vocabulary_binet_stage'
+
+
+class ProteinExpression(VocabularyLookup):
+    class Meta:
+        db_table = 'vocabulary_protein_expression'
+
+
+class RichterTransformation(VocabularyLookup):
+    class Meta:
+        db_table = 'vocabulary_richter_transformation'
+
+
+class TumorBurden(VocabularyLookup):
+    class Meta:
+        db_table = 'vocabulary_tumor_burden'
+
+
+class MorphologicVariant(VocabularyLookup):
+    class Meta:
+        db_table = 'vocabulary_morphologic_variant'
+
+
+class DiseaseActivity(VocabularyLookup):
+    class Meta:
+        db_table = 'vocabulary_disease_activity'
+
+
+class PreExistingConditionCategory(VocabularyLookup):
+    class Meta:
+        db_table = 'vocabulary_pre_existing_condition_category'
+
+
+class Disease(VocabularyLookup):
+    class Meta:
+        db_table = 'vocabulary_disease'
+
+
+class CancerStage(VocabularyLookup):
+    class Meta:
+        db_table = 'vocabulary_cancer_stage'
+
+
+class KarnofskyScore(VocabularyLookup):
+    """Karnofsky performance score — integer codes stored as text; sort_key orders numerically."""
+    sort_key = models.IntegerField(blank=True, null=True)
+
+    class Meta:
+        db_table = 'vocabulary_karnofsky_score'
+        ordering = ['sort_key']
+
+
+class EcogStatus(VocabularyLookup):
+    class Meta:
+        db_table = 'vocabulary_ecog_status'
+
+
+class PeripheralNeuropathyGrade(VocabularyLookup):
+    class Meta:
+        db_table = 'vocabulary_peripheral_neuropathy_grade'
+
+
+class InfectionStatus(VocabularyLookup):
+    """Shared vocabulary for HIV, Hepatitis B, and Hepatitis C status fields."""
+    class Meta:
+        db_table = 'vocabulary_infection_status'
+
+
+class DiseaseProgression(VocabularyLookup):
+    class Meta:
+        db_table = 'vocabulary_disease_progression'
+
+
+class MeasurableDisease(VocabularyLookup):
+    class Meta:
+        db_table = 'vocabulary_measurable_disease'
+
+
+class GelfCriteria(VocabularyLookup):
+    class Meta:
+        db_table = 'vocabulary_gelf_criteria'
+
+
+class FlipIScore(VocabularyLookup):
+    class Meta:
+        db_table = 'vocabulary_flipi_score'
+
+
+class FollicularLymphomaGrade(VocabularyLookup):
+    class Meta:
+        db_table = 'vocabulary_follicular_lymphoma_grade'
+
+
+class BreastCancerFirstLineTherapy(VocabularyLookup):
+    class Meta:
+        db_table = 'vocabulary_breast_cancer_first_line_therapy'
+
+
+class BreastCancerSecondLineTherapy(VocabularyLookup):
+    class Meta:
+        db_table = 'vocabulary_breast_cancer_second_line_therapy'
+
+
+class BreastCancerLaterLineTherapy(VocabularyLookup):
+    class Meta:
+        db_table = 'vocabulary_breast_cancer_later_line_therapy'
+
+
+# ---------------------------------------------------------------------------
+# End controlled vocabulary models
+# ---------------------------------------------------------------------------
+
+
 class PatientInfo(models.Model):
     """
     Comprehensive patient information model adapted from exactomop repository
@@ -491,6 +752,7 @@ class PatientInfo(models.Model):
     ecog_performance_status = models.IntegerField(blank=True, null=True)
     no_other_active_malignancies = models.BooleanField(blank=False, null=False, default=True)
     no_pre_existing_conditions = models.BooleanField(blank=True, null=True)
+    preexisting_conditions = models.JSONField(blank=True, null=True, default=list, help_text="List of pre-existing condition categories from PreExistingConditionCategory vocabulary")
     peripheral_neuropathy_grade = models.IntegerField(blank=True, null=True)
 
     # Cancer-specific fields
@@ -1091,5 +1353,78 @@ class PatientDocument(models.Model):
 
     def __str__(self):
         return f"PatientDocument {self.doc_type} for Person {self.person_id}"
+
+
+# =============================================================================
+# Clinical Trial Enrollment Tracker
+# Trial metadata lives in EXACT (https://github.com/cancerbot-org/exact).
+# This model tracks only the patient's enrollment status; full trial details
+# are fetched on demand from EXACT's API using trial_id as the key.
+# =============================================================================
+
+class PatientTrialEnrollment(models.Model):
+    """Tracks a patient's participation status in a clinical trial.
+
+    Trial metadata (title, phase, sponsor, eligibility criteria, etc.) is NOT
+    stored here — it is retrieved from the EXACT trial-matcher service using
+    ``trial_id`` as the lookup key.
+    """
+
+    STATUS_INTERESTED = 'interested'
+    STATUS_REGISTERED = 'registered'
+    STATUS_ENTERED = 'entered'
+    STATUS_COMPLETED = 'completed'
+    STATUS_WITHDRAWN = 'withdrawn'
+
+    STATUS_CHOICES = [
+        (STATUS_INTERESTED, 'Interested'),
+        (STATUS_REGISTERED, 'Registered'),
+        (STATUS_ENTERED, 'Entered'),
+        (STATUS_COMPLETED, 'Completed'),
+        (STATUS_WITHDRAWN, 'Withdrawn'),
+    ]
+
+    person = models.ForeignKey(
+        Person,
+        on_delete=models.CASCADE,
+        related_name='trial_enrollments',
+        help_text="Patient participating in the trial",
+    )
+    trial_id = models.CharField(
+        max_length=100,
+        help_text="EXACT trial identifier — used to fetch trial metadata from EXACT API",
+    )
+    nct_id = models.CharField(
+        max_length=20,
+        blank=True,
+        null=True,
+        help_text="ClinicalTrials.gov NCT number, e.g. NCT04567890",
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default=STATUS_INTERESTED,
+        help_text="Patient's current enrollment status in this trial",
+    )
+    status_date = models.DateField(
+        blank=True,
+        null=True,
+        help_text="Date the current status was recorded",
+    )
+    notes = models.TextField(
+        blank=True,
+        null=True,
+        help_text="Free-text notes from coordinating clinician",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'patient_trial_enrollment'
+        unique_together = [('person', 'trial_id')]
+        ordering = ['-status_date', '-created_at']
+
+    def __str__(self):
+        return f"Person {self.person_id} — trial {self.trial_id} ({self.status})"
 
 

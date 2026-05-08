@@ -1,14 +1,12 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../../api/axios';
-import { startPkceLogin } from '../../utils/oauth';
 
 export const Login: React.FC = () => {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const [pkceLoading, setPkceLoading] = useState(false);
   const navigate = useNavigate();
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -32,17 +30,6 @@ export const Login: React.FC = () => {
     }
   };
 
-  const handleSmartLogin = async () => {
-    setPkceLoading(true);
-    try {
-      await startPkceLogin();
-      // Browser will redirect — no further action needed
-    } catch (err: any) {
-      setError('Could not start SMART login: ' + err.message);
-      setPkceLoading(false);
-    }
-  };
-
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-50">
       <div className="max-w-md w-full space-y-8 p-8 bg-white rounded-lg shadow-lg">
@@ -61,26 +48,7 @@ export const Login: React.FC = () => {
           </div>
         )}
 
-        {/* SMART on FHIR / OAuth2 login */}
-        <div>
-          <button
-            type="button"
-            onClick={handleSmartLogin}
-            disabled={pkceLoading}
-            className="w-full flex justify-center items-center gap-2 py-2 px-4 border border-blue-600 rounded-md shadow-sm text-sm font-medium text-blue-600 bg-white hover:bg-blue-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-60 disabled:cursor-not-allowed"
-          >
-            {pkceLoading ? 'Redirecting…' : 'Sign in with SMART on FHIR'}
-          </button>
-        </div>
-
-        <div className="relative">
-          <div className="absolute inset-0 flex items-center">
-            <div className="w-full border-t border-gray-300" />
-          </div>
-          <div className="relative flex justify-center text-sm">
-            <span className="px-2 bg-white text-gray-500">or use username & password</span>
-          </div>
-        </div>
+        {/* SMART on FHIR login — hidden until EHR SMART authorization server is configured */}
 
         <form className="space-y-6" onSubmit={handleSubmit}>
           <div className="space-y-4">

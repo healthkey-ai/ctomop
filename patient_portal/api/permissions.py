@@ -1,6 +1,26 @@
 from django.utils import timezone
 from rest_framework.permissions import BasePermission
 
+
+def get_request_org(request):
+    """
+    Return the Organization associated with the current OAuth2 token, or None.
+
+    Returns None (no scoping) for:
+      - superusers (can see all orgs)
+      - session-authenticated requests (backward compat)
+      - service clients not linked to any organization
+    """
+    if request.user and request.user.is_superuser:
+        return None
+    token = getattr(request, 'auth', None)
+    if token is None:
+        return None
+    try:
+        return token.application.org_profile.organization
+    except AttributeError:
+        return None
+
 _SAFE_METHODS = frozenset(('GET', 'HEAD', 'OPTIONS'))
 _READ_SCOPES = frozenset(('patient/*.read', 'user/*.read'))
 _WRITE_SCOPES = frozenset(('patient/*.write', 'user/*.write'))

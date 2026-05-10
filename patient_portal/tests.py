@@ -375,13 +375,18 @@ class UIViewsReflectUploadedDataTest(FhirUploadBase):
     """GET requests to UI-facing REST endpoints should return the data
     written by the FHIR upload pipeline."""
 
-    def setUp(self):
-        super().setUp()
-        # Upload once per test method (TestCase wraps each test in a transaction)
-        self._upload_bundle()
-        self._person = self._get_person()
-        self.assertIsNotNone(self._person, 'Setup: person not found after upload')
-        self._pid = self._person.person_id
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        _client = APIClient()
+        _client.force_authenticate(user=cls.admin)
+        bundle_bytes = json.dumps(_make_fhir_bundle()).encode('utf-8')
+        fhir_file = io.BytesIO(bundle_bytes)
+        fhir_file.name = 'test_bundle.json'
+        _client.post('/api/patient-info/upload_fhir/', {'file': fhir_file}, format='multipart')
+        cls._person = Person.objects.filter(family_name='Smith', given_name='Jane').first()
+        assert cls._person is not None, 'Setup: person not found after upload'
+        cls._pid = cls._person.person_id
 
     # -- PatientInfo endpoint --------------------------------------------------
 
@@ -2041,3 +2046,149 @@ class ClientCredentialsTokenTest(TestCase):
         resp = self.client.get('/.well-known/smart-configuration')
         self.assertEqual(resp.status_code, 200)
         self.assertIn('client_credentials', resp.json()['grant_types_supported'])
+
+
+# ---------------------------------------------------------------------------
+# Multi-tenant isolation tests (HKI-SEC-04 / issue #36)
+# ---------------------------------------------------------------------------
+
+class MultiTenantIsolationTest(_SmartBase):
+    """Org-scoped tokens must not see another org's patients."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from oauth2_provider.models import Application, AccessToken
+        from omop_core.models import Organization, ApplicationOrganization
+        from django.utils import timezone as tz
+        import datetime
+
+        # Inherits vocab + app + tokens + person(70001) from _SmartBase
+        super().setUpTestData()
+
+        # --- Org A ---
+        cls.org_a = Organization.objects.create(name='Org A', slug='org-a')
+        cls.user_a = User.objects.create_user(username='svc_org_a', password='x')
+        cls.app_a = Application.objects.create(
+            name='Org A App',
+            client_id='org-a-client',
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS,
+            user=cls.user_a,
+        )
+        ApplicationOrganization.objects.create(application=cls.app_a, organization=cls.org_a)
+        cls.token_a = AccessToken.objects.create(
+            user=cls.user_a,
+            application=cls.app_a,
+            token='org-a-read-token',
+            expires=tz.now() + datetime.timedelta(hours=1),
+            scope='patient/*.read',
+        )
+
+        # --- Org B ---
+        cls.org_b = Organization.objects.create(name='Org B', slug='org-b')
+        cls.user_b = User.objects.create_user(username='svc_org_b', password='x')
+        cls.app_b = Application.objects.create(
+            name='Org B App',
+            client_id='org-b-client',
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS,
+            user=cls.user_b,
+        )
+        ApplicationOrganization.objects.create(application=cls.app_b, organization=cls.org_b)
+        cls.token_b = AccessToken.objects.create(
+            user=cls.user_b,
+            application=cls.app_b,
+            token='org-b-read-token',
+            expires=tz.now() + datetime.timedelta(hours=1),
+            scope='patient/*.read',
+        )
+
+        # --- Patients (person IDs distinct from _SmartBase's 70001) ---
+        cls.person_a = Person.objects.create(
+            person_id=80001,
+            given_name='Alice',
+            family_name='OrgA',
+            year_of_birth=1970,
+            gender_source_value='female',
+            race_source_value='unknown',
+            ethnicity_source_value='unknown',
+        )
+        cls.patient_a = PatientInfo.objects.create(
+            person=cls.person_a,
+            organization=cls.org_a,
+            disease='Breast Cancer',
+        )
+
+        cls.person_b = Person.objects.create(
+            person_id=80002,
+            given_name='Bob',
+            family_name='OrgB',
+            year_of_birth=1975,
+            gender_source_value='male',
+            race_source_value='unknown',
+            ethnicity_source_value='unknown',
+        )
+        cls.patient_b = PatientInfo.objects.create(
+            person=cls.person_b,
+            organization=cls.org_b,
+            disease='Lung Cancer',
+        )
+
+    def _client(self, token_str):
+        c = APIClient()
+        c.credentials(HTTP_AUTHORIZATION=f'Bearer {token_str}')
+        return c
+
+    def test_org_a_token_sees_only_org_a_patient_info(self):
+        """Org A token must not return Org B's PatientInfo records."""
+        resp = self._client(self.token_a.token).get('/api/patient-info/')
+        self.assertEqual(resp.status_code, 200)
+        ids = [p['id'] for p in resp.json()]
+        self.assertIn(self.patient_a.id, ids)
+        self.assertNotIn(self.patient_b.id, ids)
+
+    def test_org_b_token_sees_only_org_b_patient_info(self):
+        """Org B token must not return Org A's PatientInfo records."""
+        resp = self._client(self.token_b.token).get('/api/patient-info/')
+        self.assertEqual(resp.status_code, 200)
+        ids = [p['id'] for p in resp.json()]
+        self.assertIn(self.patient_b.id, ids)
+        self.assertNotIn(self.patient_a.id, ids)
+
+    def test_org_a_token_cannot_retrieve_org_b_patient_detail(self):
+        """Org A token must receive 404 for Org B's patient detail."""
+        resp = self._client(self.token_a.token).get(f'/api/patient-info/{self.patient_b.id}/')
+        self.assertEqual(resp.status_code, 404)
+
+    def test_org_a_token_sees_only_org_a_omop_conditions(self):
+        """Org A token must not see ConditionOccurrences belonging to Org B's patient."""
+        condition_concept = Concept.objects.get(concept_id=4112853)
+        type_concept = Concept.objects.get(concept_id=32817)
+        ConditionOccurrence.objects.create(
+            condition_occurrence_id=80101,
+            person=self.person_a,
+            condition_concept=condition_concept,
+            condition_start_date=date(2023, 1, 10),
+            condition_type_concept=type_concept,
+        )
+        ConditionOccurrence.objects.create(
+            condition_occurrence_id=80102,
+            person=self.person_b,
+            condition_concept=condition_concept,
+            condition_start_date=date(2023, 2, 15),
+            condition_type_concept=type_concept,
+        )
+        resp = self._client(self.token_a.token).get('/api/conditions/', {'person_id': 80002})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.json()), 0, "Org A must not see Org B's conditions even with explicit person_id")
+
+    def test_superuser_session_sees_all_patients(self):
+        """Superuser session auth bypasses org scoping and sees all patients."""
+        su = User.objects.create_superuser(username='su_iso', password='su_pass', email='su@test.com')
+        c = APIClient()
+        c.force_authenticate(user=su)
+        resp = c.get('/api/patient-info/')
+        self.assertEqual(resp.status_code, 200)
+        ids = [p['id'] for p in resp.json()]
+        self.assertIn(self.patient_a.id, ids)
+        self.assertIn(self.patient_b.id, ids)

@@ -34,9 +34,12 @@ class Command(BaseCommand):
                             help='OAuth2 client_secret (auto-generated if omitted)')
         parser.add_argument('--owner-username', dest='owner_username', default=None,
                             help='Django username to own the app (defaults to first superuser)')
+        parser.add_argument('--org', dest='org_slug', default=None,
+                            help='Organization slug to link this client to (for multi-tenant scoping)')
 
     def handle(self, *args, **options):
         from oauth2_provider.models import Application
+        from omop_core.models import Organization, ApplicationOrganization
 
         client_secret = options['client_secret'] or secrets.token_urlsafe(40)
 
@@ -57,6 +60,17 @@ class Command(BaseCommand):
                 ))
                 return
 
+        org = None
+        if options['org_slug']:
+            try:
+                org = Organization.objects.get(slug=options['org_slug'])
+            except Organization.DoesNotExist:
+                self.stderr.write(self.style.ERROR(
+                    f"Organization with slug '{options['org_slug']}' not found. "
+                    "Create it in the Django admin first."
+                ))
+                return
+
         app, created = Application.objects.update_or_create(
             client_id=options['client_id'],
             defaults={
@@ -68,14 +82,22 @@ class Command(BaseCommand):
             },
         )
 
+        if org is not None:
+            ApplicationOrganization.objects.update_or_create(
+                application=app,
+                defaults={'organization': org},
+            )
+
         verb = 'Created' if created else 'Updated'
+        org_line = f"  Organization: {org.name} ({org.slug})\n" if org else ""
         self.stdout.write(self.style.SUCCESS(
             f"{verb} service client:\n"
             f"  Name:        {app.name}\n"
             f"  client_id:   {app.client_id}\n"
             f"  client_secret: {client_secret}\n"
-            f"  Grant type:  client_credentials\n\n"
-            f"Token endpoint: POST /o/token/\n"
+            f"  Grant type:  client_credentials\n"
+            f"{org_line}"
+            f"\nToken endpoint: POST /o/token/\n"
             f"  grant_type=client_credentials\n"
             f"  client_id={app.client_id}\n"
             f"  client_secret=<secret>\n"

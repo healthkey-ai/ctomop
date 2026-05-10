@@ -3,7 +3,6 @@ from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from oauth2_provider.contrib.rest_framework import OAuth2Authentication
-from .permissions import ScopedTokenPermission
 from django.contrib.auth.models import User
 from django.contrib.auth import logout, login, authenticate
 from django.views.decorators.csrf import csrf_exempt
@@ -34,6 +33,7 @@ import csv
 import json
 import logging
 from io import StringIO
+from .permissions import ScopedTokenPermission, get_request_org
 from .serializers import (
     UserSerializer, PatientInfoSerializer, PatientListSerializer,
     ConditionOccurrenceSerializer, DrugExposureSerializer, MeasurementSerializer,
@@ -128,8 +128,12 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [ScopedTokenPermission]
     
     def get_queryset(self):
-        return PatientInfo.objects.all().select_related('person')
-    
+        qs = PatientInfo.objects.all().select_related('person')
+        org = get_request_org(self.request)
+        if org is not None:
+            qs = qs.filter(organization=org)
+        return qs
+
     def get_serializer_class(self):
         if self.action == 'list':
             return PatientListSerializer
@@ -1473,6 +1477,12 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                         'no_geographic_exposure_risk': no_geographic_exposure_risk if no_geographic_exposure_risk is not None else True,
                         'geographic_exposure_risk_details': geographic_exposure_risk_details,
                     }.items() if v is not None})
+                    # Stamp the org derived from the OAuth2 token so this patient
+                    # is scoped to the uploading service client's tenant.
+                    upload_org = get_request_org(request)
+                    if upload_org is not None:
+                        _patch['organization'] = upload_org
+
                     # Apply patch to PatientInfo (suppress signal-triggering save)
                     for _field, _val in _patch.items():
                         setattr(patient_info, _field, _val)
@@ -1621,12 +1631,17 @@ def auth_test(request):
 # =============================================================================
 
 class _OmopFilterMixin:
-    """Shared queryset filtering by person_id query param."""
+    """Filter by person_id query param and restrict to the requesting org's patients."""
     def get_queryset(self):
         qs = super().get_queryset()
         person_id = self.request.query_params.get('person_id')
         if person_id:
             qs = qs.filter(person_id=person_id)
+        org = get_request_org(self.request)
+        if org is not None:
+            from omop_core.models import PatientInfo
+            allowed = PatientInfo.objects.filter(organization=org).values_list('person_id', flat=True)
+            qs = qs.filter(person_id__in=allowed)
         return qs
 
 

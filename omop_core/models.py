@@ -1,5 +1,39 @@
 from django.db import models
 
+
+class Organization(models.Model):
+    """A tenant organization (hospital, foundation, analytics service) that owns patient records."""
+    name = models.CharField(max_length=200)
+    slug = models.SlugField(max_length=60, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'organization'
+
+    def __str__(self):
+        return self.name
+
+
+class ApplicationOrganization(models.Model):
+    """Links an OAuth2 Application to an Organization for multi-tenant scoping."""
+    application = models.OneToOneField(
+        'oauth2_provider.Application',
+        on_delete=models.CASCADE,
+        related_name='org_profile',
+    )
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name='applications',
+    )
+
+    class Meta:
+        db_table = 'application_organization'
+
+    def __str__(self):
+        return f"{self.application.name} → {self.organization.name}"
+
+
 class Vocabulary(models.Model):
     """OMOP CDM Vocabulary table - standardized vocabularies."""
     vocabulary_id = models.CharField(max_length=20, primary_key=True)
@@ -1139,6 +1173,16 @@ class PatientInfo(models.Model):
     phone_number = models.CharField(max_length=20, blank=True, null=True, help_text="Patient phone number")
     facility_name = models.CharField(max_length=255, blank=True, null=True, help_text="Treating institution name")
     prior_procedures = models.JSONField(blank=True, null=True, default=list, help_text="List of prior procedures from ProcedureOccurrence")
+
+    # Multi-tenant ownership
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='patients',
+        help_text="Owning organization — scopes API access for service clients",
+    )
 
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)

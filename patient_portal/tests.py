@@ -1974,6 +1974,40 @@ class SmartFhirUploadTest(_SmartBase):
         self.assertEqual(Measurement.objects.count(), measurement_count_after_first)
         self.assertEqual(ConditionOccurrence.objects.count(), condition_count_after_first)
 
+    def test_fhir_upload_response_includes_record_ids(self):
+        """Response must include per-patient breakdown of created OMOP record IDs."""
+        resp = self._upload('bundle_ids.json')
+        self.assertIn(resp.status_code, [200, 201])
+        data = resp.json()
+
+        self.assertIn('patients', data)
+        self.assertEqual(len(data['patients']), 1)
+
+        pt = data['patients'][0]
+        self.assertIn('person_id', pt)
+        self.assertIn('patient_info_id', pt)
+        self.assertIn('measurement_ids', pt)
+        self.assertIn('condition_ids', pt)
+        self.assertIn('drug_exposure_ids', pt)
+        self.assertIn('procedure_ids', pt)
+        self.assertIn('episode_ids', pt)
+        self.assertIn('episode_event_ids', pt)
+
+        # The bundle has 3 observations → ≥1 measurement, 1 condition, 2 drug exposures
+        self.assertGreater(len(pt['measurement_ids']), 0)
+        self.assertGreater(len(pt['condition_ids']), 0)
+        self.assertGreater(len(pt['drug_exposure_ids']), 0)
+
+        # Verify IDs actually exist in DB
+        person = Person.objects.get(person_id=pt['person_id'])
+        self.assertIsNotNone(person)
+        pi = PatientInfo.objects.get(pk=pt['patient_info_id'])
+        self.assertIsNotNone(pi)
+        for mid in pt['measurement_ids']:
+            self.assertTrue(Measurement.objects.filter(measurement_id=mid).exists())
+        for cid in pt['condition_ids']:
+            self.assertTrue(ConditionOccurrence.objects.filter(condition_occurrence_id=cid).exists())
+
 
 # ---------------------------------------------------------------------------
 # HKI-AUTH-01: client_credentials grant — service-to-service token acquisition

@@ -508,6 +508,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
             created_count = 0
             updated_count = 0
             errors = []
+            patients_result = []
 
             # Group resources by patient
             patients_data = {}
@@ -543,8 +544,15 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
             # Process each patient
             for fhir_patient_id, data in patients_data.items():
                 try:
+                    _pt_measurement_ids = []
+                    _pt_condition_ids = []
+                    _pt_drug_exposure_ids = []
+                    _pt_procedure_ids = []
+                    _pt_episode_ids = []
+                    _pt_episode_event_ids = []
+
                     patient_resource = data['patient']
-                    
+
                     # Generate new person_id
                     last_person = Person.objects.all().order_by('-person_id').first()
                     person_id = last_person.person_id + 1 if last_person else 1000
@@ -711,6 +719,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                 )
                                 _co._skip_patient_info_refresh = True
                                 _co.save()
+                                _pt_condition_ids.append(_co.condition_occurrence_id)
                                 if prov_source:
                                     _record_provenance(_co, prov_source, prov_user_id, modification_reason=prov_reason)
 
@@ -1264,6 +1273,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                 )
                                 _m._skip_patient_info_refresh = True
                                 _m.save()
+                                _pt_measurement_ids.append(_m.measurement_id)
                                 if prov_source:
                                     _record_provenance(_m, prov_source, prov_user_id, modification_reason=prov_reason)
                                 measurement_id += 1
@@ -1468,6 +1478,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                 )
                                 _de._skip_patient_info_refresh = True
                                 _de.save()
+                                _pt_drug_exposure_ids.append(_de.drug_exposure_id)
                                 if prov_source:
                                     _record_provenance(_de, prov_source, prov_user_id, modification_reason=prov_reason)
                                 drug_exposure_id += 1
@@ -1498,17 +1509,19 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                     episode_source_value=f'LOT-{lot_num}',
                                 )
                                 _ep.save()
+                                _pt_episode_ids.append(_ep.episode_id)
                                 episode_id_counter += 1
 
                             # Link drug exposure to episode (idempotent)
                             ee_field_concept = Concept.objects.filter(concept_id=1147094).first()
                             if ee_field_concept is None:
                                 ee_field_concept = regimen_concept
-                            EpisodeEvent.objects.get_or_create(
+                            _ee, _ = EpisodeEvent.objects.get_or_create(
                                 episode_id=_ep.episode_id,
                                 event_id=_de.drug_exposure_id,
                                 defaults={'episode_event_field_concept': ee_field_concept},
                             )
+                            _pt_episode_event_ids.append(_ee.pk)
                         except Exception as _e:
                             logger.warning(f"Could not write DrugExposure/Episode for LOT {lot_num}: {_e}")
 
@@ -1706,6 +1719,17 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     if prov_source:
                         _record_provenance(patient_info, prov_source, prov_user_id, modification_reason=prov_reason)
                     
+                    patients_result.append({
+                        'person_id': person.person_id,
+                        'patient_info_id': patient_info.pk,
+                        'measurement_ids': _pt_measurement_ids,
+                        'condition_ids': _pt_condition_ids,
+                        'drug_exposure_ids': _pt_drug_exposure_ids,
+                        'procedure_ids': _pt_procedure_ids,
+                        'episode_ids': _pt_episode_ids,
+                        'episode_event_ids': _pt_episode_event_ids,
+                    })
+
                     if person_is_new:
                         created_count += 1
                     else:
@@ -1719,7 +1743,8 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                 'success': True,
                 'created_count': created_count,
                 'updated_count': updated_count,
-                'errors': errors
+                'patients': patients_result,
+                'errors': errors,
             })
 
         except Exception as e:

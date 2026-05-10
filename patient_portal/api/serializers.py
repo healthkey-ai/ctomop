@@ -3,7 +3,7 @@ from django.contrib.auth.models import User
 from omop_core.models import (
     PatientInfo,
     ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
-    PatientDocument, PatientTrialEnrollment,
+    PatientDocument, PatientTrialEnrollment, ProvenanceRecord,
 )
 from omop_oncology.models import Episode, EpisodeEvent
 from datetime import date
@@ -150,3 +150,12 @@ class PatientTrialEnrollmentSerializer(serializers.ModelSerializer):
     class Meta:
         model = PatientTrialEnrollment
         fields = '__all__'
+
+
+class ProvenanceRecordSerializer(serializers.ModelSerializer):
+    record_type = serializers.CharField(source='content_type.model', read_only=True)
+
+    class Meta:
+        model = ProvenanceRecord
+        fields = ['id', 'source', 'source_user_id', 'target_patient_id',
+                  'modification_reason', 'created_at', 'record_type', 'object_id']

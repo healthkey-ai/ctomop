@@ -20,7 +20,7 @@ from rest_framework.test import APIClient
 
 from omop_core.models import (
     Concept, ConceptClass, Domain, Vocabulary,
-    Person, PatientInfo,
+    Person, PatientInfo, ProvenanceRecord,
     ConditionOccurrence, DrugExposure, Measurement, ProcedureOccurrence,
 )
 from omop_oncology.models import Episode, EpisodeEvent
@@ -2192,3 +2192,206 @@ class MultiTenantIsolationTest(_SmartBase):
         ids = [p['id'] for p in resp.json()]
         self.assertIn(self.patient_a.id, ids)
         self.assertIn(self.patient_b.id, ids)
+
+
+# ---------------------------------------------------------------------------
+# PatientInfo PATCH write-through tests (HKI-PDS-01 / issue #59)
+# ---------------------------------------------------------------------------
+
+class PatientInfoPatchWriteThroughTest(_SmartBase):
+    """PATCH /api/patient-info/{person_id}/ must update PatientInfo AND create a Measurement."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.patient_info = PatientInfo.objects.create(
+            person=cls.person,
+            disease='Breast Cancer',
+        )
+
+    def test_patch_updates_patient_info(self):
+        """PATCH updates the PatientInfo field value."""
+        resp = self.write_client.patch(
+            f'/api/patient-info/{self.person.person_id}/',
+            {'hemoglobin_g_dl': '12.5'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.patient_info.refresh_from_db()
+        self.assertAlmostEqual(float(self.patient_info.hemoglobin_g_dl), 12.5, places=1)
+
+    def test_patch_creates_measurement_record(self):
+        """PATCH a lab field creates a Measurement row with the correct LOINC concept."""
+        resp = self.write_client.patch(
+            f'/api/patient-info/{self.person.person_id}/',
+            {'hemoglobin_g_dl': '11.0'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        m = Measurement.objects.filter(
+            person=self.person,
+            measurement_source_value__icontains='Hemoglobin',
+        ).first()
+        self.assertIsNotNone(m, 'No Measurement record created for hemoglobin_g_dl patch')
+        self.assertAlmostEqual(float(m.value_as_number), 11.0, places=1)
+
+    def test_patch_upserts_existing_measurement(self):
+        """Patching the same field twice updates the existing Measurement rather than duplicating it."""
+        self.write_client.patch(
+            f'/api/patient-info/{self.person.person_id}/',
+            {'wbc_count_thousand_per_ul': '5.0'},
+            format='json',
+        )
+        self.write_client.patch(
+            f'/api/patient-info/{self.person.person_id}/',
+            {'wbc_count_thousand_per_ul': '6.2'},
+            format='json',
+        )
+        count = Measurement.objects.filter(
+            person=self.person,
+            measurement_source_value__icontains='Leukocytes',
+        ).count()
+        self.assertEqual(count, 1, 'Duplicate Measurement rows created on second patch')
+        m = Measurement.objects.get(
+            person=self.person,
+            measurement_source_value__icontains='Leukocytes',
+        )
+        self.assertAlmostEqual(float(m.value_as_number), 6.2, places=1)
+
+    def test_patch_non_lab_field_does_not_create_measurement(self):
+        """Patching a non-lab field (e.g. disease) must not create a Measurement row."""
+        before = Measurement.objects.filter(person=self.person).count()
+        self.write_client.patch(
+            f'/api/patient-info/{self.person.person_id}/',
+            {'disease': 'Lung Cancer'},
+            format='json',
+        )
+        after = Measurement.objects.filter(person=self.person).count()
+        self.assertEqual(before, after)
+
+    def test_patch_requires_write_scope(self):
+        """Read-only token must be rejected with 403."""
+        resp = self.read_client.patch(
+            f'/api/patient-info/{self.person.person_id}/',
+            {'hemoglobin_g_dl': '10.0'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 403)
+
+
+# ---------------------------------------------------------------------------
+# Provenance tests (HKI-PDS-01 / issues #57 + #61)
+# ---------------------------------------------------------------------------
+
+class ProvenancePatchTest(_SmartBase):
+    """PATCH with provenance headers creates ProvenanceRecord entries."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.patient_info = PatientInfo.objects.create(
+            person=cls.person,
+            disease='Breast Cancer',
+        )
+
+    def test_patch_with_source_creates_provenance_for_patient_info(self):
+        resp = self.write_client.patch(
+            f'/api/patient-info/{self.person.person_id}/',
+            {'disease': 'Lung Cancer', 'source': 'EHR_SYNC', 'source_user_id': 'svc-123'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        p = ProvenanceRecord.objects.filter(
+            object_id=self.patient_info.pk,
+        ).first()
+        self.assertIsNotNone(p)
+        self.assertEqual(p.source, 'EHR_SYNC')
+        self.assertEqual(p.source_user_id, 'svc-123')
+
+    def test_patch_with_source_creates_provenance_for_measurement(self):
+        self.write_client.patch(
+            f'/api/patient-info/{self.person.person_id}/',
+            {'hemoglobin_g_dl': '13.0', 'source': 'PATIENT_SELF'},
+            format='json',
+        )
+        m = Measurement.objects.filter(
+            person=self.person,
+            measurement_source_value__icontains='Hemoglobin',
+        ).first()
+        self.assertIsNotNone(m)
+        p = ProvenanceRecord.objects.filter(object_id=m.pk).first()
+        self.assertIsNotNone(p)
+        self.assertEqual(p.source, 'PATIENT_SELF')
+
+    def test_patch_without_source_creates_no_provenance(self):
+        before = ProvenanceRecord.objects.count()
+        self.write_client.patch(
+            f'/api/patient-info/{self.person.person_id}/',
+            {'disease': 'CLL'},
+            format='json',
+        )
+        self.assertEqual(ProvenanceRecord.objects.count(), before)
+
+    def test_admin_correction_requires_modification_reason(self):
+        resp = self.write_client.patch(
+            f'/api/patient-info/{self.person.person_id}/',
+            {'disease': 'CLL', 'source': 'ADMIN_CORRECTION'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('modification_reason', resp.json().get('error', ''))
+
+    def test_admin_correction_with_reason_succeeds(self):
+        resp = self.write_client.patch(
+            f'/api/patient-info/{self.person.person_id}/',
+            {'disease': 'CLL', 'source': 'ADMIN_CORRECTION', 'modification_reason': 'Correcting misdiagnosis'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        p = ProvenanceRecord.objects.filter(object_id=self.patient_info.pk).first()
+        self.assertIsNotNone(p)
+        self.assertEqual(p.modification_reason, 'Correcting misdiagnosis')
+
+    def test_provenance_endpoint_returns_history(self):
+        self.write_client.patch(
+            f'/api/patient-info/{self.person.person_id}/',
+            {'disease': 'Myeloma', 'source': 'EHR_SYNC', 'source_user_id': 'ehr-456'},
+            format='json',
+        )
+        resp = self.read_client.get(f'/api/patient-info/{self.person.person_id}/provenance/')
+        self.assertEqual(resp.status_code, 200)
+        sources = [r['source'] for r in resp.json()]
+        self.assertIn('EHR_SYNC', sources)
+
+
+class ProvenanceFhirUploadTest(_SmartBase):
+    """FHIR upload with provenance headers tags all created OMOP records."""
+
+    def test_fhir_upload_with_ehr_sync_tags_records(self):
+        bundle_bytes = json.dumps(_make_fhir_bundle()).encode('utf-8')
+        fhir_file = io.BytesIO(bundle_bytes)
+        fhir_file.name = 'bundle.json'
+        resp = self.write_client.post(
+            '/api/patient-info/upload_fhir/',
+            {'file': fhir_file, 'source': 'EHR_SYNC', 'source_user_id': 'ehr-001'},
+            format='multipart',
+        )
+        self.assertIn(resp.status_code, [200, 201])
+        person = Person.objects.filter(family_name='Smith', given_name='Jane').first()
+        self.assertIsNotNone(person)
+        pi = PatientInfo.objects.get(person=person)
+        self.assertTrue(
+            ProvenanceRecord.objects.filter(object_id=pi.pk).exists(),
+            'PatientInfo was not tagged with provenance',
+        )
+
+    def test_fhir_upload_admin_correction_without_reason_rejected(self):
+        bundle_bytes = json.dumps(_make_fhir_bundle()).encode('utf-8')
+        fhir_file = io.BytesIO(bundle_bytes)
+        fhir_file.name = 'bundle.json'
+        resp = self.write_client.post(
+            '/api/patient-info/upload_fhir/',
+            {'file': fhir_file, 'source': 'ADMIN_CORRECTION'},
+            format='multipart',
+        )
+        self.assertEqual(resp.status_code, 400)

@@ -9,8 +9,9 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.utils import timezone
 from django.conf import settings
+from django.contrib.contenttypes.models import ContentType
 from omop_core.models import (
-    Person, PatientInfo, Concept,
+    Person, PatientInfo, Concept, ProvenanceRecord,
     ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
     PatientDocument, PatientTrialEnrollment,
     # Controlled vocabulary lookup models
@@ -35,7 +36,7 @@ import logging
 from io import StringIO
 from .permissions import ScopedTokenPermission, get_request_org
 from .serializers import (
-    UserSerializer, PatientInfoSerializer, PatientListSerializer,
+    UserSerializer, PatientInfoSerializer, PatientListSerializer, ProvenanceRecordSerializer,
     ConditionOccurrenceSerializer, DrugExposureSerializer, MeasurementSerializer,
     ObservationSerializer, ProcedureOccurrenceSerializer,
     EpisodeSerializer, EpisodeEventSerializer,
@@ -122,6 +123,128 @@ class CurrentUserViewSet(viewsets.ViewSet):
             'user': user_serializer.data
         })
 
+# Maps PatientInfo field name → (LOINC code, unit string, display name)
+# Used by partial_update to write through to the OMOP Measurement table.
+_LAB_FIELD_TO_LOINC = {
+    # Blood counts
+    'hemoglobin_g_dl':               ('718-7',    'g/dL',            'Hemoglobin [Mass/volume] in Blood'),
+    'hematocrit_percent':            ('20570-8',  '%',               'Hematocrit [Volume Fraction] of Blood'),
+    'wbc_count_thousand_per_ul':     ('6690-2',   '10*3/uL',         'Leukocytes [#/volume] in Blood'),
+    'rbc_million_per_ul':            ('789-8',    '10*6/uL',         'Erythrocytes [#/volume] in Blood'),
+    'platelet_count_thousand_per_ul':('777-3',    '10*3/uL',         'Platelets [#/volume] in Blood'),
+    'anc_thousand_per_ul':           ('751-8',    '10*3/uL',         'Neutrophils [#/volume] in Blood'),
+    'alc_thousand_per_ul':           ('731-0',    '10*3/uL',         'Lymphocytes [#/volume] in Blood'),
+    'amc_thousand_per_ul':           ('742-7',    '10*3/uL',         'Monocytes [#/volume] in Blood'),
+    # Kidney / electrolytes
+    'serum_creatinine_mg_dl':        ('2160-0',   'mg/dL',           'Creatinine [Mass/volume] in Serum or Plasma'),
+    'creatinine_mg_dl':              ('2160-0',   'mg/dL',           'Creatinine [Mass/volume] in Serum or Plasma'),
+    'serum_calcium_mg_dl':           ('17861-6',  'mg/dL',           'Calcium [Mass/volume] in Serum or Plasma'),
+    'calcium_mg_dl':                 ('17861-6',  'mg/dL',           'Calcium [Mass/volume] in Serum or Plasma'),
+    'egfr_ml_min_173m2':             ('62238-1',  'mL/min/1.73m2',   'GFR/BSA pred CKD-EPI ArA'),
+    'egfr':                          ('62238-1',  'mL/min/1.73m2',   'GFR/BSA pred CKD-EPI ArA'),
+    'bun_mg_dl':                     ('3094-0',   'mg/dL',           'Urea nitrogen [Mass/volume] in Serum or Plasma'),
+    'blood_urea_nitrogen':           ('3094-0',   'mg/dL',           'Urea nitrogen [Mass/volume] in Serum or Plasma'),
+    'sodium_meq_l':                  ('2951-2',   'mEq/L',           'Sodium [Moles/volume] in Serum or Plasma'),
+    'serum_sodium':                  ('2951-2',   'mEq/L',           'Sodium [Moles/volume] in Serum or Plasma'),
+    'potassium_meq_l':               ('2823-3',   'mEq/L',           'Potassium [Moles/volume] in Serum or Plasma'),
+    'serum_potassium':               ('2823-3',   'mEq/L',           'Potassium [Moles/volume] in Serum or Plasma'),
+    'magnesium_mg_dl':               ('2601-3',   'mg/dL',           'Magnesium [Mass/volume] in Serum or Plasma'),
+    'magnesium':                     ('2601-3',   'mg/dL',           'Magnesium [Mass/volume] in Serum or Plasma'),
+    'phosphorus':                    ('2777-1',   'mg/dL',           'Phosphate [Mass/volume] in Serum or Plasma'),
+    # Liver function
+    'bilirubin_total_mg_dl':         ('1975-2',   'mg/dL',           'Bilirubin.total [Mass/volume] in Serum or Plasma'),
+    'alt_u_l':                       ('1742-6',   'U/L',             'Alanine aminotransferase [Enzymatic activity/volume] in Serum or Plasma'),
+    'ast_u_l':                       ('1920-8',   'U/L',             'Aspartate aminotransferase [Enzymatic activity/volume] in Serum or Plasma'),
+    'alkaline_phosphatase_u_l':      ('6768-6',   'U/L',             'Alkaline phosphatase [Enzymatic activity/volume] in Serum or Plasma'),
+    'alkaline_phosphatase':          ('6768-6',   'U/L',             'Alkaline phosphatase [Enzymatic activity/volume] in Serum or Plasma'),
+    'albumin_g_dl':                  ('1751-7',   'g/dL',            'Albumin [Mass/volume] in Serum or Plasma'),
+    'glucose_mg_dl':                 ('2345-7',   'mg/dL',           'Glucose [Mass/volume] in Serum or Plasma'),
+    'hba1c_percent':                 ('4548-4',   '%',               'Hemoglobin A1c/Hemoglobin.total in Blood'),
+    'inr':                           ('6301-6',   '{INR}',           'INR in Platelet poor plasma'),
+    'pt_seconds':                    ('5902-2',   's',               'Prothrombin time (PT)'),
+    'ptt_seconds':                   ('3173-2',   's',               'aPTT in Platelet poor plasma'),
+    # Oncology markers
+    'ldh_u_l':                       ('2532-0',   'U/L',             'Lactate dehydrogenase [Enzymatic activity/volume] in Serum or Plasma'),
+    'ldh_level':                     ('2532-0',   'U/L',             'Lactate dehydrogenase [Enzymatic activity/volume] in Serum or Plasma'),
+    'ldh':                           ('2532-0',   'U/L',             'Lactate dehydrogenase [Enzymatic activity/volume] in Serum or Plasma'),
+    'beta2_microglobulin':           ('1952-1',   'mg/L',            'Beta-2-Microglobulin [Mass/volume] in Serum or Plasma'),
+    'c_reactive_protein':            ('1988-5',   'mg/L',            'C reactive protein [Mass/volume] in Serum or Plasma'),
+    'esr':                           ('30341-2',  'mm/h',            'Erythrocyte sedimentation rate'),
+    'ki67_proliferation_index':      ('85319-2',  '%',               'Ki-67 Ag [Presence] in Tissue by Immune stain'),
+    # Vital signs
+    'weight':                        ('29463-7',  'kg',              'Body weight'),
+    'height':                        ('8302-2',   'cm',              'Body height'),
+    'systolic_blood_pressure':       ('8480-6',   'mm[Hg]',          'Systolic blood pressure'),
+    'diastolic_blood_pressure':      ('8462-4',   'mm[Hg]',          'Diastolic blood pressure'),
+    'heartrate':                     ('8867-4',   '/min',            'Heart rate'),
+    # Performance status
+    'ecog_performance_status':       ('89247-1',  '{score}',         'ECOG Performance Status score'),
+    'karnofsky_performance_score':   ('89243-0',  '{score}',         'Karnofsky Performance Status score'),
+}
+
+
+def _upsert_omop_measurement(person, field_name, value, today):
+    """Create or update a Measurement row for a single PatientInfo lab/vital field."""
+    loinc_code, unit, display = _LAB_FIELD_TO_LOINC[field_name]
+    concept = (
+        Concept.objects.filter(concept_code=loinc_code, vocabulary_id='LOINC').first()
+        or Concept.objects.filter(concept_id=3000963).first()
+    )
+    if concept is None:
+        return
+    type_concept = Concept.objects.filter(concept_id=32856).first() or concept
+    existing = Measurement.objects.filter(
+        person=person,
+        measurement_concept=concept,
+        measurement_date=today,
+    ).first()
+    if existing:
+        existing.value_as_number = value
+        existing._skip_patient_info_refresh = True
+        existing.save(update_fields=['value_as_number'])
+    else:
+        last = Measurement.objects.order_by('-measurement_id').first()
+        new_id = (last.measurement_id + 1) if last else 1
+        m = Measurement(
+            measurement_id=new_id,
+            person=person,
+            measurement_concept=concept,
+            measurement_date=today,
+            measurement_type_concept=type_concept,
+            value_as_number=value,
+            measurement_source_value=display[:50],
+            unit_source_value=unit,
+        )
+        m._skip_patient_info_refresh = True
+        m.save()
+
+
+def _extract_provenance(request):
+    """Return (source, source_user_id, modification_reason) from headers or POST body."""
+    source = (
+        request.data.get('source')
+        or request.META.get('HTTP_X_PROVENANCE_SOURCE')
+    )
+    source_user_id = (
+        request.data.get('source_user_id')
+        or request.META.get('HTTP_X_PROVENANCE_USER_ID', '')
+    )
+    modification_reason = request.data.get('modification_reason')
+    return source, source_user_id, modification_reason
+
+
+def _record_provenance(record, source, source_user_id, target_patient_id=None, modification_reason=None):
+    """Create a ProvenanceRecord pointing at any model instance."""
+    ProvenanceRecord.objects.create(
+        source=source,
+        source_user_id=source_user_id or '',
+        target_patient_id=target_patient_id,
+        modification_reason=modification_reason,
+        content_type=ContentType.objects.get_for_model(record),
+        object_id=record.pk,
+    )
+
+
 @method_decorator(csrf_exempt, name='dispatch')
 class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = PatientInfoSerializer
@@ -202,7 +325,87 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
         except PatientInfo.DoesNotExist:
             return Response({'error': 'Patient information not found'}, status=status.HTTP_404_NOT_FOUND)
-    
+
+    def partial_update(self, request, pk=None):
+        """PATCH /api/patient-info/{person_id}/ — update PatientInfo and write through to OMOP."""
+        try:
+            person = Person.objects.get(person_id=pk)
+            patient_info = PatientInfo.objects.get(person=person)
+        except Person.DoesNotExist:
+            return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+        except PatientInfo.DoesNotExist:
+            return Response({'error': 'Patient information not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        org = get_request_org(request)
+        if org is not None and patient_info.organization != org:
+            return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        prov_source, prov_user_id, prov_reason = _extract_provenance(request)
+        if prov_source == 'ADMIN_CORRECTION' and not prov_reason:
+            return Response(
+                {'error': 'modification_reason is required when source is ADMIN_CORRECTION'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = PatientInfoSerializer(patient_info, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+
+        if prov_source:
+            _record_provenance(patient_info, prov_source, prov_user_id, modification_reason=prov_reason)
+
+        today = datetime.now().date()
+        for field, value in request.data.items():
+            if field in _LAB_FIELD_TO_LOINC and value is not None:
+                try:
+                    m_before = Measurement.objects.filter(
+                        person=person,
+                        measurement_source_value=_LAB_FIELD_TO_LOINC[field][2][:50],
+                        measurement_date=today,
+                    ).first()
+                    _upsert_omop_measurement(person, field, value, today)
+                    if prov_source:
+                        m_after = Measurement.objects.filter(
+                            person=person,
+                            measurement_source_value=_LAB_FIELD_TO_LOINC[field][2][:50],
+                            measurement_date=today,
+                        ).first()
+                        if m_after:
+                            _record_provenance(m_after, prov_source, prov_user_id, modification_reason=prov_reason)
+                except Exception:
+                    pass
+
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['get'])
+    def provenance(self, request, pk=None):
+        """GET /api/patient-info/{person_id}/provenance/ — full provenance history for a patient."""
+        try:
+            person = Person.objects.get(person_id=pk)
+            patient_info = PatientInfo.objects.get(person=person)
+        except Person.DoesNotExist:
+            return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+        except PatientInfo.DoesNotExist:
+            return Response({'error': 'Patient information not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        org = get_request_org(request)
+        if org is not None and patient_info.organization != org:
+            return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        records = list(ProvenanceRecord.objects.filter(
+            content_type=ContentType.objects.get_for_model(PatientInfo),
+            object_id=patient_info.pk,
+        ))
+        for model_cls in [Measurement, ConditionOccurrence, DrugExposure, ProcedureOccurrence]:
+            omop_ids = list(model_cls.objects.filter(person_id=person.person_id).values_list('pk', flat=True))
+            if omop_ids:
+                records += list(ProvenanceRecord.objects.filter(
+                    content_type=ContentType.objects.get_for_model(model_cls),
+                    object_id__in=omop_ids,
+                ))
+        records.sort(key=lambda r: r.created_at, reverse=True)
+        return Response(ProvenanceRecordSerializer(records, many=True).data)
+
     @action(detail=False, methods=['post'])
     def upload_csv(self, request):
         """Upload patients from CSV file"""
@@ -291,10 +494,17 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
         
         try:
             fhir_data = json.load(file)
-            
+
             if fhir_data.get('resourceType') != 'Bundle':
                 return Response({'error': 'FHIR file must be a Bundle'}, status=status.HTTP_400_BAD_REQUEST)
-            
+
+            prov_source, prov_user_id, prov_reason = _extract_provenance(request)
+            if prov_source == 'ADMIN_CORRECTION' and not prov_reason:
+                return Response(
+                    {'error': 'modification_reason is required when source is ADMIN_CORRECTION'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
             created_count = 0
             updated_count = 0
             errors = []
@@ -501,7 +711,9 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                 )
                                 _co._skip_patient_info_refresh = True
                                 _co.save()
-                    
+                                if prov_source:
+                                    _record_provenance(_co, prov_source, prov_user_id, modification_reason=prov_reason)
+
                     # Process observations and create Measurement records
                     from omop_core.models import Measurement
                     last_measurement = Measurement.objects.all().order_by('-measurement_id').first()
@@ -1052,6 +1264,8 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                 )
                                 _m._skip_patient_info_refresh = True
                                 _m.save()
+                                if prov_source:
+                                    _record_provenance(_m, prov_source, prov_user_id, modification_reason=prov_reason)
                                 measurement_id += 1
                     
                     # Extract therapy information from MedicationStatement resources
@@ -1254,6 +1468,8 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                                 )
                                 _de._skip_patient_info_refresh = True
                                 _de.save()
+                                if prov_source:
+                                    _record_provenance(_de, prov_source, prov_user_id, modification_reason=prov_reason)
                                 drug_exposure_id += 1
 
                             # Upsert Episode for this LOT
@@ -1487,6 +1703,8 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     for _field, _val in _patch.items():
                         setattr(patient_info, _field, _val)
                     patient_info.save()
+                    if prov_source:
+                        _record_provenance(patient_info, prov_source, prov_user_id, modification_reason=prov_reason)
                     
                     if person_is_new:
                         created_count += 1

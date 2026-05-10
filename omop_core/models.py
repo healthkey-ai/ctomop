@@ -1,4 +1,32 @@
 from django.db import models
+from django.contrib.contenttypes.fields import GenericForeignKey
+from django.contrib.contenttypes.models import ContentType
+
+
+class ProvenanceRecord(models.Model):
+    """Audit trail for every clinical write — who created/modified a record and why."""
+    SOURCE_CHOICES = [
+        ('PATIENT_SELF',        'Patient self-entry'),
+        ('ADMIN_CORRECTION',    'Admin on-behalf modification'),
+        ('EHR_SYNC',            'EHR system sync'),
+        ('DOCUMENT_EXTRACTION', 'AI document extraction'),
+    ]
+    source = models.CharField(max_length=50, choices=SOURCE_CHOICES)
+    source_user_id = models.CharField(max_length=255, blank=True, default='')
+    target_patient_id = models.CharField(max_length=255, null=True, blank=True)
+    modification_reason = models.TextField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    content_type = models.ForeignKey(ContentType, on_delete=models.CASCADE)
+    object_id = models.PositiveBigIntegerField()
+    content_object = GenericForeignKey('content_type', 'object_id')
+
+    class Meta:
+        db_table = 'provenance_record'
+        indexes = [models.Index(fields=['content_type', 'object_id'])]
+
+    def __str__(self):
+        return f"{self.source} → {self.content_type} #{self.object_id}"
 
 
 class Organization(models.Model):

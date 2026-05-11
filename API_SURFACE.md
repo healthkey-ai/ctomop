@@ -5,16 +5,47 @@
 
 ---
 
+## Architecture: OMOP-first, PatientInfo is read-only
+
+**The authoritative clinical record lives in OMOP tables.**
+
+```
+Client writes → OMOP tables (Measurement, ConditionOccurrence, DrugExposure, …)
+                     │
+                     └── post_save / post_delete signal fires automatically
+                               │
+                               └── refresh_patient_info(person)
+                                       re-derives PatientInfo from OMOP
+                                       PatientInfo.save()
+```
+
+`PatientInfo` is a **denormalized read model**. Callers must not write to it directly. It is regenerated automatically whenever any OMOP record for that patient is saved or deleted.
+
+The two sanctioned write paths are:
+
+| Path | Use case |
+|---|---|
+| `POST /api/patient-info/upload_fhir/` | Bulk ingest from an EHR / FHIR R4 Bundle |
+| `POST/PATCH/DELETE /api/conditions/`, `/api/measurements/`, etc. | Granular OMOP record writes |
+
+The convenience `PATCH /api/patient-info/{person_id}/` endpoint exists for field-level UI updates. It does **not** write to PatientInfo directly — it translates each field into the appropriate OMOP table write (lab/vital fields → `measurement`, others pending OMOP modelling), then the signal chain re-derives PatientInfo.
+
+---
+
 ## Table of contents
 
 1. [Authentication & authorization](#authentication--authorization)
-2. [PatientInfo endpoints](#patientinfo-endpoints)
-3. [OMOP clinical event endpoints](#omop-clinical-event-endpoints)
+2. [PatientInfo read endpoints](#patientinfo-read-endpoints)
+3. [OMOP write endpoints](#omop-write-endpoints)
+   - [PATCH /api/patient-info/{person_id}/ — field update convenience](#patch-apipatient-infoperson_id--field-update-convenience)
+   - [POST /api/patient-info/upload_fhir/](#post-apipatient-infoupload_fhir)
+   - [DELETE /api/patient-info/bulk_delete/](#delete-apipatient-infobulk_delete)
+   - [OMOP clinical event endpoints](#omop-clinical-event-endpoints)
 4. [Document & trial endpoints](#document--trial-endpoints)
 5. [Vocabulary endpoint](#vocabulary-endpoint)
 6. [OAuth2 endpoints](#oauth2-endpoints)
-7. [OMOP write paths](#omop-write-paths)
-   - [PATCH write-through: _upsert_omop_measurement](#patch-write-through-_upsert_omop_measurement)
+7. [OMOP write internals](#omop-write-internals)
+   - [_upsert_omop_measurement](#_upsert_omop_measurement)
    - [_LAB_FIELD_TO_LOINC mapping](#_lab_field_to_loinc-mapping)
    - [FHIR upload pipeline](#fhir-upload-pipeline)
    - [refresh_patient_info signal chain](#refresh_patient_info-signal-chain)
@@ -25,7 +56,7 @@
 
 ## Authentication & authorization
 
-All endpoints require authentication. Two paths are supported.
+All endpoints require authentication.
 
 ### Session auth (admin UI / browser)
 
@@ -46,7 +77,9 @@ Grant type: `client_credentials` via `POST /o/token/`
 
 ---
 
-## PatientInfo endpoints
+## PatientInfo read endpoints
+
+`PatientInfo` is a read-only projection of the OMOP tables for a patient. Do not attempt to write clinical data here — write to the OMOP tables instead and PatientInfo will update automatically.
 
 Base path: `/api/patient-info/`
 URL parameter `{person_id}` is `Person.person_id` (integer).
@@ -77,9 +110,11 @@ Org-scoped tokens see only patients where `PatientInfo.organization` matches. Su
 
 ### GET /api/patient-info/{person_id}/
 
-Full detail for a single patient.
+Full derived summary for a single patient.
 
 Returns **404** if the caller's org does not own this patient (AUTH-04 row-level scoping).
+
+All field values originate from OMOP tables and are kept current by the signal chain. Do not rely on this endpoint to reflect a write to PatientInfo directly — write to the appropriate OMOP table first.
 
 **Response 200**
 ```json
@@ -108,9 +143,38 @@ Returns **404** if the caller's org does not own this patient (AUTH-04 row-level
 
 ---
 
-### PATCH /api/patient-info/{person_id}/
+### GET /api/patient-info/{person_id}/provenance/
 
-Partially updates a patient. **Lab and vital fields are written through to the OMOP Measurement table** in addition to PatientInfo (HKI-PDS-01).
+Audit trail: all ProvenanceRecords linked to the patient's PatientInfo row and every OMOP record for that person.
+
+**Response 200**
+```json
+[
+  {
+    "id": 7,
+    "source": "EHR_SYNC",
+    "source_user_id": "",
+    "modification_reason": null,
+    "created_at": "2026-05-10T14:32:00Z",
+    "record_type": "measurement",
+    "object_id": 23
+  }
+]
+```
+
+---
+
+## OMOP write endpoints
+
+These are the sanctioned paths for modifying clinical data. All writes ultimately land in OMOP tables; PatientInfo is regenerated automatically by the signal chain.
+
+---
+
+### PATCH /api/patient-info/{person_id}/ — field update convenience
+
+A UI convenience endpoint that accepts PatientInfo field names and **translates them into OMOP table writes**. PatientInfo is **not** written to directly — the signal chain re-derives it after the OMOP write completes.
+
+Returns **403** if patient's org ≠ caller's org.
 
 **Request body** (all fields optional)
 ```json
@@ -128,52 +192,23 @@ Partially updates a patient. **Lab and vital fields are written through to the O
 
 `modification_reason` is **required** when `source == ADMIN_CORRECTION` — omitting it returns **400**.
 
-**OMOP write side-effects**
+**What actually gets written**
 
 For every field in [`_LAB_FIELD_TO_LOINC`](#_lab_field_to_loinc-mapping) present in the request body:
 
-1. `_upsert_omop_measurement(person, field_name, value, today)` — creates or updates a row in the `measurement` table.
-2. If `source` is present, a `ProvenanceRecord` is created for both the PatientInfo update and the Measurement row.
+1. `_upsert_omop_measurement(person, field_name, value, today)` writes or updates a row in the `measurement` table.
+2. `refresh_patient_info(person)` then re-derives PatientInfo from the updated Measurement rows.
+3. If `source` is present, ProvenanceRecords are created for the Measurement row(s).
 
-Returns **403** if patient's org ≠ caller's org.
+Fields not yet modelled in OMOP (some behavioral/socioeconomic fields) are patched directly on PatientInfo as a temporary measure until they have a proper OMOP home. This is a transitional state; those fields will move to OMOP tables over time.
 
-**Response 200** — full updated PatientInfo.
-
----
-
-### GET /api/patient-info/{person_id}/provenance/
-
-Audit trail: all ProvenanceRecords linked to this patient's PatientInfo row and every OMOP record for that person.
-
-**Response 200**
-```json
-[
-  {
-    "id": 7,
-    "source": "EHR_SYNC",
-    "source_user_id": "",
-    "modification_reason": null,
-    "created_at": "2026-05-10T14:32:00Z",
-    "record_type": "patientinfo",
-    "object_id": 1
-  },
-  {
-    "id": 8,
-    "source": "EHR_SYNC",
-    "source_user_id": "",
-    "modification_reason": null,
-    "created_at": "2026-05-10T14:32:00Z",
-    "record_type": "measurement",
-    "object_id": 23
-  }
-]
-```
+**Response 200** — PatientInfo as re-derived from OMOP after the write.
 
 ---
 
 ### POST /api/patient-info/upload_fhir/
 
-Bulk-ingests one or more patients from a FHIR R4 Bundle. Primary write path for EHR integration.
+Bulk-ingests one or more patients from a FHIR R4 Bundle. All data is written to OMOP tables; PatientInfo is derived from those records, never written to directly.
 
 **Request** — `multipart/form-data`
 
@@ -204,21 +239,16 @@ Bulk-ingests one or more patients from a FHIR R4 Bundle. Primary write path for 
 
 **OMOP tables written per FHIR resource**
 
-| FHIR resource | OMOP table(s) | Upsert key |
+| FHIR resource | OMOP table(s) written | Upsert key |
 |---|---|---|
 | `Patient` | `person`, `users_user` | given_name + family_name + year_of_birth |
 | `Condition` | `condition_occurrence` | person + condition_concept + start_date |
 | `Observation` | `measurement` | person + measurement_concept + date |
 | `MedicationStatement` | `drug_exposure`, `episode`, `episode_event` | person + regimen + start_date |
 
-Observation → Concept lookup order:
-1. LOINC code → `Concept WHERE concept_code = loinc_code AND vocabulary_id = 'LOINC'`
-2. Observation text → `Concept WHERE concept_name ILIKE obs_name[:50]`
-3. Fallback → `Concept WHERE concept_id = 3000963` (generic lab result)
+PatientInfo is **not** a write target. After all OMOP records are saved, `refresh_patient_info(person)` is called explicitly to rebuild PatientInfo from those records. The uploading token's org is stamped on `PatientInfo.organization` at this point.
 
-After all OMOP records are written, `refresh_patient_info(person)` re-derives the PatientInfo from OMOP tables. Fields not yet modelled in OMOP (behavioral, socioeconomic, some staging flags) are patched directly. The uploading token's org is stamped on `PatientInfo.organization`.
-
-**Response 200** (HKI-FHIR-02 — record IDs returned for reconciliation)
+**Response 200** (HKI-FHIR-02 — OMOP record IDs returned for reconciliation)
 ```json
 {
   "success": true,
@@ -244,7 +274,7 @@ After all OMOP records are written, `refresh_patient_info(person)` re-derives th
 
 ### DELETE /api/patient-info/bulk_delete/
 
-Deletes patients and all their OMOP records (via CASCADE).
+Deletes patients and all their OMOP records (via CASCADE). PatientInfo is removed as a cascade consequence.
 
 **Request body**
 ```json
@@ -258,15 +288,15 @@ Deletes patients and all their OMOP records (via CASCADE).
 
 ---
 
-## OMOP clinical event endpoints
+### OMOP clinical event endpoints
+
+These are the direct OMOP write endpoints. They are the canonical way to create, update, or delete individual clinical records. Every write fires a signal that automatically re-derives PatientInfo.
 
 All use `_OmopFilterMixin`:
 - `?person_id=X` filters rows to a single patient.
 - Org-scoped tokens only see rows whose patient belongs to that org.
 
-Writing to any of these tables fires a `post_save`/`post_delete` signal that calls `refresh_patient_info(person)`.
-
-| URL | OMOP table | Filter param |
+| URL | OMOP table written | Filter param |
 |---|---|---|
 | `/api/conditions/` | `condition_occurrence` | `?person_id=` |
 | `/api/drug-exposures/` | `drug_exposure` | `?person_id=` |
@@ -276,7 +306,7 @@ Writing to any of these tables fires a `post_save`/`post_delete` signal that cal
 | `/api/episodes/` | `episode` (omop_oncology) | `?person_id=` |
 | `/api/episode-events/` | `episode_event` | `?episode_id=` |
 
-All support the standard DRF router verbs: GET (list + retrieve), POST, PUT/PATCH, DELETE.
+All support: GET (list + retrieve), POST (create), PUT/PATCH (update), DELETE.
 
 ---
 
@@ -287,7 +317,7 @@ All support the standard DRF router verbs: GET (list + retrieve), POST, PUT/PATC
 | `/api/documents/` | Patient document storage | `?person_id=` |
 | `/api/trial-enrollments/` | Clinical trial enrollment status | `?person_id=` |
 
-Full CRUD. Org-scoped.
+Full CRUD. Org-scoped. These do not feed into PatientInfo.
 
 ---
 
@@ -328,22 +358,22 @@ Available `model_name` slugs (37 total):
 
 ---
 
-## OMOP write paths
+## OMOP write internals
 
-### PATCH write-through: _upsert_omop_measurement
+### _upsert_omop_measurement
 
 ```python
 # patient_portal/api/views.py
 def _upsert_omop_measurement(person, field_name, value, today):
 ```
 
-Creates or updates a single row in the OMOP `measurement` table for a lab or vital field.
+Writes a single lab or vital value into the OMOP `measurement` table. This is the primary write target for numeric clinical observations — PatientInfo is updated downstream by the signal chain.
 
 1. Looks up `(loinc_code, unit, display)` from `_LAB_FIELD_TO_LOINC[field_name]`.
-2. Resolves `Concept` by `concept_code = loinc_code, vocabulary_id = 'LOINC'`. Falls back to concept_id 3000963 (generic lab result) if not found.
+2. Resolves `Concept` by `concept_code = loinc_code, vocabulary_id = 'LOINC'`. Falls back to concept_id 3000963 (generic lab result) if the LOINC Concept is not loaded.
 3. **UPDATE** if a row already exists for `(person, concept, date)`.
 4. **CREATE** otherwise; `measurement_source_value` = display name (≤ 50 chars); `unit_source_value` = unit string.
-5. Saves with `_skip_patient_info_refresh = True` to suppress the signal during bulk writes.
+5. Saves with `_skip_patient_info_refresh = True` — the caller is responsible for triggering `refresh_patient_info` once, rather than once per measurement row.
 
 Called from `PatientInfoViewSet.partial_update()` for every field in the PATCH body that has a LOINC entry.
 
@@ -351,7 +381,7 @@ Called from `PatientInfoViewSet.partial_update()` for every field in the PATCH b
 
 ### _LAB_FIELD_TO_LOINC mapping
 
-Every PatientInfo field that triggers an OMOP Measurement write when PATCHed.
+Defines which PatientInfo field names map to OMOP `measurement` rows. Any field in this mapping is written to OMOP — not to PatientInfo directly.
 
 ```
 PatientInfo field                  LOINC      Unit            Display
@@ -376,15 +406,15 @@ potassium_meq_l                    2823-3     mEq/L           Potassium [Moles/v
 magnesium_mg_dl                    2601-3     mg/dL           Magnesium [Mass/volume] in Serum or Plasma
 phosphorus                         2777-1     mg/dL           Phosphate [Mass/volume] in Serum or Plasma
 
-# LFT / cardiac (added FHIR-08)
+# LFT / cardiac
 bilirubin_total_mg_dl              1975-2     mg/dL           Bilirubin.total [Mass/volume] in Serum or Plasma
 alt_u_l                            1742-6     U/L             Alanine aminotransferase [Enzymatic activity/volume]
 ast_u_l                            1920-8     U/L             Aspartate aminotransferase [Enzymatic activity/volume]
 alkaline_phosphatase_u_l           6768-6     U/L             Alkaline phosphatase [Enzymatic activity/volume]
 albumin_g_dl                       1751-7     g/dL            Albumin [Mass/volume] in Serum or Plasma
-total_protein                      2885-2     g/dL            Protein [Mass/volume] in Serum or Plasma        ← added
-troponin_ng_ml                     10839-9    ng/mL           Troponin I.cardiac [Mass/volume] in Serum or Plasma  ← added
-bnp_pg_ml                          42637-9    pg/mL           BNP [Mass/volume] in Serum or Plasma                ← added
+total_protein                      2885-2     g/dL            Protein [Mass/volume] in Serum or Plasma
+troponin_ng_ml                     10839-9    ng/mL           Troponin I.cardiac [Mass/volume] in Serum or Plasma
+bnp_pg_ml                          42637-9    pg/mL           BNP [Mass/volume] in Serum or Plasma
 glucose_mg_dl                      2345-7     mg/dL           Glucose [Mass/volume] in Serum or Plasma
 hba1c_percent                      4548-4     %               Hemoglobin A1c/Hemoglobin.total in Blood
 
@@ -412,13 +442,11 @@ ecog_performance_status            89247-1    {score}         ECOG Performance S
 karnofsky_performance_score        89243-0    {score}         Karnofsky Performance Status score
 ```
 
-Fields marked `← added` were introduced in FHIR-08 to complete LFT/cardiac coverage.
-
 ---
 
 ### FHIR upload pipeline
 
-Sequence of OMOP writes for `POST /api/patient-info/upload_fhir/`:
+Every FHIR resource maps to an OMOP table. PatientInfo is never a direct write target.
 
 ```
 FHIR Bundle
@@ -433,7 +461,7 @@ FHIR Bundle
    │     → ProvenanceRecord      if source provided
    │
    ├── Observation resources  (one per entry with effectiveDateTime)
-   │     Concept lookup: LOINC code → name match → concept_id 3000963  (FHIR-06/07/08)
+   │     Concept lookup: LOINC code → name match → concept_id 3000963
    │     → measurement            upsert by (person, measurement_concept, date)
    │     → ProvenanceRecord       if source provided
    │
@@ -443,29 +471,28 @@ FHIR Bundle
    │     → episode_event          links drug_exposure → episode
    │     → ProvenanceRecord       if source provided
    │
-   └── refresh_patient_info(person)
-         Clears and re-derives _OMOP_DERIVED_FIELDS from OMOP tables.
-         Direct-patch of fields not yet in OMOP (behavioral, socioeconomic, etc.).
-         Stamps PatientInfo.organization from the uploading token's org.
+   └── refresh_patient_info(person)   ← explicit call after all OMOP writes complete
+         PatientInfo re-derived entirely from the OMOP records written above.
+         PatientInfo.organization stamped from the uploading token's org.
+         (A small set of fields not yet modelled in OMOP are patched here
+          as a transitional measure until they have a proper OMOP table.)
 ```
-
-**Change in FHIR-06/07/08/09:** Observation → Measurement mapping now attempts LOINC-based `Concept` lookup before falling back to name matching. Lab fields (CBC, CMP, LFT/cardiac) are no longer written directly to PatientInfo; instead `refresh_patient_info` derives them from Measurement via `_get_laboratory_data`.
 
 ---
 
 ### refresh_patient_info signal chain
 
-Any save or delete on an OMOP table fires a Django signal that calls `refresh_patient_info`:
+Every write or delete on an OMOP table automatically triggers a PatientInfo rebuild via Django signals. No caller needs to invoke this manually except immediately after a bulk write (e.g. the FHIR upload) where per-row signals are suppressed for performance.
 
 ```
-OMOP table write (save / delete)
+OMOP table save / delete
    │
    └── omop_core.signals._refresh_for_instance(instance)
          skipped if instance._skip_patient_info_refresh == True
          │
          └── refresh_patient_info(person)   [omop_core/services/patient_info_service.py]
                1. Clears all _OMOP_DERIVED_FIELDS on PatientInfo
-               2. Calls section extractors (each returns {field: value} dict):
+               2. Re-derives every field by querying OMOP tables:
                     _get_demographics        ← Person (age, gender, ethnicity, languages)
                     _get_location_data       ← Location (country, region, city, postal_code)
                     _get_disease_data        ← ConditionOccurrence (disease, diagnosis_date, slug)
@@ -478,7 +505,7 @@ OMOP table write (save / delete)
                     _get_assessment_data     ← Observation (best_response, RECIST)
                     _get_laboratory_data     ← Measurement (see below)
                     _get_performance_data    ← Observation (ECOG, Karnofsky)
-                    _get_genetic_mutations   ← Measurement, LOINC 21636-6/21637-4/21667-1/48013-7/62862-8/62318-1
+                    _get_genetic_mutations   ← Measurement, LOINC 21636-6/21637-4/21667-1/…
                     _get_cll_data            ← Measurement + Observation + ConditionOccurrence
                     _get_lymphoma_data       ← Observation + Measurement
                     _get_prior_procedures    ← ProcedureOccurrence
@@ -486,28 +513,27 @@ OMOP table write (save / delete)
                4. PatientInfo.save()
 ```
 
-**_get_laboratory_data lookup strategy** (FHIR-09):
+**_get_laboratory_data lookup strategy:**
 
 ```
 1. LOINC concept code (primary)
       Measurement JOIN Concept
       WHERE concept_code IN _LOINC_LAB_FIELDS
         AND vocabulary_id = 'LOINC'
-      → maps to hemoglobin_g_dl, wbc_count_thousand_per_ul, serum_creatinine_mg_dl, etc.
+      → populates hemoglobin_g_dl, wbc_count_thousand_per_ul, serum_creatinine_mg_dl, etc.
 
-2. measurement_source_value fallback (for environments without LOINC Concepts loaded)
-      Measurement
-      WHERE measurement_source_value IN _SOURCE_VALUE_LAB_FIELDS
-      → same field set, matched by the display string stored during write
+2. measurement_source_value fallback (when LOINC Concepts are not loaded in Concept table)
+      Measurement WHERE measurement_source_value IN _SOURCE_VALUE_LAB_FIELDS
+      → same field set, matched by the display string stored at write time
 ```
 
-Both strategies take the most-recent measurement per field (ORDER BY measurement_date DESC).
+Most-recent measurement wins for each field (ORDER BY measurement_date DESC).
 
 ---
 
 ## Provenance tagging
 
-Every clinical write can carry a provenance source. `ProvenanceRecord` stores a generic FK to any model instance.
+Every OMOP write can carry a provenance source. `ProvenanceRecord` stores a generic FK to the written OMOP instance.
 
 | Source value | Meaning |
 |---|---|
@@ -516,13 +542,13 @@ Every clinical write can carry a provenance source. `ProvenanceRecord` stores a 
 | `EHR_SYNC` | Automated EHR system push |
 | `DOCUMENT_EXTRACTION` | AI-extracted from a clinical document |
 
-ProvenanceRecords are created for every OMOP row during FHIR upload, and for PatientInfo + Measurement during PATCH, when `source` is present in the request.
+ProvenanceRecords are attached to OMOP rows (Measurement, ConditionOccurrence, DrugExposure, Episode, etc.) — not to PatientInfo itself — since PatientInfo is derived, not authored.
 
 ---
 
 ## Multi-tenant org scoping
 
-Row-level tenant isolation is enforced across all read and write paths (HKI-SEC-04, AUTH-04).
+Row-level tenant isolation enforced across all read and write paths (HKI-SEC-04, AUTH-04).
 
 | Endpoint / path | Enforcement |
 |---|---|

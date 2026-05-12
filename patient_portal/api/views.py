@@ -385,7 +385,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
 
         return Response(serializer.data)
 
-    @action(detail=True, methods=['get'])
+    @action(detail=True, methods=['get'], permission_classes=[ScopedTokenPermission])
     def provenance(self, request, pk=None):
         """GET /api/patient-info/{person_id}/provenance/ — full provenance history for a patient."""
         try:
@@ -414,7 +414,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
         records.sort(key=lambda r: r.created_at, reverse=True)
         return Response(ProvenanceRecordSerializer(records, many=True).data)
 
-    @action(detail=False, methods=['post'])
+    @action(detail=False, methods=['post'], permission_classes=[ScopedTokenPermission])
     def upload_csv(self, request):
         """Upload patients from CSV file"""
         if 'file' not in request.FILES:
@@ -1742,7 +1742,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-    @action(detail=False, methods=['delete'])
+    @action(detail=False, methods=['delete'], permission_classes=[ScopedTokenPermission])
     def bulk_delete(self, request):
         """Delete multiple patients by person_ids"""
         person_ids = request.data.get('person_ids', [])

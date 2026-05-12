@@ -93,43 +93,87 @@ class PatientInfoSerializer(serializers.ModelSerializer):
 class ConditionOccurrenceSerializer(serializers.ModelSerializer):
     class Meta:
         model = ConditionOccurrence
-        fields = '__all__'
+        fields = [
+            'condition_occurrence_id', 'person', 'condition_concept',
+            'condition_start_date', 'condition_start_datetime',
+            'condition_end_date', 'condition_end_datetime',
+            'condition_type_concept', 'condition_status_concept',
+            'stop_reason', 'condition_source_value', 'condition_source_concept',
+            'condition_status_source_value',
+        ]
 
 
 class DrugExposureSerializer(serializers.ModelSerializer):
     class Meta:
         model = DrugExposure
-        fields = '__all__'
+        fields = [
+            'drug_exposure_id', 'person', 'drug_concept',
+            'drug_exposure_start_date', 'drug_exposure_start_datetime',
+            'drug_exposure_end_date', 'drug_exposure_end_datetime',
+            'drug_type_concept', 'stop_reason', 'quantity', 'days_supply',
+            'route_concept', 'lot_number',
+            'drug_source_value', 'drug_source_concept',
+            'route_source_value', 'dose_unit_source_value',
+        ]
 
 
 class MeasurementSerializer(serializers.ModelSerializer):
     class Meta:
         model = Measurement
-        fields = '__all__'
+        fields = [
+            'measurement_id', 'person', 'measurement_concept',
+            'measurement_date', 'measurement_datetime',
+            'measurement_type_concept', 'operator_concept',
+            'value_as_number', 'value_as_string', 'value_as_concept',
+            'unit_concept', 'range_low', 'range_high',
+            'measurement_source_value', 'measurement_source_concept',
+            'unit_source_value', 'value_source_value',
+        ]
 
 
 class ObservationSerializer(serializers.ModelSerializer):
     class Meta:
         model = Observation
-        fields = '__all__'
+        fields = [
+            'observation_id', 'person', 'observation_concept',
+            'observation_date', 'observation_datetime',
+            'observation_type_concept',
+            'value_as_number', 'value_as_string', 'value_as_concept',
+            'qualifier_concept', 'unit_concept',
+            'observation_source_value', 'observation_source_concept',
+            'unit_source_value', 'qualifier_source_value', 'value_source_value',
+        ]
 
 
 class ProcedureOccurrenceSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProcedureOccurrence
-        fields = '__all__'
+        fields = [
+            'procedure_occurrence_id', 'person', 'procedure_concept',
+            'procedure_date', 'procedure_datetime',
+            'procedure_end_date', 'procedure_end_datetime',
+            'procedure_type_concept', 'modifier_concept', 'quantity',
+            'procedure_source_value', 'procedure_source_concept',
+            'modifier_source_value',
+        ]
 
 
 class EpisodeSerializer(serializers.ModelSerializer):
     class Meta:
         model = Episode
-        fields = '__all__'
+        fields = [
+            'episode_id', 'person', 'episode_concept',
+            'episode_start_date', 'episode_start_datetime',
+            'episode_end_date', 'episode_end_datetime',
+            'episode_number', 'episode_object_concept', 'episode_type_concept',
+            'episode_source_value', 'episode_source_concept',
+        ]
 
 
 class EpisodeEventSerializer(serializers.ModelSerializer):
     class Meta:
         model = EpisodeEvent
-        fields = '__all__'
+        fields = ['episode_id', 'event_id', 'episode_event_field_concept']
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +183,10 @@ class EpisodeEventSerializer(serializers.ModelSerializer):
 class PatientDocumentSerializer(serializers.ModelSerializer):
     class Meta:
         model = PatientDocument
-        fields = '__all__'
+        fields = [
+            'id', 'person', 'doc_type', 'title',
+            'file_url', 'file_name', 'verified', 'uploaded_at',
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +196,7 @@ class PatientDocumentSerializer(serializers.ModelSerializer):
 class PatientTrialEnrollmentSerializer(serializers.ModelSerializer):
     class Meta:
         model = PatientTrialEnrollment
-        fields = '__all__'
+        fields = ['id', 'person', 'trial_id', 'nct_id', 'status']
 
 
 class ProvenanceRecordSerializer(serializers.ModelSerializer):

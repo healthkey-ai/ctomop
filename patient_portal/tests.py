@@ -269,8 +269,9 @@ class FhirUploadOmopTablesTest(FhirUploadBase):
         self.assertGreaterEqual(measurements.count(), 3,
                                 f'Expected ≥3 Measurement rows, got {measurements.count()}')
         source_values = list(measurements.values_list('measurement_source_value', flat=True))
+        # source_value is now the LOINC code (718-7) when available, not the display name
         self.assertTrue(
-            any('Hemoglobin' in (v or '') for v in source_values),
+            any(('Hemoglobin' in (v or '') or v == '718-7') for v in source_values),
             f'Hemoglobin measurement missing. source_values={source_values}',
         )
 
@@ -433,7 +434,8 @@ class UIViewsReflectUploadedDataTest(FhirUploadBase):
         resp = self.client.get('/api/measurements/', {'person_id': self._pid})
         results = list(resp.data)
         source_values = [r.get('measurement_source_value', '') for r in results]
-        self.assertTrue(any('Hemoglobin' in v for v in source_values),
+        # source_value is now the LOINC code (718-7) when available, not the display name
+        self.assertTrue(any(('Hemoglobin' in v or v == '718-7') for v in source_values),
                         f'Hemoglobin not in measurement source values: {source_values}')
 
     # -- Drug exposures endpoint -----------------------------------------------

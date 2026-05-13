@@ -215,7 +215,7 @@ def _upsert_omop_measurement(person, field_name, value, today):
             measurement_date=today,
             measurement_type_concept=type_concept,
             value_as_number=value,
-            measurement_source_value=display[:50],
+            measurement_source_value=loinc_code,
             unit_source_value=unit,
         )
         m._skip_patient_info_refresh = True
@@ -369,14 +369,14 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                 try:
                     m_before = Measurement.objects.filter(
                         person=person,
-                        measurement_source_value=_LAB_FIELD_TO_LOINC[field][2][:50],
+                        measurement_source_value=_LAB_FIELD_TO_LOINC[field][0],
                         measurement_date=today,
                     ).first()
                     _upsert_omop_measurement(person, field, value, today)
                     if prov_source:
                         m_after = Measurement.objects.filter(
                             person=person,
-                            measurement_source_value=_LAB_FIELD_TO_LOINC[field][2][:50],
+                            measurement_source_value=_LAB_FIELD_TO_LOINC[field][0],
                             measurement_date=today,
                         ).first()
                         if m_after:

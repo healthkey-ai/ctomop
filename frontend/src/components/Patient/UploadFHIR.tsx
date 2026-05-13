@@ -19,7 +19,7 @@ const UploadFHIR: React.FC = () => {
   const [file, setFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<{ created_count: number; errors: string[] } | null>(null);
+  const [success, setSuccess] = useState<{ created_count: number; updated_count: number; errors: string[] } | null>(null);
 
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = event.target.files?.[0];
@@ -125,7 +125,8 @@ const UploadFHIR: React.FC = () => {
         {success && (
           <Alert severity="success" sx={{ mt: 2 }}>
             <Typography variant="body2">
-              Successfully imported {success.created_count} patient(s)
+              Successfully imported {success.created_count + (success.updated_count ?? 0)} patient(s)
+              {success.updated_count > 0 && ` (${success.created_count} new, ${success.updated_count} updated)`}
             </Typography>
             {success.errors.length > 0 && (
               <Box mt={1}>

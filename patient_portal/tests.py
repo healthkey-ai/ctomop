@@ -2261,7 +2261,7 @@ class PatientInfoPatchWriteThroughTest(_SmartBase):
         self.assertEqual(resp.status_code, 200)
         m = Measurement.objects.filter(
             person=self.person,
-            measurement_source_value__icontains='Hemoglobin',
+            measurement_source_value='718-7',
         ).first()
         self.assertIsNotNone(m, 'No Measurement record created for hemoglobin_g_dl patch')
         self.assertAlmostEqual(float(m.value_as_number), 11.0, places=1)
@@ -2280,12 +2280,12 @@ class PatientInfoPatchWriteThroughTest(_SmartBase):
         )
         count = Measurement.objects.filter(
             person=self.person,
-            measurement_source_value__icontains='Leukocytes',
+            measurement_source_value='6690-2',
         ).count()
         self.assertEqual(count, 1, 'Duplicate Measurement rows created on second patch')
         m = Measurement.objects.get(
             person=self.person,
-            measurement_source_value__icontains='Leukocytes',
+            measurement_source_value='6690-2',
         )
         self.assertAlmostEqual(float(m.value_as_number), 6.2, places=1)
 
@@ -2347,7 +2347,7 @@ class ProvenancePatchTest(_SmartBase):
         )
         m = Measurement.objects.filter(
             person=self.person,
-            measurement_source_value__icontains='Hemoglobin',
+            measurement_source_value='718-7',
         ).first()
         self.assertIsNotNone(m)
         p = ProvenanceRecord.objects.filter(object_id=m.pk).first()

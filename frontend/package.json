@@ -29,6 +29,12 @@
     "test": "react-scripts test",
     "eject": "react-scripts eject"
   },
+  "jest": {
+    "transformIgnorePatterns": [
+      "/node_modules/(?!(axios)/)",
+      "^.+\\.module\\.(css|sass|scss)$"
+    ]
+  },
   "eslintConfig": {
     "extends": [
       "react-app",

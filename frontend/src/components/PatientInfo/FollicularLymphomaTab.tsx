@@ -3,6 +3,7 @@ import { PatientInfo } from '../../types/patient';
 import { Input } from '../UI/Input';
 import { Select } from '../UI/Select';
 import { FormField } from '../UI/FormField';
+import { useVocabulary } from '../../hooks/useVocabulary';
 
 interface FollicularLymphomaTabProps {
   patientInfo: PatientInfo;
@@ -34,27 +35,9 @@ export const FollicularLymphomaTab: React.FC<FollicularLymphomaTabProps> = ({ pa
     }
   };
 
-  const gelfOptions = [
-    { value: 'Met', label: 'GELF Criteria Met' },
-    { value: 'Not Met', label: 'GELF Criteria Not Met' },
-    { value: 'Unknown', label: 'Unknown' },
-  ];
-
-  const flipiOptions = [
-    { value: 0, label: '0 - Low Risk' },
-    { value: 1, label: '1 - Low Risk' },
-    { value: 2, label: '2 - Intermediate Risk' },
-    { value: 3, label: '3 - Intermediate Risk' },
-    { value: 4, label: '4 - High Risk' },
-    { value: 5, label: '5 - High Risk' },
-  ];
-
-  const gradeOptions = [
-    { value: 'Grade 1', label: 'Grade 1 (0-5 centroblasts/HPF)' },
-    { value: 'Grade 2', label: 'Grade 2 (6-15 centroblasts/HPF)' },
-    { value: 'Grade 3a', label: 'Grade 3a (>15 centroblasts/HPF, centrocytes present)' },
-    { value: 'Grade 3b', label: 'Grade 3b (solid sheets of centroblasts)' },
-  ];
+  const { options: gelfOptions, source: gelfSource } = useVocabulary('gelf-criteria', 'title');
+  const { options: flipiOptions, source: flipiSource } = useVocabulary('flipi-score', 'code');
+  const { options: gradeOptions, source: gradeSource } = useVocabulary('follicular-lymphoma-grade', 'title');
 
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
@@ -62,7 +45,7 @@ export const FollicularLymphomaTab: React.FC<FollicularLymphomaTabProps> = ({ pa
         <div className="space-y-4">
           {/* GELF Criteria and FLIPI Score */}
           <div className="grid grid-cols-2 gap-4">
-            <FormField label="GELF Criteria">
+            <FormField label="GELF Criteria" vocabSource={gelfSource}>
               <Select
                 value={formData.gelf_criteria || ''}
                 onChange={(e) => handleChange('gelf_criteria', e.target.value)}
@@ -70,7 +53,7 @@ export const FollicularLymphomaTab: React.FC<FollicularLymphomaTabProps> = ({ pa
               />
             </FormField>
 
-            <FormField label="FLIPI Score">
+            <FormField label="FLIPI Score" vocabSource={flipiSource}>
               <Select
                 value={formData.flipi_score || ''}
                 onChange={(e) => handleChange('flipi_score', parseInt(e.target.value))}
@@ -81,7 +64,7 @@ export const FollicularLymphomaTab: React.FC<FollicularLymphomaTabProps> = ({ pa
 
           {/* Tumor Grade */}
           <div className="grid grid-cols-2 gap-4">
-            <FormField label="Tumor Grade">
+            <FormField label="Tumor Grade" vocabSource={gradeSource}>
               <Select
                 value={formData.tumor_grade || ''}
                 onChange={(e) => handleChange('tumor_grade', e.target.value)}

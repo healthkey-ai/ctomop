@@ -3,6 +3,7 @@ import { PatientInfo } from '../../types/patient';
 import { Input } from '../UI/Input';
 import { Select } from '../UI/Select';
 import { FormField } from '../UI/FormField';
+import { useVocabulary } from '../../hooks/useVocabulary';
 
 interface MultipleMyelomaTabProps {
   patientInfo: PatientInfo;
@@ -39,14 +40,9 @@ export const MultipleMyelomaTab: React.FC<MultipleMyelomaTabProps> = ({ patientI
     { value: 'false', label: 'No' },
   ];
 
-  const toxicityOptions = [
-    { value: 0, label: 'Grade 0 - None' },
-    { value: 1, label: 'Grade 1 - Mild' },
-    { value: 2, label: 'Grade 2 - Moderate' },
-    { value: 3, label: 'Grade 3 - Severe' },
-    { value: 4, label: 'Grade 4 - Life-threatening' },
-    { value: 5, label: 'Grade 5 - Death' },
-  ];
+  const { options: toxicityOptions, source: toxicitySource } = useVocabulary('toxicity-grade', 'code');
+  const { options: progressionOptions, source: progressionSource } = useVocabulary('disease-progression', 'title');
+  const { options: measurableDiseaseOptions, source: measurableDiseaseSource } = useVocabulary('measurable-disease', 'title');
 
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
@@ -81,23 +77,18 @@ export const MultipleMyelomaTab: React.FC<MultipleMyelomaTabProps> = ({ patientI
               />
             </FormField>
 
-            <FormField label="Progression">
+            <FormField label="Progression" vocabSource={progressionSource}>
               <Select
                 value={formData.progression || ''}
                 onChange={(e) => handleChange('progression', e.target.value)}
-                options={[
-                  { value: 'Stable', label: 'Stable' },
-                  { value: 'Progressive', label: 'Progressive' },
-                  { value: 'Relapsed', label: 'Relapsed' },
-                  { value: 'Refractory', label: 'Refractory' },
-                ]}
+                options={progressionOptions}
               />
             </FormField>
           </div>
 
           {/* Toxicity Grade and Measurable Disease */}
           <div className="grid grid-cols-2 gap-4">
-            <FormField label="Toxicity Grade Maximum">
+            <FormField label="Toxicity Grade Maximum" vocabSource={toxicitySource}>
               <Select
                 value={formData.toxicity_grade_maximum || ''}
                 onChange={(e) => handleChange('toxicity_grade_maximum', parseInt(e.target.value))}
@@ -105,15 +96,11 @@ export const MultipleMyelomaTab: React.FC<MultipleMyelomaTabProps> = ({ patientI
               />
             </FormField>
 
-            <FormField label="Measurable Disease (IMWG)">
+            <FormField label="Measurable Disease (IMWG)" vocabSource={measurableDiseaseSource}>
               <Select
                 value={formData.measurable_disease_imwg || ''}
                 onChange={(e) => handleChange('measurable_disease_imwg', e.target.value)}
-                options={[
-                  { value: 'Yes', label: 'Yes - Measurable' },
-                  { value: 'No', label: 'No - Not Measurable' },
-                  { value: 'Unknown', label: 'Unknown' },
-                ]}
+                options={measurableDiseaseOptions}
               />
             </FormField>
           </div>

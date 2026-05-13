@@ -3,6 +3,7 @@ import { PatientInfo } from '../../types/patient';
 import { Input } from '../UI/Input';
 import { Select } from '../UI/Select';
 import { FormField } from '../UI/FormField';
+import { useVocabulary } from '../../hooks/useVocabulary';
 
 interface LabsTabProps {
   patientInfo: PatientInfo;
@@ -40,11 +41,7 @@ export const LabsTab: React.FC<LabsTabProps> = ({ patientInfo, onSave }) => {
     { value: 'false', label: 'No' },
   ];
 
-  const statusOptions = [
-    { value: 'Negative', label: 'Negative' },
-    { value: 'Positive', label: 'Positive' },
-    { value: 'Unknown', label: 'Unknown' },
-  ];
+  const { options: statusOptions, source: infectionSource } = useVocabulary('infection-status', 'title');
 
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
@@ -142,7 +139,7 @@ export const LabsTab: React.FC<LabsTabProps> = ({ patientInfo, onSave }) => {
 
           {/* HIV and Hep B */}
           <div className="grid grid-cols-2 gap-4">
-            <FormField label="HIV Status">
+            <FormField label="HIV Status" vocabSource={infectionSource}>
               <Select
                 value={formData.hiv_status || ''}
                 onChange={(e) => handleChange('hiv_status', e.target.value)}
@@ -150,7 +147,7 @@ export const LabsTab: React.FC<LabsTabProps> = ({ patientInfo, onSave }) => {
               />
             </FormField>
 
-            <FormField label="Hepatitis B Status">
+            <FormField label="Hepatitis B Status" vocabSource={infectionSource}>
               <Select
                 value={formData.hepatitis_b_status || ''}
                 onChange={(e) => handleChange('hepatitis_b_status', e.target.value)}
@@ -161,7 +158,7 @@ export const LabsTab: React.FC<LabsTabProps> = ({ patientInfo, onSave }) => {
 
           {/* Hep C */}
           <div className="grid grid-cols-2 gap-4">
-            <FormField label="Hepatitis C Status">
+            <FormField label="Hepatitis C Status" vocabSource={infectionSource}>
               <Select
                 value={formData.hepatitis_c_status || ''}
                 onChange={(e) => handleChange('hepatitis_c_status', e.target.value)}

@@ -21,8 +21,6 @@ export const Login: React.FC = () => {
       });
 
       if (response.data.user) {
-        // Login successful, redirect to home
-        // Force a page reload to ensure auth state is updated
         window.location.href = '/';
       }
     } catch (err: any) {
@@ -43,14 +41,16 @@ export const Login: React.FC = () => {
             Sign in to your account
           </p>
         </div>
-        
-        <form className="mt-8 space-y-6" onSubmit={handleSubmit}>
-          {error && (
-            <div className="rounded-md bg-red-50 p-4">
-              <p className="text-sm text-red-800">{error}</p>
-            </div>
-          )}
-          
+
+        {error && (
+          <div className="rounded-md bg-red-50 p-4">
+            <p className="text-sm text-red-800">{error}</p>
+          </div>
+        )}
+
+        {/* SMART on FHIR login — hidden until EHR SMART authorization server is configured */}
+
+        <form className="space-y-6" onSubmit={handleSubmit}>
           <div className="space-y-4">
             <div>
               <label htmlFor="username" className="block text-sm font-medium text-gray-700">
@@ -68,7 +68,7 @@ export const Login: React.FC = () => {
                 placeholder="Enter your username"
               />
             </div>
-            
+
             <div>
               <label htmlFor="password" className="block text-sm font-medium text-gray-700">
                 Password

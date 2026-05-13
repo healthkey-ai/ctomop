@@ -28,7 +28,7 @@ export interface PatientInfo {
   ecog_performance_status?: number;
   active_malignancies?: string;
   active_infection?: boolean;
-  preexisting_conditions?: string;
+  preexisting_conditions?: string[];
   peripheral_neuropathy_grade?: number;
   
   // Follicular Lymphoma specific
@@ -229,6 +229,29 @@ export interface PatientInfo {
 
   // CLL fields
   clonal_bone_marrow_b_lymphocytes?: number;
+
+  // HealthTree parity fields
+  diagnosis_date?: string | null;
+  condition_clinical_status?: string | null;
+  disease_slug?: string | null;
+  validated?: boolean | null;
+  validated_by?: string | null;
+  validation_date?: string | null;
+  phone_number?: string | null;
+  facility_name?: string | null;
+  prior_procedures?: Array<{procedure: string; date?: string | null; concept_id?: number}> | null;
+}
+
+export interface PatientDocument {
+  id?: number;
+  person: number;
+  doc_type: 'FISH' | 'GEP' | 'NGS' | 'CYTOMETRY' | 'CYTOGENETICS' | 'LAB_RESULTS' |
+            'FULL_MEDICAL_RECORDS' | 'MRD' | 'BONE_MARROW' | 'CONSENT' | 'IMAGING' | 'OTHER';
+  title?: string | null;
+  file_url?: string | null;
+  file_name?: string | null;
+  verified?: boolean;
+  uploaded_at?: string;
 }
 
 export interface PatientMessage {

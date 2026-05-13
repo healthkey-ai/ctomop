@@ -23,6 +23,10 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/', include('patient_portal.api.urls')),
     path('api/health/', views.health_check, name='health_check'),
+    # OAuth2 / SMART on FHIR authorization server endpoints
+    path('o/', include('oauth2_provider.urls', namespace='oauth2_provider')),
+    # SMART on FHIR discovery
+    path('.well-known/smart-configuration', views.smart_configuration, name='smart_configuration'),
     # Serve React app for all other routes
     re_path(r'^.*$', TemplateView.as_view(template_name='index.html'), name='home'),
 ]

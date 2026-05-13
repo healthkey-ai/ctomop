@@ -2,24 +2,86 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
+from oauth2_provider.contrib.rest_framework import OAuth2Authentication
 from django.contrib.auth.models import User
 from django.contrib.auth import logout, login, authenticate
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.utils import timezone
-from omop_core.models import Person, PatientInfo, Concept
+from django.conf import settings
+from django.contrib.contenttypes.models import ContentType
+from omop_core.models import (
+    Person, PatientInfo, Concept, ProvenanceRecord,
+    ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
+    PatientDocument, PatientTrialEnrollment,
+    # Controlled vocabulary lookup models
+    Ethnicity, StemCellTransplant, HistologicType, EstrogenReceptorStatus,
+    ProgesteroneReceptorStatus, Her2Status, HrStatus, HrdStatus,
+    MutationOrigin, MutationGene, MutationInterpretation, MutationCode,
+    TumorStage, NodesStage, DistantMetastasisStage, StagingModality,
+    ToxicityGrade, Language, LanguageSkillLevel, BinetStage, ProteinExpression,
+    RichterTransformation, TumorBurden, MorphologicVariant, DiseaseActivity,
+    PreExistingConditionCategory,
+    Disease, CancerStage, KarnofskyScore, EcogStatus, PeripheralNeuropathyGrade,
+    InfectionStatus, DiseaseProgression, MeasurableDisease, GelfCriteria,
+    FlipIScore, FollicularLymphomaGrade,
+    BreastCancerFirstLineTherapy, BreastCancerSecondLineTherapy, BreastCancerLaterLineTherapy,
+)
+from omop_oncology.models import Episode, EpisodeEvent
+from omop_core.services.patient_info_service import refresh_patient_info
 from datetime import datetime
 import csv
 import json
 import logging
 from io import StringIO
+from .permissions import ScopedTokenPermission, get_request_org
 from .serializers import (
-    UserSerializer, PatientInfoSerializer, PatientListSerializer
+    UserSerializer, PatientInfoSerializer, PatientListSerializer, ProvenanceRecordSerializer,
+    ConditionOccurrenceSerializer, DrugExposureSerializer, MeasurementSerializer,
+    ObservationSerializer, ProcedureOccurrenceSerializer,
+    EpisodeSerializer, EpisodeEventSerializer,
+    PatientDocumentSerializer, PatientTrialEnrollmentSerializer,
 )
 from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# SMART on FHIR discovery endpoint
+# ---------------------------------------------------------------------------
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def smart_configuration(request):
+    """
+    HL7 SMART on FHIR well-known configuration endpoint.
+    Advertises authorization / token endpoints and supported scopes.
+    """
+    base = request.build_absolute_uri('/').rstrip('/')
+    oidc_issuer = getattr(settings, 'OAUTH2_PROVIDER', {}).get('OIDC_ISS_ENDPOINT', '') or base
+    return Response({
+        'issuer': oidc_issuer,
+        'authorization_endpoint': f'{base}/o/authorize/',
+        'token_endpoint': f'{base}/o/token/',
+        'token_endpoint_auth_methods_supported': ['client_secret_basic', 'client_secret_post', 'none'],
+        'revocation_endpoint': f'{base}/o/revoke_token/',
+        'introspection_endpoint': f'{base}/o/introspect/',
+        'scopes_supported': list(settings.OAUTH2_PROVIDER.get('SCOPES', {}).keys()),
+        'response_types_supported': ['code'],
+        'grant_types_supported': ['authorization_code', 'client_credentials', 'refresh_token'],
+        'code_challenge_methods_supported': ['S256'],
+        'capabilities': [
+            'launch-standalone',
+            'client-public',
+            'sso-openid-connect',
+            'context-standalone-patient',
+            'permission-patient',
+            'permission-user',
+            'authorize-post',
+        ],
+    })
 
 
 def get_gender_concept(gender_str):
@@ -61,14 +123,144 @@ class CurrentUserViewSet(viewsets.ViewSet):
             'user': user_serializer.data
         })
 
+# Maps PatientInfo field name → (LOINC code, unit string, display name)
+# Used by partial_update to write through to the OMOP Measurement table.
+_LAB_FIELD_TO_LOINC = {
+    # Blood counts
+    'hemoglobin_g_dl':               ('718-7',    'g/dL',            'Hemoglobin [Mass/volume] in Blood'),
+    'hematocrit_percent':            ('20570-8',  '%',               'Hematocrit [Volume Fraction] of Blood'),
+    'wbc_count_thousand_per_ul':     ('6690-2',   '10*3/uL',         'Leukocytes [#/volume] in Blood'),
+    'rbc_million_per_ul':            ('789-8',    '10*6/uL',         'Erythrocytes [#/volume] in Blood'),
+    'platelet_count_thousand_per_ul':('777-3',    '10*3/uL',         'Platelets [#/volume] in Blood'),
+    'anc_thousand_per_ul':           ('751-8',    '10*3/uL',         'Neutrophils [#/volume] in Blood'),
+    'alc_thousand_per_ul':           ('731-0',    '10*3/uL',         'Lymphocytes [#/volume] in Blood'),
+    'amc_thousand_per_ul':           ('742-7',    '10*3/uL',         'Monocytes [#/volume] in Blood'),
+    # Kidney / electrolytes
+    'serum_creatinine_mg_dl':        ('2160-0',   'mg/dL',           'Creatinine [Mass/volume] in Serum or Plasma'),
+    'creatinine_mg_dl':              ('2160-0',   'mg/dL',           'Creatinine [Mass/volume] in Serum or Plasma'),
+    'serum_calcium_mg_dl':           ('17861-6',  'mg/dL',           'Calcium [Mass/volume] in Serum or Plasma'),
+    'calcium_mg_dl':                 ('17861-6',  'mg/dL',           'Calcium [Mass/volume] in Serum or Plasma'),
+    'egfr_ml_min_173m2':             ('62238-1',  'mL/min/1.73m2',   'GFR/BSA pred CKD-EPI ArA'),
+    'egfr':                          ('62238-1',  'mL/min/1.73m2',   'GFR/BSA pred CKD-EPI ArA'),
+    'bun_mg_dl':                     ('3094-0',   'mg/dL',           'Urea nitrogen [Mass/volume] in Serum or Plasma'),
+    'blood_urea_nitrogen':           ('3094-0',   'mg/dL',           'Urea nitrogen [Mass/volume] in Serum or Plasma'),
+    'sodium_meq_l':                  ('2951-2',   'mEq/L',           'Sodium [Moles/volume] in Serum or Plasma'),
+    'serum_sodium':                  ('2951-2',   'mEq/L',           'Sodium [Moles/volume] in Serum or Plasma'),
+    'potassium_meq_l':               ('2823-3',   'mEq/L',           'Potassium [Moles/volume] in Serum or Plasma'),
+    'serum_potassium':               ('2823-3',   'mEq/L',           'Potassium [Moles/volume] in Serum or Plasma'),
+    'magnesium_mg_dl':               ('2601-3',   'mg/dL',           'Magnesium [Mass/volume] in Serum or Plasma'),
+    'magnesium':                     ('2601-3',   'mg/dL',           'Magnesium [Mass/volume] in Serum or Plasma'),
+    'phosphorus':                    ('2777-1',   'mg/dL',           'Phosphate [Mass/volume] in Serum or Plasma'),
+    # Liver function
+    'bilirubin_total_mg_dl':         ('1975-2',   'mg/dL',           'Bilirubin.total [Mass/volume] in Serum or Plasma'),
+    'alt_u_l':                       ('1742-6',   'U/L',             'Alanine aminotransferase [Enzymatic activity/volume] in Serum or Plasma'),
+    'ast_u_l':                       ('1920-8',   'U/L',             'Aspartate aminotransferase [Enzymatic activity/volume] in Serum or Plasma'),
+    'alkaline_phosphatase_u_l':      ('6768-6',   'U/L',             'Alkaline phosphatase [Enzymatic activity/volume] in Serum or Plasma'),
+    'alkaline_phosphatase':          ('6768-6',   'U/L',             'Alkaline phosphatase [Enzymatic activity/volume] in Serum or Plasma'),
+    'albumin_g_dl':                  ('1751-7',   'g/dL',            'Albumin [Mass/volume] in Serum or Plasma'),
+    'total_protein':                 ('2885-2',   'g/dL',            'Protein [Mass/volume] in Serum or Plasma'),
+    'troponin_ng_ml':                ('10839-9',  'ng/mL',           'Troponin I.cardiac [Mass/volume] in Serum or Plasma'),
+    'bnp_pg_ml':                     ('42637-9',  'pg/mL',           'BNP [Mass/volume] in Serum or Plasma'),
+    'glucose_mg_dl':                 ('2345-7',   'mg/dL',           'Glucose [Mass/volume] in Serum or Plasma'),
+    'hba1c_percent':                 ('4548-4',   '%',               'Hemoglobin A1c/Hemoglobin.total in Blood'),
+    'inr':                           ('6301-6',   '{INR}',           'INR in Platelet poor plasma'),
+    'pt_seconds':                    ('5902-2',   's',               'Prothrombin time (PT)'),
+    'ptt_seconds':                   ('3173-2',   's',               'aPTT in Platelet poor plasma'),
+    # Oncology markers
+    'ldh_u_l':                       ('2532-0',   'U/L',             'Lactate dehydrogenase [Enzymatic activity/volume] in Serum or Plasma'),
+    'ldh_level':                     ('2532-0',   'U/L',             'Lactate dehydrogenase [Enzymatic activity/volume] in Serum or Plasma'),
+    'ldh':                           ('2532-0',   'U/L',             'Lactate dehydrogenase [Enzymatic activity/volume] in Serum or Plasma'),
+    'beta2_microglobulin':           ('1952-1',   'mg/L',            'Beta-2-Microglobulin [Mass/volume] in Serum or Plasma'),
+    'c_reactive_protein':            ('1988-5',   'mg/L',            'C reactive protein [Mass/volume] in Serum or Plasma'),
+    'esr':                           ('30341-2',  'mm/h',            'Erythrocyte sedimentation rate'),
+    'ki67_proliferation_index':      ('85319-2',  '%',               'Ki-67 Ag [Presence] in Tissue by Immune stain'),
+    # Vital signs
+    'weight':                        ('29463-7',  'kg',              'Body weight'),
+    'height':                        ('8302-2',   'cm',              'Body height'),
+    'systolic_blood_pressure':       ('8480-6',   'mm[Hg]',          'Systolic blood pressure'),
+    'diastolic_blood_pressure':      ('8462-4',   'mm[Hg]',          'Diastolic blood pressure'),
+    'heartrate':                     ('8867-4',   '/min',            'Heart rate'),
+    # Performance status
+    'ecog_performance_status':       ('89247-1',  '{score}',         'ECOG Performance Status score'),
+    'karnofsky_performance_score':   ('89243-0',  '{score}',         'Karnofsky Performance Status score'),
+}
+
+
+def _upsert_omop_measurement(person, field_name, value, today):
+    """Create or update a Measurement row for a single PatientInfo lab/vital field."""
+    loinc_code, unit, display = _LAB_FIELD_TO_LOINC[field_name]
+    concept = (
+        Concept.objects.filter(concept_code=loinc_code, vocabulary_id='LOINC').first()
+        or Concept.objects.filter(concept_id=3000963).first()
+    )
+    if concept is None:
+        return
+    type_concept = Concept.objects.filter(concept_id=32856).first() or concept
+    existing = Measurement.objects.filter(
+        person=person,
+        measurement_concept=concept,
+        measurement_date=today,
+    ).first()
+    if existing:
+        existing.value_as_number = value
+        existing._skip_patient_info_refresh = True
+        existing.save(update_fields=['value_as_number'])
+    else:
+        last = Measurement.objects.order_by('-measurement_id').first()
+        new_id = (last.measurement_id + 1) if last else 1
+        m = Measurement(
+            measurement_id=new_id,
+            person=person,
+            measurement_concept=concept,
+            measurement_date=today,
+            measurement_type_concept=type_concept,
+            value_as_number=value,
+            measurement_source_value=loinc_code,
+            unit_source_value=unit,
+        )
+        m._skip_patient_info_refresh = True
+        m.save()
+
+
+def _extract_provenance(request):
+    """Return (source, source_user_id, modification_reason) from headers or POST body."""
+    source = (
+        request.data.get('source')
+        or request.META.get('HTTP_X_PROVENANCE_SOURCE')
+    )
+    source_user_id = (
+        request.data.get('source_user_id')
+        or request.META.get('HTTP_X_PROVENANCE_USER_ID', '')
+    )
+    modification_reason = request.data.get('modification_reason')
+    return source, source_user_id, modification_reason
+
+
+def _record_provenance(record, source, source_user_id, target_patient_id=None, modification_reason=None, organization=None):
+    """Create a ProvenanceRecord pointing at any model instance."""
+    ProvenanceRecord.objects.create(
+        source=source,
+        source_user_id=source_user_id or '',
+        target_patient_id=target_patient_id,
+        modification_reason=modification_reason,
+        organization=organization,
+        content_type=ContentType.objects.get_for_model(record),
+        object_id=record.pk,
+    )
+
+
 @method_decorator(csrf_exempt, name='dispatch')
-class PatientInfoViewSet(viewsets.ModelViewSet):
+class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = PatientInfoSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [ScopedTokenPermission]
     
     def get_queryset(self):
-        return PatientInfo.objects.all().select_related('person')
-    
+        qs = PatientInfo.objects.all().select_related('person')
+        org = get_request_org(self.request)
+        if org is not None:
+            qs = qs.filter(organization=org)
+        return qs
+
     def get_serializer_class(self):
         if self.action == 'list':
             return PatientListSerializer
@@ -79,53 +271,153 @@ class PatientInfoViewSet(viewsets.ModelViewSet):
         queryset = self.get_queryset().order_by('-created_at')
         serializer = PatientListSerializer(queryset, many=True)
         return Response(serializer.data)
-    
+
+    def create(self, request):
+        """Create a new patient record, creating a Person if needed"""
+        data = request.data
+
+        # Resolve or create Person
+        person_id = data.get('person_id') or data.get('person')
+        if person_id:
+            try:
+                person = Person.objects.get(person_id=int(person_id))
+            except Person.DoesNotExist:
+                person = Person.objects.create(
+                    person_id=int(person_id),
+                    year_of_birth=datetime.now().year - 50,
+                    gender_source_value='unknown',
+                    race_source_value='unknown',
+                    ethnicity_source_value='unknown',
+                )
+        else:
+            last_person = Person.objects.order_by('-person_id').first()
+            new_person_id = last_person.person_id + 1 if last_person else 1000
+            person = Person.objects.create(
+                person_id=new_person_id,
+                year_of_birth=datetime.now().year - 50,
+                gender_source_value='unknown',
+                race_source_value='unknown',
+                ethnicity_source_value='unknown',
+            )
+
+        serializer = PatientInfoSerializer(data=data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        serializer.save(person=person)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
     def retrieve(self, request, pk=None):
         """Get detailed patient info for a specific person"""
         try:
             person = Person.objects.get(person_id=pk)
             patient_info = PatientInfo.objects.get(person=person)
-            
-            # Get the User associated with this person (not the logged-in user)
-            try:
-                patient_user = User.objects.get(id=person.person_id)
-                user_serializer = UserSerializer(patient_user)
-                user_data = user_serializer.data
-            except User.DoesNotExist:
-                user_data = None
-            
-            patient_serializer = PatientInfoSerializer(patient_info)
-            
-            return Response({
-                'patient_info': patient_serializer.data,
-                'user': user_data
-            })
         except Person.DoesNotExist:
             return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
         except PatientInfo.DoesNotExist:
             return Response({'error': 'Patient information not found'}, status=status.HTTP_404_NOT_FOUND)
-    
-    def update(self, request, pk=None, partial=False):
-        """Update patient info for a specific person"""
+
+        # AUTH-04: enforce per-patient row-level org scoping
+        org = get_request_org(request)
+        if org is not None and patient_info.organization != org:
+            return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Get the User associated with this person (not the logged-in user)
+        try:
+            patient_user = User.objects.get(id=person.person_id)
+            user_serializer = UserSerializer(patient_user)
+            user_data = user_serializer.data
+        except User.DoesNotExist:
+            user_data = None
+
+        patient_serializer = PatientInfoSerializer(patient_info)
+
+        return Response({
+            'patient_info': patient_serializer.data,
+            'user': user_data
+        })
+
+    def partial_update(self, request, pk=None):
+        """PATCH /api/patient-info/{person_id}/ — update PatientInfo and write through to OMOP."""
         try:
             person = Person.objects.get(person_id=pk)
             patient_info = PatientInfo.objects.get(person=person)
-            
-            serializer = self.get_serializer(patient_info, data=request.data, partial=True)
-            serializer.is_valid(raise_exception=True)
-            serializer.save()
-            
-            return Response(serializer.data)
         except Person.DoesNotExist:
-            return Response({'error': 'Person not found'}, status=status.HTTP_404_NOT_FOUND)
+            return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
         except PatientInfo.DoesNotExist:
-            return Response({'error': 'Patient info not found'}, status=status.HTTP_404_NOT_FOUND)
-    
-    def partial_update(self, request, pk=None):
-        """Partial update (PATCH) for patient info"""
-        return self.update(request, pk, partial=True)
-    
-    @action(detail=False, methods=['post'])
+            return Response({'error': 'Patient information not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        org = get_request_org(request)
+        if org is not None and patient_info.organization != org:
+            return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        prov_source, prov_user_id, prov_reason = _extract_provenance(request)
+        if prov_source == 'ADMIN_CORRECTION' and not prov_reason:
+            return Response(
+                {'error': 'modification_reason is required when source is ADMIN_CORRECTION'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = PatientInfoSerializer(patient_info, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+
+        if prov_source:
+            _record_provenance(patient_info, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+
+        today = datetime.now().date()
+        for field, value in request.data.items():
+            if field in _LAB_FIELD_TO_LOINC and value is not None:
+                try:
+                    m_before = Measurement.objects.filter(
+                        person=person,
+                        measurement_source_value=_LAB_FIELD_TO_LOINC[field][0],
+                        measurement_date=today,
+                    ).first()
+                    _upsert_omop_measurement(person, field, value, today)
+                    if prov_source:
+                        m_after = Measurement.objects.filter(
+                            person=person,
+                            measurement_source_value=_LAB_FIELD_TO_LOINC[field][0],
+                            measurement_date=today,
+                        ).first()
+                        if m_after:
+                            _record_provenance(m_after, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+                except Exception:
+                    pass
+
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['get'], permission_classes=[ScopedTokenPermission])
+    def provenance(self, request, pk=None):
+        """GET /api/patient-info/{person_id}/provenance/ — full provenance history for a patient."""
+        try:
+            person = Person.objects.get(person_id=pk)
+            patient_info = PatientInfo.objects.get(person=person)
+        except Person.DoesNotExist:
+            return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+        except PatientInfo.DoesNotExist:
+            return Response({'error': 'Patient information not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        org = get_request_org(request)
+        if org is not None and patient_info.organization != org:
+            return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        from django.db.models import Q
+        # Build a single query for all provenance records across PatientInfo + OMOP tables
+        q = Q(
+            content_type=ContentType.objects.get_for_model(PatientInfo),
+            object_id=patient_info.pk,
+        )
+        for model_cls in [Measurement, ConditionOccurrence, DrugExposure, ProcedureOccurrence]:
+            omop_ids = list(model_cls.objects.filter(person_id=person.person_id).values_list('pk', flat=True))
+            if omop_ids:
+                q |= Q(
+                    content_type=ContentType.objects.get_for_model(model_cls),
+                    object_id__in=omop_ids,
+                )
+        records = ProvenanceRecord.objects.filter(q).select_related('content_type').order_by('-created_at')
+        return Response(ProvenanceRecordSerializer(records, many=True).data)
+
+    @action(detail=False, methods=['post'], permission_classes=[ScopedTokenPermission])
     def upload_csv(self, request):
         """Upload patients from CSV file"""
         if 'file' not in request.FILES:
@@ -201,8 +493,7 @@ class PatientInfoViewSet(viewsets.ModelViewSet):
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
     
-    @action(detail=False, methods=['post'], permission_classes=[AllowAny])
-    @method_decorator(csrf_exempt)
+    @action(detail=False, methods=['post'], permission_classes=[ScopedTokenPermission])
     def upload_fhir(self, request):
         """Upload patients from FHIR JSON file"""
         if 'file' not in request.FILES:
@@ -214,13 +505,22 @@ class PatientInfoViewSet(viewsets.ModelViewSet):
         
         try:
             fhir_data = json.load(file)
-            
+
             if fhir_data.get('resourceType') != 'Bundle':
                 return Response({'error': 'FHIR file must be a Bundle'}, status=status.HTTP_400_BAD_REQUEST)
-            
+
+            prov_source, prov_user_id, prov_reason = _extract_provenance(request)
+            if prov_source == 'ADMIN_CORRECTION' and not prov_reason:
+                return Response(
+                    {'error': 'modification_reason is required when source is ADMIN_CORRECTION'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
             created_count = 0
+            updated_count = 0
             errors = []
-            
+            patients_result = []
+
             # Group resources by patient
             patients_data = {}
             
@@ -255,8 +555,15 @@ class PatientInfoViewSet(viewsets.ModelViewSet):
             # Process each patient
             for fhir_patient_id, data in patients_data.items():
                 try:
+                    _pt_measurement_ids = []
+                    _pt_condition_ids = []
+                    _pt_drug_exposure_ids = []
+                    _pt_procedure_ids = []
+                    _pt_episode_ids = []
+                    _pt_episode_event_ids = []
+
                     patient_resource = data['patient']
-                    
+
                     # Generate new person_id
                     last_person = Person.objects.all().order_by('-person_id').first()
                     person_id = last_person.person_id + 1 if last_person else 1000
@@ -295,23 +602,39 @@ class PatientInfoViewSet(viewsets.ModelViewSet):
                     heart_rate = None
                     ecog = None
                     
-                    if patient_resource.get('extension'):
-                        for ext in patient_resource['extension']:
-                            url = ext.get('url', '')
-                            if 'ethnicity' in url:
-                                ethnicity = ext.get('valueString')
-                            elif 'bodyWeight' in url:
-                                weight = ext.get('valueQuantity', {}).get('value')
-                            elif 'bodyHeight' in url:
-                                height = ext.get('valueQuantity', {}).get('value')
-                            elif 'systolic-bp' in url:
-                                systolic_bp = ext.get('valueQuantity', {}).get('value')
-                            elif 'diastolic-bp' in url:
-                                diastolic_bp = ext.get('valueQuantity', {}).get('value')
-                            elif 'heartRate' in url:
-                                heart_rate = ext.get('valueQuantity', {}).get('value')
-                            elif 'ecog-performance-status' in url:
-                                ecog = ext.get('valueInteger')
+                    # Explicit extension URL → (value_key, parser) registry.
+                    # Using exact URL matching avoids false positives from substring checks.
+                    _PATIENT_EXTENSIONS = {
+                        'http://ctomop.io/fhir/StructureDefinition/ethnicity':
+                            ('valueString', lambda e: e.get('valueString')),
+                        'http://ctomop.io/fhir/StructureDefinition/bodyWeight':
+                            ('valueQuantity', lambda e: e.get('valueQuantity', {}).get('value')),
+                        'http://ctomop.io/fhir/StructureDefinition/bodyHeight':
+                            ('valueQuantity', lambda e: e.get('valueQuantity', {}).get('value')),
+                        'http://ctomop.io/fhir/StructureDefinition/systolic-bp':
+                            ('valueQuantity', lambda e: e.get('valueQuantity', {}).get('value')),
+                        'http://ctomop.io/fhir/StructureDefinition/diastolic-bp':
+                            ('valueQuantity', lambda e: e.get('valueQuantity', {}).get('value')),
+                        'http://ctomop.io/fhir/StructureDefinition/heartRate':
+                            ('valueQuantity', lambda e: e.get('valueQuantity', {}).get('value')),
+                        'http://ctomop.io/fhir/StructureDefinition/ecog-performance-status':
+                            ('valueInteger', lambda e: e.get('valueInteger')),
+                    }
+                    ext_results = {}
+                    for ext in patient_resource.get('extension', []):
+                        url = ext.get('url', '')
+                        if url in _PATIENT_EXTENSIONS:
+                            _, parser = _PATIENT_EXTENSIONS[url]
+                            ext_results[url] = parser(ext)
+
+                    base = 'http://ctomop.io/fhir/StructureDefinition/'
+                    ethnicity   = ext_results.get(f'{base}ethnicity')
+                    weight      = ext_results.get(f'{base}bodyWeight')
+                    height      = ext_results.get(f'{base}bodyHeight')
+                    systolic_bp = ext_results.get(f'{base}systolic-bp')
+                    diastolic_bp = ext_results.get(f'{base}diastolic-bp')
+                    heart_rate  = ext_results.get(f'{base}heartRate')
+                    ecog        = ext_results.get(f'{base}ecog-performance-status')
                     
                     # Get gender concept from FHIR
                     gender_concept = get_gender_concept(patient_resource.get('gender', ''))
@@ -321,25 +644,37 @@ class PatientInfoViewSet(viewsets.ModelViewSet):
                     given_name = ' '.join(name.get('given', [])) if name.get('given') else ''
                     family_name = name.get('family', '')
                     
-                    # Create Person with OMOP-compliant birth date fields and names
-                    person = Person.objects.create(
-                        person_id=person_id,
-                        gender_concept=gender_concept,
-                        year_of_birth=year_of_birth or datetime.now().year - 50,
-                        month_of_birth=month_of_birth,
-                        day_of_birth=day_of_birth,
-                        ethnicity_concept=None,
-                        given_name=given_name,
-                        family_name=family_name,
-                    )
-                    
-                    # Create User for authentication (optional, not used for display)
-                    User.objects.create(
-                        id=person.person_id,
-                        username=f'patient{person.person_id}',
-                        first_name=given_name,
-                        last_name=family_name,
-                    )
+                    # Upsert Person: match on name + birth year to avoid duplicates on re-upload
+                    person = None
+                    person_is_new = False
+                    if (given_name or family_name) and year_of_birth:
+                        person = Person.objects.filter(
+                            given_name=given_name,
+                            family_name=family_name,
+                            year_of_birth=year_of_birth,
+                        ).first()
+                    if person is None:
+                        last_person = Person.objects.all().order_by('-person_id').first()
+                        person_id = last_person.person_id + 1 if last_person else 1000
+                        person = Person.objects.create(
+                            person_id=person_id,
+                            gender_concept=gender_concept,
+                            year_of_birth=year_of_birth or datetime.now().year - 50,
+                            month_of_birth=month_of_birth,
+                            day_of_birth=day_of_birth,
+                            ethnicity_concept=None,
+                            given_name=given_name,
+                            family_name=family_name,
+                        )
+                        person_is_new = True
+                        User.objects.get_or_create(
+                            username=f'patient{person.person_id}',
+                            defaults={
+                                'id': person.person_id,
+                                'first_name': given_name,
+                                'last_name': family_name,
+                            },
+                        )
                     
                     # Extract disease, stage, and histologic type from Condition
                     disease = 'Breast Cancer'
@@ -374,12 +709,10 @@ class PatientInfoViewSet(viewsets.ModelViewSet):
                             except ValueError:
                                 pass
                     
-                    # Create ConditionOccurrence for the diagnosis
+                    # Upsert ConditionOccurrence for the diagnosis
                     if condition_date:
                         from omop_core.models import ConditionOccurrence
-                        last_condition = ConditionOccurrence.objects.all().order_by('-condition_occurrence_id').first()
-                        condition_id = last_condition.condition_occurrence_id + 1 if last_condition else 1
-                        
+
                         # Get breast cancer concept (using a standard concept ID)
                         breast_cancer_concept = None
                         try:
@@ -394,17 +727,29 @@ class PatientInfoViewSet(viewsets.ModelViewSet):
                             type_concept = Concept.objects.filter(concept_id=32817).first()
                             if not type_concept:
                                 type_concept = breast_cancer_concept
-                            
-                            ConditionOccurrence.objects.create(
-                                condition_occurrence_id=condition_id,
+
+                            if not ConditionOccurrence.objects.filter(
                                 person=person,
                                 condition_concept=breast_cancer_concept,
                                 condition_start_date=condition_date.date(),
-                                condition_start_datetime=condition_date,
-                                condition_type_concept=type_concept,
-                                condition_source_value=disease
-                            )
-                    
+                            ).exists():
+                                last_condition = ConditionOccurrence.objects.all().order_by('-condition_occurrence_id').first()
+                                condition_id = last_condition.condition_occurrence_id + 1 if last_condition else 1
+                                _co = ConditionOccurrence(
+                                    condition_occurrence_id=condition_id,
+                                    person=person,
+                                    condition_concept=breast_cancer_concept,
+                                    condition_start_date=condition_date.date(),
+                                    condition_start_datetime=condition_date,
+                                    condition_type_concept=type_concept,
+                                    condition_source_value=disease,
+                                )
+                                _co._skip_patient_info_refresh = True
+                                _co.save()
+                                _pt_condition_ids.append(_co.condition_occurrence_id)
+                                if prov_source:
+                                    _record_provenance(_co, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+
                     # Process observations and create Measurement records
                     from omop_core.models import Measurement
                     last_measurement = Measurement.objects.all().order_by('-measurement_id').first()
@@ -911,15 +1256,26 @@ class PatientInfoViewSet(viewsets.ModelViewSet):
                             elif value_concept.get('coding'):
                                 value_string = value_concept['coding'][0].get('display')
                         
-                        # Find or create measurement concept
+                        # Find measurement concept — LOINC lookup first (FHIR-06/07/08),
+                        # fall back to name-based, then generic lab concept.
                         measurement_concept = None
-                        try:
+                        obs_loinc = None
+                        for _c in obs_code.get('coding', []):
+                            if _c.get('system') == 'http://loinc.org':
+                                obs_loinc = _c.get('code')
+                                break
+                        if obs_loinc:
                             measurement_concept = Concept.objects.filter(
-                                concept_name__icontains=obs_name[:50]
+                                concept_code=obs_loinc,
+                                vocabulary_id='LOINC',
                             ).first()
-                        except:
-                            pass
-                        
+                        if not measurement_concept:
+                            try:
+                                measurement_concept = Concept.objects.filter(
+                                    concept_name__icontains=obs_name[:50]
+                                ).first()
+                            except Exception:
+                                pass
                         if not measurement_concept:
                             # Use a generic lab test concept if not found
                             measurement_concept = Concept.objects.filter(concept_id=3000963).first()
@@ -929,20 +1285,40 @@ class PatientInfoViewSet(viewsets.ModelViewSet):
                             type_concept = Concept.objects.filter(concept_id=32856).first()
                             if not type_concept:
                                 type_concept = measurement_concept
-                            
-                            Measurement.objects.create(
-                                measurement_id=measurement_id,
+
+                            # Use LOINC code as source_value when available — it's short,
+                            # unique, and avoids collisions from truncating long display names.
+                            source_value = obs_loinc if obs_loinc else obs_name[:50]
+                            existing_m = Measurement.objects.filter(
                                 person=person,
                                 measurement_concept=measurement_concept,
                                 measurement_date=obs_date.date(),
-                                measurement_datetime=obs_date,
-                                measurement_type_concept=type_concept,
-                                value_as_number=value_number,
-                                value_as_string=value_string,
-                                measurement_source_value=obs_name[:50],
-                                unit_source_value=unit[:50] if unit else None
-                            )
-                            measurement_id += 1
+                                measurement_source_value=source_value,
+                            ).first()
+                            if existing_m:
+                                existing_m.value_as_number = value_number
+                                existing_m.value_as_string = value_string
+                                existing_m._skip_patient_info_refresh = True
+                                existing_m.save()
+                            else:
+                                _m = Measurement(
+                                    measurement_id=measurement_id,
+                                    person=person,
+                                    measurement_concept=measurement_concept,
+                                    measurement_date=obs_date.date(),
+                                    measurement_datetime=obs_date,
+                                    measurement_type_concept=type_concept,
+                                    value_as_number=value_number,
+                                    value_as_string=value_string,
+                                    measurement_source_value=source_value,
+                                    unit_source_value=unit[:50] if unit else None,
+                                )
+                                _m._skip_patient_info_refresh = True
+                                _m.save()
+                                _pt_measurement_ids.append(_m.measurement_id)
+                                if prov_source:
+                                    _record_provenance(_m, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+                                measurement_id += 1
                     
                     # Extract therapy information from MedicationStatement resources
                     therapy_lines = {}  # {line_number: {'regimen': name, 'start_date': date, 'end_date': date, 'outcome': outcome}}
@@ -1097,178 +1473,282 @@ class PatientInfoViewSet(viewsets.ModelViewSet):
                             elif later_end_date and disc_date == str(later_end_date):
                                 later_discontinuation_reason = disc_obs['value']
                     
-                    # Create PatientInfo with address, ethnicity, vital signs, therapy, and lab values
-                    patient_info = PatientInfo.objects.create(
-                        person=person,
-                        date_of_birth=birth_date,
-                        disease=disease,
-                        stage=stage,
-                        histologic_type=histologic_type,
-                        country=country,
-                        region=region,
-                        city=city,
-                        postal_code=postal_code,
-                        ethnicity=ethnicity,
-                        weight=weight,
-                        weight_units='kg' if weight else None,
-                        height=height,
-                        height_units='cm' if height else None,
-                        systolic_blood_pressure=systolic_bp,
-                        diastolic_blood_pressure=diastolic_bp,
-                        heartrate=heart_rate,
-                        ecog_performance_status=ecog,
-                        tumor_size=tumor_size,
-                        lymph_node_status=lymph_node_status,
-                        metastasis_status=metastasis_status,
-                        tumor_stage=tumor_stage,
-                        nodes_stage=nodes_stage,
-                        distant_metastasis_stage=distant_metastasis_stage,
-                        staging_modalities=staging_modalities,
-                        measurable_disease_by_recist_status=measurable_disease_by_recist_status,
-                        bone_only_metastasis_status=bone_only_metastasis_status,
-                        clonal_bone_marrow_b_lymphocytes=clonal_bone_marrow_b_lymphocytes,
-                        estrogen_receptor_status=er_status,
-                        progesterone_receptor_status=pr_status,
-                        her2_status=her2_status,
-                        ki67_proliferation_index=ki67_index,
-                        pd_l1_tumor_cels=pdl1_percentage,
-                        genetic_mutations=genetic_mutations,
-                        first_line_therapy=first_line_therapy,
-                        first_line_date=first_line_date,
-                        first_line_start_date=first_line_start_date,
-                        first_line_end_date=first_line_end_date,
-                        first_line_intent=first_line_intent,
-                        first_line_discontinuation_reason=first_line_discontinuation_reason,
-                        first_line_outcome=first_line_outcome,
-                        second_line_therapy=second_line_therapy,
-                        second_line_date=second_line_date,
-                        second_line_start_date=second_line_start_date,
-                        second_line_end_date=second_line_end_date,
-                        second_line_intent=second_line_intent,
-                        second_line_discontinuation_reason=second_line_discontinuation_reason,
-                        second_line_outcome=second_line_outcome,
-                        later_therapy=later_therapy,
-                        later_date=later_date,
-                        later_start_date=later_start_date,
-                        later_end_date=later_end_date,
-                        later_intent=later_intent,
-                        later_discontinuation_reason=later_discontinuation_reason,
-                        later_outcome=later_outcome,
-                        # Blood counts (Blood tab)
-                        hemoglobin_g_dl=hemoglobin_g_dl,
-                        hematocrit_percent=hematocrit_percent,
-                        wbc_count_thousand_per_ul=wbc_count,
-                        rbc_million_per_ul=rbc_count,
-                        platelet_count_thousand_per_ul=platelet_count,
-                        anc_thousand_per_ul=anc_count,
-                        alc_thousand_per_ul=alc_count,
-                        amc_thousand_per_ul=amc_count,
-                        # Kidney function (Blood tab)
-                        serum_calcium_mg_dl=serum_calcium,
-                        serum_creatinine_mg_dl=serum_creatinine,
-                        creatinine_clearance_ml_min=creatinine_clearance,
-                        egfr_ml_min_173m2=egfr,
-                        bun_mg_dl=bun,
-                        # Electrolytes (Blood tab)
-                        sodium_meq_l=sodium,
-                        potassium_meq_l=potassium,
-                        calcium_mg_dl=calcium,
-                        magnesium_mg_dl=magnesium,
-                        # Liver function (Blood tab)
-                        bilirubin_total_mg_dl=bilirubin_total,
-                        alt_u_l=alt,
-                        ast_u_l=ast,
-                        alkaline_phosphatase_u_l=alkaline_phosphatase,
-                        albumin_g_dl=albumin,
-                        # Cardiac & Other (Blood tab)
-                        troponin_ng_ml=troponin,
-                        bnp_pg_ml=bnp,
-                        glucose_mg_dl=glucose,
-                        hba1c_percent=hba1c,
-                        ldh_u_l=ldh,
-                        # Coagulation (Blood tab)
-                        inr=inr,
-                        pt_seconds=pt,
-                        ptt_seconds=ptt,
-                        # Tumor markers (Blood tab)
-                        cea_ng_ml=cea,
-                        ca19_9_u_ml=ca19_9,
-                        psa_ng_ml=psa,
-                        # Labs tab - Chemistry Panel (duplicate mapping for old field names)
-                        serum_creatinine_level=serum_creatinine,
-                        serum_calcium_level=serum_calcium,
-                        blood_urea_nitrogen=bun,
-                        egfr=egfr,
-                        serum_sodium=sodium,
-                        serum_potassium=potassium,
-                        albumin_level=albumin,
-                        total_protein=total_protein,
-                        creatinine_clearance_rate=creatinine_clearance_rate,
-                        # Labs tab - Liver Function Tests
-                        liver_enzyme_levels_ast=ast,
-                        liver_enzyme_levels_alt=alt,
-                        liver_enzyme_levels_alp=alkaline_phosphatase,
-                        serum_bilirubin_level_total=bilirubin_total,
-                        serum_bilirubin_level_direct=bilirubin_direct,
-                        # Labs tab - Other Markers
-                        ldh_level=ldh,
-                        beta2_microglobulin=beta2_microglobulin,
-                        c_reactive_protein=c_reactive_protein,
-                        esr=esr,
-                        # Behavior tab - Lifestyle
-                        smoking_status=smoking_status,
-                        pack_years=pack_years,
-                        alcohol_use=alcohol_use,
-                        drinks_per_week=drinks_per_week,
-                        exercise_frequency=exercise_frequency,
-                        exercise_minutes_per_week=exercise_minutes_per_week,
-                        diet_type=diet_type,
-                        # Behavior tab - Sleep & Wellbeing
-                        sleep_hours_per_night=sleep_hours_per_night,
-                        sleep_quality=sleep_quality,
-                        stress_level=stress_level,
-                        social_support=social_support,
-                        # Behavior tab - Socioeconomic
-                        employment_status=employment_status,
-                        education_level=education_level,
-                        marital_status=marital_status,
-                        insurance_type=insurance_type,
-                        number_of_dependents=number_of_dependents,
-                        annual_household_income=annual_household_income,
-                        # Cancer Assessment Fields
-                        ecog_assessment_date=ecog_assessment_date,
-                        test_methodology=test_methodology,
-                        test_date=test_date,
-                        test_specimen_type=test_specimen_type,
-                        report_interpretation=report_interpretation,
-                        oncotype_dx_score=oncotype_dx_score,
-                        androgen_receptor_status=androgen_receptor_status,
-                        # Treatment Fields
-                        therapy_intent=therapy_intent,
-                        reason_for_discontinuation=reason_for_discontinuation,
-                        # Additional Lab Values
-                        ldh=ldh_new if ldh_new is not None else ldh,
-                        alkaline_phosphatase=alkaline_phosphatase,
-                        magnesium=magnesium,
-                        phosphorus=phosphorus,
-                        # Reproductive Health
-                        pregnancy_test_date=pregnancy_test_date,
-                        pregnancy_test_result_value=pregnancy_test_result_value,
-                        contraceptive_use=contraceptive_use if contraceptive_use is not None else False,
-                        # Consent and Support
-                        consent_capability=consent_capability if consent_capability is not None else True,
-                        caregiver_availability_status=caregiver_availability_status if caregiver_availability_status is not None else True,
-                        # Mental Health and Substance Use
-                        no_mental_health_disorder_status=no_mental_health_disorder_status if no_mental_health_disorder_status is not None else True,
-                        no_substance_use_status=no_substance_use_status if no_substance_use_status is not None else True,
-                        substance_use_details=substance_use_details,
-                        # Geographic Exposure
-                        no_geographic_exposure_risk=no_geographic_exposure_risk if no_geographic_exposure_risk is not None else True,
-                        geographic_exposure_risk_details=geographic_exposure_risk_details,
-                    )
+                    # --- Write DrugExposure records for each therapy line ---
+                    last_drug = DrugExposure.objects.all().order_by('-drug_exposure_id').first()
+                    drug_exposure_id = last_drug.drug_exposure_id + 1 if last_drug else 1
+                    last_episode = Episode.objects.all().order_by('-episode_id').first()
+                    episode_id_counter = last_episode.episode_id + 1 if last_episode else 1
+
+                    for lot_num, lot_data in sorted(therapy_lines.items()):
+                        try:
+                            lot_start = None
+                            lot_end = None
+                            if lot_data.get('start_date'):
+                                lot_start = datetime.strptime(lot_data['start_date'][:10], '%Y-%m-%d').date()
+                            if lot_data.get('end_date'):
+                                lot_end = datetime.strptime(lot_data['end_date'][:10], '%Y-%m-%d').date()
+
+                            regimen_concept = Concept.objects.filter(
+                                concept_name__icontains=lot_data.get('regimen', ''),
+                                domain__domain_id='Drug',
+                            ).first() if lot_data.get('regimen') else None
+                            # Fall back to any Drug domain concept when named one not found
+                            if regimen_concept is None:
+                                regimen_concept = Concept.objects.filter(
+                                    domain__domain_id='Drug'
+                                ).first()
+                            drug_type_concept = Concept.objects.filter(concept_id=32869).first()  # EHR prescription
+                            # Fall back to regimen_concept if type concept not found
+                            if drug_type_concept is None and regimen_concept is not None:
+                                drug_type_concept = regimen_concept
+
+                            # Upsert DrugExposure: skip if same person+regimen+start already exists
+                            _de = DrugExposure.objects.filter(
+                                person=person,
+                                drug_source_value=(lot_data.get('regimen') or '')[:50],
+                                drug_exposure_start_date=lot_start,
+                            ).first()
+                            if _de is None:
+                                _de = DrugExposure(
+                                    drug_exposure_id=drug_exposure_id,
+                                    person=person,
+                                    drug_concept=regimen_concept,
+                                    drug_exposure_start_date=lot_start,
+                                    drug_exposure_end_date=lot_end,
+                                    drug_type_concept=drug_type_concept,
+                                    drug_source_value=(lot_data.get('regimen') or '')[:50],
+                                )
+                                _de._skip_patient_info_refresh = True
+                                _de.save()
+                                _pt_drug_exposure_ids.append(_de.drug_exposure_id)
+                                if prov_source:
+                                    _record_provenance(_de, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
+                                drug_exposure_id += 1
+
+                            # Upsert Episode for this LOT
+                            ep_concept = Concept.objects.filter(concept_id=32531).first()  # Treatment Regimen
+                            if ep_concept is None:
+                                ep_concept = regimen_concept
+                            ep_obj_concept = regimen_concept
+                            ep_type_concept = Concept.objects.filter(concept_id=32817).first()  # EHR
+                            if ep_type_concept is None:
+                                ep_type_concept = regimen_concept
+
+                            _ep = Episode.objects.filter(
+                                person=person,
+                                episode_source_value=f'LOT-{lot_num}',
+                            ).first()
+                            if _ep is None:
+                                _ep = Episode(
+                                    episode_id=episode_id_counter,
+                                    person=person,
+                                    episode_concept=ep_concept,
+                                    episode_object_concept=ep_obj_concept,
+                                    episode_type_concept=ep_type_concept,
+                                    episode_start_date=lot_start or datetime.now().date(),
+                                    episode_end_date=lot_end,
+                                    episode_number=lot_num,
+                                    episode_source_value=f'LOT-{lot_num}',
+                                )
+                                _ep.save()
+                                _pt_episode_ids.append(_ep.episode_id)
+                                episode_id_counter += 1
+
+                            # Link drug exposure to episode (idempotent)
+                            ee_field_concept = Concept.objects.filter(concept_id=1147094).first()
+                            if ee_field_concept is None:
+                                ee_field_concept = regimen_concept
+                            _ee, _ = EpisodeEvent.objects.get_or_create(
+                                episode_id=_ep.episode_id,
+                                event_id=_de.drug_exposure_id,
+                                defaults={'episode_event_field_concept': ee_field_concept},
+                            )
+                            _pt_episode_event_ids.append(_ee.pk)
+                        except Exception as _e:
+                            logger.warning(f"Could not write DrugExposure/Episode for LOT {lot_num}: {_e}")
+
+                    # --- OMOP-first: refresh PatientInfo from OMOP tables ---
+                    patient_info = refresh_patient_info(person)
+
+                    # --- Patch fields from FHIR that aren't yet in OMOP tables ---
+                    # These fields come from FHIR parsing but are not (yet) stored in OMOP.
+                    # Once full OMOP write coverage is achieved, this patch block can be removed.
+                    _patch = {}
+                    if birth_date:
+                        _patch['date_of_birth'] = birth_date
+                    if disease:
+                        _patch['disease'] = disease
+                    if stage:
+                        _patch['stage'] = stage
+                    if histologic_type:
+                        _patch['histologic_type'] = histologic_type
+                    if country:
+                        _patch['country'] = country
+                    if region:
+                        _patch['region'] = region
+                    if city:
+                        _patch['city'] = city
+                    if postal_code:
+                        _patch['postal_code'] = postal_code
+                    if ethnicity:
+                        _patch['ethnicity'] = ethnicity
+                    if weight:
+                        _patch.update({'weight': weight, 'weight_units': 'kg'})
+                    if height:
+                        _patch.update({'height': height, 'height_units': 'cm'})
+                    if systolic_bp:
+                        _patch['systolic_blood_pressure'] = systolic_bp
+                    if diastolic_bp:
+                        _patch['diastolic_blood_pressure'] = diastolic_bp
+                    if heart_rate:
+                        _patch['heartrate'] = heart_rate
+                    if ecog is not None:
+                        _patch['ecog_performance_status'] = ecog
+                    if tumor_size:
+                        _patch['tumor_size'] = tumor_size
+                    if lymph_node_status:
+                        _patch['lymph_node_status'] = lymph_node_status
+                    if metastasis_status:
+                        _patch['metastasis_status'] = metastasis_status
+                    if tumor_stage:
+                        _patch['tumor_stage'] = tumor_stage
+                    if nodes_stage:
+                        _patch['nodes_stage'] = nodes_stage
+                    if distant_metastasis_stage:
+                        _patch['distant_metastasis_stage'] = distant_metastasis_stage
+                    if staging_modalities:
+                        _patch['staging_modalities'] = staging_modalities
+                    if measurable_disease_by_recist_status is not None:
+                        _patch['measurable_disease_by_recist_status'] = measurable_disease_by_recist_status
+                    if bone_only_metastasis_status is not None:
+                        _patch['bone_only_metastasis_status'] = bone_only_metastasis_status
+                    if clonal_bone_marrow_b_lymphocytes is not None:
+                        _patch['clonal_bone_marrow_b_lymphocytes'] = clonal_bone_marrow_b_lymphocytes
+                    if er_status:
+                        _patch['estrogen_receptor_status'] = er_status
+                    if pr_status:
+                        _patch['progesterone_receptor_status'] = pr_status
+                    if her2_status:
+                        _patch['her2_status'] = her2_status
+                    if ki67_index is not None:
+                        _patch['ki67_proliferation_index'] = ki67_index
+                    if pdl1_percentage is not None:
+                        _patch['pd_l1_tumor_cells'] = pdl1_percentage
+                    if genetic_mutations:
+                        _patch['genetic_mutations'] = genetic_mutations
+                    # Therapy lines (denormalized PatientInfo fields)
+                    if first_line_therapy:
+                        _patch.update({
+                            'first_line_therapy': first_line_therapy,
+                            'first_line_date': first_line_date,
+                            'first_line_start_date': first_line_start_date,
+                            'first_line_end_date': first_line_end_date,
+                            'first_line_intent': first_line_intent,
+                            'first_line_discontinuation_reason': first_line_discontinuation_reason,
+                            'first_line_outcome': first_line_outcome,
+                        })
+                    if second_line_therapy:
+                        _patch.update({
+                            'second_line_therapy': second_line_therapy,
+                            'second_line_date': second_line_date,
+                            'second_line_start_date': second_line_start_date,
+                            'second_line_end_date': second_line_end_date,
+                            'second_line_intent': second_line_intent,
+                            'second_line_discontinuation_reason': second_line_discontinuation_reason,
+                            'second_line_outcome': second_line_outcome,
+                        })
+                    if later_therapy:
+                        _patch.update({
+                            'later_therapy': later_therapy,
+                            'later_date': later_date,
+                            'later_start_date': later_start_date,
+                            'later_end_date': later_end_date,
+                            'later_intent': later_intent,
+                            'later_discontinuation_reason': later_discontinuation_reason,
+                            'later_outcome': later_outcome,
+                        })
+                    # Labs are now written to the OMOP Measurement table (FHIR-06/07/08)
+                    # and derived into PatientInfo via refresh_patient_info (FHIR-09).
+                    # Only fields not yet modelled in OMOP are patched directly below.
+                    _patch.update({k: v for k, v in {
+                        'serum_bilirubin_level_direct': bilirubin_direct,
+                        'calcium_mg_dl': calcium,
+                        'inr': inr,
+                        'pt_seconds': pt,
+                        'ptt_seconds': ptt,
+                        'cea_ng_ml': cea,
+                        'ca19_9_u_ml': ca19_9,
+                        'psa_ng_ml': psa,
+                        'smoking_status': smoking_status,
+                        'pack_years': pack_years,
+                        'alcohol_use': alcohol_use,
+                        'drinks_per_week': drinks_per_week,
+                        'exercise_frequency': exercise_frequency,
+                        'exercise_minutes_per_week': exercise_minutes_per_week,
+                        'diet_type': diet_type,
+                        'sleep_hours_per_night': sleep_hours_per_night,
+                        'sleep_quality': sleep_quality,
+                        'stress_level': stress_level,
+                        'social_support': social_support,
+                        'employment_status': employment_status,
+                        'education_level': education_level,
+                        'marital_status': marital_status,
+                        'insurance_type': insurance_type,
+                        'number_of_dependents': number_of_dependents,
+                        'annual_household_income': annual_household_income,
+                        'ecog_assessment_date': ecog_assessment_date,
+                        'test_methodology': test_methodology,
+                        'test_date': test_date,
+                        'test_specimen_type': test_specimen_type,
+                        'report_interpretation': report_interpretation,
+                        'oncotype_dx_score': oncotype_dx_score,
+                        'androgen_receptor_status': androgen_receptor_status,
+                        'therapy_intent': therapy_intent,
+                        'reason_for_discontinuation': reason_for_discontinuation,
+                        'ldh': ldh_new if ldh_new is not None else ldh,
+                        'alkaline_phosphatase': alkaline_phosphatase,
+                        'magnesium': magnesium,
+                        'phosphorus': phosphorus,
+                        'pregnancy_test_date': pregnancy_test_date,
+                        'pregnancy_test_result_value': pregnancy_test_result_value,
+                        'contraceptive_use': contraceptive_use if contraceptive_use is not None else False,
+                        'consent_capability': consent_capability if consent_capability is not None else True,
+                        'caregiver_availability_status': caregiver_availability_status if caregiver_availability_status is not None else True,
+                        'no_mental_health_disorder_status': no_mental_health_disorder_status if no_mental_health_disorder_status is not None else True,
+                        'no_substance_use_status': no_substance_use_status if no_substance_use_status is not None else True,
+                        'substance_use_details': substance_use_details,
+                        'no_geographic_exposure_risk': no_geographic_exposure_risk if no_geographic_exposure_risk is not None else True,
+                        'geographic_exposure_risk_details': geographic_exposure_risk_details,
+                    }.items() if v is not None})
+                    # Stamp the org derived from the OAuth2 token so this patient
+                    # is scoped to the uploading service client's tenant.
+                    upload_org = get_request_org(request)
+                    if upload_org is not None:
+                        _patch['organization'] = upload_org
+
+                    # Apply patch to PatientInfo (suppress signal-triggering save)
+                    for _field, _val in _patch.items():
+                        setattr(patient_info, _field, _val)
+                    patient_info.save()
+                    if prov_source:
+                        _record_provenance(patient_info, prov_source, prov_user_id, modification_reason=prov_reason, organization=get_request_org(request))
                     
-                    created_count += 1
-                    logger.info(f"Successfully imported patient {fhir_patient_id} ({person.person_id}) with {measurement_id - (last_measurement.measurement_id + 1 if last_measurement else 1)} measurements (dates converted to timezone-aware UTC)")
+                    patients_result.append({
+                        'person_id': person.person_id,
+                        'patient_info_id': patient_info.pk,
+                        'measurement_ids': _pt_measurement_ids,
+                        'condition_ids': _pt_condition_ids,
+                        'drug_exposure_ids': _pt_drug_exposure_ids,
+                        'procedure_ids': _pt_procedure_ids,
+                        'episode_ids': _pt_episode_ids,
+                        'episode_event_ids': _pt_episode_event_ids,
+                    })
+
+                    if person_is_new:
+                        created_count += 1
+                    else:
+                        updated_count += 1
+                    logger.info(f"Successfully {'created' if person_is_new else 'updated'} patient {fhir_patient_id} ({person.person_id})")
                     
                 except Exception as e:
                     errors.append(f"Patient {fhir_patient_id}: {str(e)}")
@@ -1276,30 +1756,15 @@ class PatientInfoViewSet(viewsets.ModelViewSet):
             return Response({
                 'success': True,
                 'created_count': created_count,
-                'errors': errors
+                'updated_count': updated_count,
+                'patients': patients_result,
+                'errors': errors,
             })
-            
+
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-    
-    @action(detail=True, methods=['patch'])
-    def update_patient(self, request, pk=None):
-        """Update a specific patient's info"""
-        try:
-            person = Person.objects.get(person_id=pk)
-            patient_info = PatientInfo.objects.get(person=person)
-            
-            serializer = self.get_serializer(patient_info, data=request.data, partial=True)
-            serializer.is_valid(raise_exception=True)
-            serializer.save()
-            
-            return Response(serializer.data)
-        except Person.DoesNotExist:
-            return Response({'error': 'Person not found'}, status=status.HTTP_404_NOT_FOUND)
-        except PatientInfo.DoesNotExist:
-            return Response({'error': 'Patient info not found'}, status=status.HTTP_404_NOT_FOUND)
-    
-    @action(detail=False, methods=['delete'])
+
+    @action(detail=False, methods=['delete'], permission_classes=[ScopedTokenPermission])
     def bulk_delete(self, request):
         """Delete multiple patients by person_ids"""
         person_ids = request.data.get('person_ids', [])
@@ -1385,11 +1850,19 @@ def logout_view(request):
 @require_http_methods(["GET"])
 def health_check(request):
     """Health check endpoint for monitoring"""
+    from django.db import connection
+    try:
+        connection.ensure_connection()
+        db_status = 'connected'
+    except Exception:
+        db_status = 'error'
+
+    http_status = 200 if db_status == 'connected' else 503
     return JsonResponse({
-        'status': 'healthy',
+        'status': 'healthy' if db_status == 'connected' else 'unhealthy',
         'service': 'ctomop',
-        'database': 'connected'
-    })
+        'database': db_status,
+    }, status=http_status)
 
 
 @csrf_exempt
@@ -1409,3 +1882,165 @@ def auth_test(request):
         return Response({'status': 'ok', 'step': step, 'user': str(user)})
     except Exception as e:
         return Response({'status': 'error', 'step': step, 'error': str(e), 'traceback': tb.format_exc()}, status=500)
+
+# =============================================================================
+# OMOP clinical event ViewSets
+# =============================================================================
+
+class _OmopFilterMixin:
+    """Filter by person_id query param and restrict to the requesting org's patients."""
+    def get_queryset(self):
+        qs = super().get_queryset()
+        person_id = self.request.query_params.get('person_id')
+        if person_id:
+            qs = qs.filter(person_id=person_id)
+        org = get_request_org(self.request)
+        if org is not None:
+            from omop_core.models import PatientInfo
+            allowed = PatientInfo.objects.filter(organization=org).values_list('person_id', flat=True)
+            qs = qs.filter(person_id__in=allowed)
+        return qs
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class ConditionOccurrenceViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
+    serializer_class = ConditionOccurrenceSerializer
+    permission_classes = [ScopedTokenPermission]
+    queryset = ConditionOccurrence.objects.all()
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class DrugExposureViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
+    serializer_class = DrugExposureSerializer
+    permission_classes = [ScopedTokenPermission]
+    queryset = DrugExposure.objects.all()
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class MeasurementViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
+    serializer_class = MeasurementSerializer
+    permission_classes = [ScopedTokenPermission]
+    queryset = Measurement.objects.all()
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class ObservationViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
+    serializer_class = ObservationSerializer
+    permission_classes = [ScopedTokenPermission]
+    queryset = Observation.objects.all()
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class ProcedureOccurrenceViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
+    serializer_class = ProcedureOccurrenceSerializer
+    permission_classes = [ScopedTokenPermission]
+    queryset = ProcedureOccurrence.objects.all()
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class EpisodeViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
+    serializer_class = EpisodeSerializer
+    permission_classes = [ScopedTokenPermission]
+    queryset = Episode.objects.all()
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class EpisodeEventViewSet(viewsets.ModelViewSet):
+    serializer_class = EpisodeEventSerializer
+    permission_classes = [ScopedTokenPermission]
+
+    def get_queryset(self):
+        episode_id = self.request.query_params.get('episode_id')
+        qs = EpisodeEvent.objects.all()
+        if episode_id:
+            qs = qs.filter(episode_id=episode_id)
+        return qs
+
+
+# =============================================================================
+# Controlled vocabulary endpoints
+# GET /api/vocabularies/<model_name>/ → [{code, title}, ...]
+# =============================================================================
+
+_VOCABULARY_REGISTRY = {
+    'ethnicity':                     Ethnicity,
+    'stem-cell-transplant':          StemCellTransplant,
+    'histologic-type':               HistologicType,
+    'estrogen-receptor-status':      EstrogenReceptorStatus,
+    'progesterone-receptor-status':  ProgesteroneReceptorStatus,
+    'her2-status':                   Her2Status,
+    'hr-status':                     HrStatus,
+    'hrd-status':                    HrdStatus,
+    'mutation-origin':               MutationOrigin,
+    'mutation-gene':                 MutationGene,
+    'mutation-interpretation':       MutationInterpretation,
+    'mutation-code':                 MutationCode,
+    'tumor-stage':                   TumorStage,
+    'nodes-stage':                   NodesStage,
+    'distant-metastasis-stage':      DistantMetastasisStage,
+    'staging-modality':              StagingModality,
+    'toxicity-grade':                ToxicityGrade,
+    'language':                      Language,
+    'language-skill-level':          LanguageSkillLevel,
+    'binet-stage':                   BinetStage,
+    'protein-expression':            ProteinExpression,
+    'richter-transformation':        RichterTransformation,
+    'tumor-burden':                  TumorBurden,
+    'morphologic-variant':           MorphologicVariant,
+    'disease-activity':              DiseaseActivity,
+    'pre-existing-condition-category': PreExistingConditionCategory,
+    'disease':                         Disease,
+    'cancer-stage':                    CancerStage,
+    'karnofsky-score':                 KarnofskyScore,
+    'ecog-status':                     EcogStatus,
+    'peripheral-neuropathy-grade':     PeripheralNeuropathyGrade,
+    'infection-status':                InfectionStatus,
+    'disease-progression':             DiseaseProgression,
+    'measurable-disease':              MeasurableDisease,
+    'gelf-criteria':                   GelfCriteria,
+    'flipi-score':                     FlipIScore,
+    'follicular-lymphoma-grade':             FollicularLymphomaGrade,
+    'breast-cancer-first-line-therapy':      BreastCancerFirstLineTherapy,
+    'breast-cancer-second-line-therapy':     BreastCancerSecondLineTherapy,
+    'breast-cancer-later-line-therapy':      BreastCancerLaterLineTherapy,
+}
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def vocabulary_list(request, model_name):
+    """Return all entries for a controlled vocabulary model as [{code, title}]."""
+    model = _VOCABULARY_REGISTRY.get(model_name)
+    if model is None:
+        return Response(
+            {'error': f"Unknown vocabulary '{model_name}'. Valid options: {sorted(_VOCABULARY_REGISTRY.keys())}"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+    has_sort_key = any(f.name == 'sort_key' for f in model._meta.get_fields())
+    order_field = 'sort_key' if has_sort_key else 'title'
+    items = list(model.objects.values('code', 'title', 'source_name', 'source_url').order_by(order_field))
+    return Response(items)
+
+
+# =============================================================================
+# HealthTree parity ViewSets
+# =============================================================================
+
+@method_decorator(csrf_exempt, name='dispatch')
+class PatientDocumentViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
+    serializer_class = PatientDocumentSerializer
+    permission_classes = [ScopedTokenPermission]
+    queryset = PatientDocument.objects.all()
+
+
+class PatientTrialEnrollmentViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
+    """CRUD for a patient's clinical trial enrollment status.
+
+    Trial metadata (title, phase, eligibility, etc.) is NOT stored here.
+    Use ``trial_id`` to retrieve that data from the EXACT trial-matcher API.
+
+    Filter by person: GET /api/trial-enrollments/?person_id=42
+    """
+    serializer_class = PatientTrialEnrollmentSerializer
+    permission_classes = [ScopedTokenPermission]
+    queryset = PatientTrialEnrollment.objects.all()

@@ -616,24 +616,30 @@ class Command(BaseCommand):
             }
         })
 
-        # Measurable disease by RECIST (True if metastatic or T3/T4)
-        measurable_by_recist = metastasis_status == "Positive" or t_cat in ["T3", "T4"]
-        observations.append({
-            "fullUrl": f"http://example.org/Observation/obs-{patient_id}-recist",
-            "resource": {
-                "resourceType": "Observation",
-                "id": f"obs-{patient_id}-recist",
-                "status": "final",
-                "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "imaging"}]}],
-                "code": {
-                    "coding": [{"system": "http://loinc.org", "code": "21908-9", "display": "Measurable disease RECIST"}],
-                    "text": "Measurable disease RECIST"
-                },
-                "subject": {"reference": f"Patient/{patient_id}"},
-                "effectiveDateTime": diagnosis_date.strftime('%Y-%m-%d'),
-                "valueBoolean": measurable_by_recist
-            }
-        })
+        # Measurable disease by RECIST — computed from staging when determinable
+        if metastasis_status == "Positive" or t_cat in ["T3", "T4"]:
+            measurable_by_recist = True
+        elif metastasis_status == "Unknown":
+            measurable_by_recist = None  # Can't determine without imaging data
+        else:
+            measurable_by_recist = False
+        if measurable_by_recist is not None:
+            observations.append({
+                "fullUrl": f"http://example.org/Observation/obs-{patient_id}-recist",
+                "resource": {
+                    "resourceType": "Observation",
+                    "id": f"obs-{patient_id}-recist",
+                    "status": "final",
+                    "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "imaging"}]}],
+                    "code": {
+                        "coding": [{"system": "http://loinc.org", "code": "21908-9", "display": "Measurable disease RECIST"}],
+                        "text": "Measurable disease RECIST"
+                    },
+                    "subject": {"reference": f"Patient/{patient_id}"},
+                    "effectiveDateTime": diagnosis_date.strftime('%Y-%m-%d'),
+                    "valueBoolean": measurable_by_recist
+                }
+            })
 
         # Bone-only metastasis (True for ~15% of metastatic patients)
         bone_only = metastasis_status == "Positive" and random.random() < 0.15

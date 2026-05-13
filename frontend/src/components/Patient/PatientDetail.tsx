@@ -17,10 +17,12 @@ import {
   InputLabel,
   Checkbox,
   ListItemText,
+  Tooltip,
 } from '@mui/material';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Save } from 'lucide-react';
 import api from '../../api/axios';
+import { useVocabulary, VocabSource } from '../../hooks/useVocabulary';
 
 interface TabPanelProps {
   children?: React.ReactNode;
@@ -53,7 +55,7 @@ const US_STATES = [
   'WI', 'WY', 'DC', 'PR', 'GU', 'VI'
 ];
 const ETHNICITY_OPTIONS = ['African/Black', 'Asian', 'Native American', "Other/Won't Say"];
-const DISEASE_OPTIONS = ['Breast Cancer', 'Follicular Lymphoma', 'Multiple Myeloma', 'Lung Cancer', 'Colon Cancer', 'Other'];
+const DISEASE_OPTIONS = ['Breast Cancer', 'Follicular Lymphoma', 'Multiple Myeloma', 'Chronic Lymphocytic Leukemia (CLL)', 'Lung Cancer', 'Colon Cancer', 'Other'];
 const STAGE_OPTIONS = ['0', 'I', 'IA', 'IB', 'II', 'IIA', 'IIB', 'III', 'IIIA', 'IIIB', 'IIIC', 'IV', 'Unknown'];
 const HISTOLOGIC_TYPE_OPTIONS = [
   'Unknown',
@@ -122,20 +124,43 @@ const STAGING_MODALITIES_OPTIONS = [
   'yp → Pathological after neoadjuvant therapy'
 ];
 
-const ER_PR_OPTIONS = ['Positive', 'Negative', 'Borderline', 'Unknown'];
-const HER2_OPTIONS = ['Positive', 'Negative', 'Equivocal', 'Unknown'];
+const ER_OPTIONS = ['ER+', 'ER-', 'ER+ with low expression', 'ER+ with high expression', 'Unknown'];
+const PR_OPTIONS = ['PR+', 'PR-', 'PR+ with low expression', 'PR+ with high expression', 'Unknown'];
+const HER2_OPTIONS = ['HER2+', 'HER2-', 'HER2 low', 'Unknown'];
+const HR_OPTIONS = ['HR+', 'HR-', 'HR+ with low expression', 'HR+ with high expression', 'Unknown'];
+const HRD_OPTIONS = ['HRD+', 'HRD-', 'Unknown'];
+const MENOPAUSAL_OPTIONS = ['Pre-menopausal', 'Peri-menopausal', 'Post-menopausal', 'Unknown'];
 const FLIPI_RISK_OPTIONS = ['Low', 'Intermediate', 'High'];
+const GELF_OPTIONS = ['Met', 'Not Met', 'Unknown'];
+const FL_TUMOR_GRADE_OPTIONS = [
+  'Grade 1 (0–5 centroblasts/HPF)',
+  'Grade 2 (6–15 centroblasts/HPF)',
+  'Grade 3a (>15 centroblasts/HPF, centrocytes present)',
+  'Grade 3b (solid sheets of centroblasts)',
+];
 const ISS_STAGE_OPTIONS = ['Stage I', 'Stage II', 'Stage III'];
+const MM_PROGRESSION_OPTIONS = ['Stable', 'Active', 'Smoldering', 'Progressive', 'Relapsed', 'Refractory'];
+const STEM_CELL_TRANSPLANT_OPTIONS = [
+  'prior SCT',
+  'prior autologous SCT',
+  'prior allogeneic SCT',
+  'recent SCT',
+  'recent autologous SCT',
+  'recent allogeneic SCT',
+  'relapsed post-SCT',
+  'relapsed post-autologous SCT',
+  'relapsed post-allogeneic SCT',
+  'completed tandem SCT',
+  'never received SCT',
+  'pre-autologous SCT',
+  'pre-allogeneic SCT',
+];
 const CYTOGENETIC_RISK_OPTIONS = ['Standard Risk', 'High Risk', 'Very High Risk'];
 const THERAPY_OUTCOME_OPTIONS = [
   'Complete Response (CR)',
-  'Stringent Complete Response (sCR)',
-  'Very Good Partial Response (VGPR)',
   'Partial Response (PR)',
-  'Minimal Residual Disease (MRD) Negativity',
   'Stable Disease (SD)',
   'Progressive Disease (PD)',
-  'Unknown'
 ];
 const SMOKING_STATUS_OPTIONS = ['Never Smoker', 'Former Smoker', 'Current Smoker', 'Unknown'];
 const ALCOHOL_USE_OPTIONS = ['None', 'Occasional', 'Moderate', 'Heavy', 'Unknown'];
@@ -163,6 +188,70 @@ const MUTATION_OPTIONS: { [key: string]: string[] } = {
 };
 const ORIGIN_OPTIONS = ['Germline', 'Somatic', 'Unknown'];
 const INTERPRETATION_OPTIONS = ['Pathogenic', 'Likely pathogenic', 'VUS', 'Likely benign', 'Benign'];
+
+// CLL-specific vocabulary options (sourced from vocabulary_binet_stage, etc.)
+const BINET_STAGE_OPTIONS = [
+  'Binet Stage A (<3 lymphoid areas involved)',
+  'Binet Stage B (≥3 lymphoid areas involved)',
+  'Binet Stage C (Anemia or Thrombocytopenia)',
+];
+
+const PROTEIN_EXPRESSION_OPTIONS = [
+  'CD38 +ve', 'CD38 -ve',
+  'ZAP-70 +ve', 'ZAP-70 -ve',
+  'CD49d +ve', 'CD49d -ve',
+  'CD19 +ve', 'CD19 -ve',
+  'CD5 +ve', 'CD5 -ve',
+  'CD20 +ve', 'CD20 -ve',
+  'CD23 +ve', 'CD23 -ve',
+  'Kappa (κ) light chain +ve', 'Kappa (κ) light chain -ve',
+  'Lambda (λ) light chain +ve', 'Lambda (λ) light chain -ve',
+];
+
+const RICHTER_TRANSFORMATION_OPTIONS = [
+  'Richter Transformation to DLBCL',
+  'Richter Transformation to Hodgkin Lymphoma',
+  'Richter Transformation to Non-Hodgkin Lymphoma',
+  'Clonally Related RT',
+  'Clonally Unrelated RT',
+];
+
+const TUMOR_BURDEN_OPTIONS = ['Low', 'Intermediate', 'High'];
+
+const DISEASE_ACTIVITY_OPTIONS = ['Active', 'Inactive', 'Remission', 'Relapsed', 'Refractory'];
+
+// CLL therapy options
+const CLL_FIRST_LINE = [
+  'Watch and Wait',
+  'FCR (Fludarabine/Cyclophosphamide/Rituximab)',
+  'BR (Bendamustine/Rituximab)',
+  'Ibrutinib',
+  'Acalabrutinib',
+  'Venetoclax + Obinutuzumab',
+  'Chlorambucil + Obinutuzumab',
+  'Chlorambucil + Rituximab',
+  'Other',
+];
+
+const CLL_SECOND_LINE = [
+  'Ibrutinib',
+  'Acalabrutinib',
+  'Zanubrutinib',
+  'Venetoclax + Rituximab',
+  'Idelalisib + Rituximab',
+  'Duvelisib',
+  'BR (Bendamustine/Rituximab)',
+  'Other',
+];
+
+const CLL_LATER_LINE = [
+  'Pirtobrutinib',
+  'Venetoclax',
+  'Lisocabtagene maraleucel (CAR-T)',
+  'Allogeneic SCT',
+  'Clinical Trial',
+  'Other',
+];
 
 // Disease-specific therapy options
 const BREAST_CANCER_FIRST_LINE = [
@@ -467,6 +556,30 @@ const PatientDetail: React.FC = () => {
   const [editedName, setEditedName] = useState<string>('');
   const [activeTab, setActiveTab] = useState(0);
 
+  // Vocabulary sources for tooltip display
+  const { source: ecogSource }              = useVocabulary('ecog-status', 'code');
+  const { source: karnofskySource }         = useVocabulary('karnofsky-score', 'code');
+  const { source: diseaseSource }           = useVocabulary('disease', 'title');
+  const { source: cancerStageSource }       = useVocabulary('cancer-stage', 'title');
+  const { source: ethnicitySource }         = useVocabulary('ethnicity', 'title');
+  const { source: gelfSource }              = useVocabulary('gelf-criteria', 'title');
+  const { source: flipiSource }             = useVocabulary('flipi-score', 'code');
+  const { source: flGradeSource }           = useVocabulary('follicular-lymphoma-grade', 'title');
+  const { source: progressionSource }       = useVocabulary('disease-progression', 'title');
+  const { source: erSource }                = useVocabulary('estrogen-receptor-status', 'title');
+  const { source: prSource }                = useVocabulary('progesterone-receptor-status', 'title');
+  const { source: her2Source }              = useVocabulary('her2-status', 'title');
+  const { source: hrSource }                = useVocabulary('hr-status', 'title');
+  const { source: hrdSource }               = useVocabulary('hrd-status', 'title');
+  const { source: tumorStageSource }        = useVocabulary('tumor-stage', 'title');
+  const { source: nodesStageSource }        = useVocabulary('nodes-stage', 'title');
+  const { source: distantMetSource }        = useVocabulary('distant-metastasis-stage', 'title');
+  const { source: stagingModalitySource }   = useVocabulary('staging-modality', 'title');
+  const { options: histologicOptions, source: histologicSource } = useVocabulary('histologic-type', 'title');
+  const { options: bcFirstLineOptions, source: bcFirstLineSource }   = useVocabulary('breast-cancer-first-line-therapy', 'title');
+  const { options: bcSecondLineOptions, source: bcSecondLineSource } = useVocabulary('breast-cancer-second-line-therapy', 'title');
+  const { options: bcLaterLineOptions, source: bcLaterLineSource }   = useVocabulary('breast-cancer-later-line-therapy', 'title');
+
   useEffect(() => {
     const fetchPatientInfo = async () => {
       if (!personId) return;
@@ -483,11 +596,10 @@ const PatientDetail: React.FC = () => {
         
         // Auto-compute Triple Negative status if not already set
         if (patientData.estrogen_receptor_status && patientData.progesterone_receptor_status && patientData.her2_status) {
-          const isTripleNegative = 
-            patientData.estrogen_receptor_status === 'Negative' &&
-            patientData.progesterone_receptor_status === 'Negative' &&
-            patientData.her2_status === 'Negative';
-          patientData.tnbc_status = isTripleNegative;
+          const erNeg = patientData.estrogen_receptor_status === 'Negative' || patientData.estrogen_receptor_status === 'ER-';
+          const prNeg = patientData.progesterone_receptor_status === 'Negative' || patientData.progesterone_receptor_status === 'PR-';
+          const her2Neg = patientData.her2_status === 'Negative' || patientData.her2_status === 'HER2-';
+          patientData.tnbc_status = erNeg && prNeg && her2Neg;
         }
         
         setPatientInfo(patientData);
@@ -527,11 +639,13 @@ const PatientDetail: React.FC = () => {
       const pr = field === 'progesterone_receptor_status' ? value : updatedInfo.progesterone_receptor_status;
       const her2 = field === 'her2_status' ? value : updatedInfo.her2_status;
       
-      // Triple negative if all three are Negative
-      if (er === 'Negative' && pr === 'Negative' && her2 === 'Negative') {
+      // Triple negative if all three are negative (handle both old 'Negative' and new 'ER-'/'PR-'/'HER2-' vocab)
+      const erNeg = er === 'Negative' || er === 'ER-';
+      const prNeg = pr === 'Negative' || pr === 'PR-';
+      const her2Neg = her2 === 'Negative' || her2 === 'HER2-';
+      if (erNeg && prNeg && her2Neg) {
         updatedInfo.tnbc_status = true;
       } else if (er || pr || her2) {
-        // Only set to false if at least one status is defined and not all are negative
         updatedInfo.tnbc_status = false;
       }
     }
@@ -656,6 +770,7 @@ const PatientDetail: React.FC = () => {
     if (disease.includes('breast')) return 'breast';
     if (disease.includes('lymphoma')) return 'lymphoma';
     if (disease.includes('myeloma')) return 'myeloma';
+    if (disease.includes('cll') || disease.includes('chronic lymphocytic')) return 'cll';
     return 'other';
   };
 
@@ -668,6 +783,8 @@ const PatientDetail: React.FC = () => {
         return 'Follicular Lymphoma';
       case 'myeloma':
         return 'Multiple Myeloma';
+      case 'cll':
+        return 'CLL';
       default:
         return 'Disease Specific';
     }
@@ -675,12 +792,12 @@ const PatientDetail: React.FC = () => {
 
   const getTherapyOptions = (line: 'first' | 'second' | 'later') => {
     const diseaseType = getDiseaseType();
-    
+
     switch (diseaseType) {
       case 'breast':
-        if (line === 'first') return BREAST_CANCER_FIRST_LINE;
-        if (line === 'second') return BREAST_CANCER_SECOND_LINE;
-        return BREAST_CANCER_LATER_LINE;
+        if (line === 'first') return bcFirstLineOptions.length ? bcFirstLineOptions.map(o => o.value) : BREAST_CANCER_FIRST_LINE;
+        if (line === 'second') return bcSecondLineOptions.length ? bcSecondLineOptions.map(o => o.value) : BREAST_CANCER_SECOND_LINE;
+        return bcLaterLineOptions.length ? bcLaterLineOptions.map(o => o.value) : BREAST_CANCER_LATER_LINE;
       case 'lymphoma':
         if (line === 'first') return LYMPHOMA_FIRST_LINE;
         if (line === 'second') return LYMPHOMA_SECOND_LINE;
@@ -689,6 +806,10 @@ const PatientDetail: React.FC = () => {
         if (line === 'first') return MYELOMA_FIRST_LINE;
         if (line === 'second') return MYELOMA_SECOND_LINE;
         return MYELOMA_LATER_LINE;
+      case 'cll':
+        if (line === 'first') return CLL_FIRST_LINE;
+        if (line === 'second') return CLL_SECOND_LINE;
+        return CLL_LATER_LINE;
       default:
         return ['Other'];
     }
@@ -751,35 +872,86 @@ const PatientDetail: React.FC = () => {
     );
   };
 
-  const renderSelectField = (label: string, field: string, options: string[], fullWidth: boolean = false, disabled: boolean = false) => {
+  const renderSelectField = (label: string, field: string, options: string[], fullWidth: boolean = false, disabled: boolean = false, source?: VocabSource | null) => {
     const currentValue = editedInfo?.[field] || '';
-    
+
     // Add current value to options if it exists but is not in the list
     const displayOptions = [...options];
     if (currentValue && !options.includes(currentValue)) {
       displayOptions.unshift(currentValue);
     }
-    
+
     return (
       <Grid item xs={12} md={fullWidth ? 12 : 6}>
-        <FormControl fullWidth size="small">
-          <InputLabel>{label}</InputLabel>
-          <Select
-            value={currentValue}
-            label={label}
-            onChange={(e) => handleFieldChange(field, e.target.value)}
-            disabled={disabled}
-          >
-            <MenuItem value="">
-              <em>None</em>
-            </MenuItem>
-            {displayOptions.map((option) => (
-              <MenuItem key={option} value={option}>
-                {option}
+        <Box sx={{ position: 'relative' }}>
+          <FormControl fullWidth size="small">
+            <InputLabel>{label}</InputLabel>
+            <Select
+              value={currentValue}
+              label={label}
+              onChange={(e) => handleFieldChange(field, e.target.value)}
+              disabled={disabled}
+            >
+              <MenuItem value="">
+                <em>None</em>
               </MenuItem>
-            ))}
-          </Select>
-        </FormControl>
+              {displayOptions.map((option) => (
+                <MenuItem key={option} value={option}>
+                  {option}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+          {source && (
+            <Tooltip
+              title={
+                <Box>
+                  <Typography variant="caption" display="block" sx={{ fontWeight: 'bold', mb: 0.5 }}>
+                    Source: {source.name}
+                  </Typography>
+                  <Typography variant="caption" display="block">
+                    <a
+                      href={source.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{ color: '#90caf9' }}
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      {source.url} ↗
+                    </a>
+                  </Typography>
+                </Box>
+              }
+              placement="top"
+              arrow
+            >
+              <Box
+                component="span"
+                sx={{
+                  position: 'absolute',
+                  top: -8,
+                  right: -8,
+                  width: 18,
+                  height: 18,
+                  borderRadius: '50%',
+                  bgcolor: 'primary.main',
+                  color: 'white',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: '11px',
+                  fontWeight: 'bold',
+                  cursor: 'help',
+                  zIndex: 1,
+                  lineHeight: 1,
+                  userSelect: 'none',
+                }}
+              >
+                i
+              </Box>
+            </Tooltip>
+          )}
+        </Box>
       </Grid>
     );
   };
@@ -863,25 +1035,27 @@ const PatientDetail: React.FC = () => {
       <Grid item xs={12}>
         <Typography variant="h6" gutterBottom>Tumor Characteristics</Typography>
       </Grid>
-      {renderSelectField('Histologic Type', 'histologic_type', HISTOLOGIC_TYPE_OPTIONS, true)}
-      {renderSelectField('Stage', 'stage', STAGE_OPTIONS)}
-      {renderSelectField('Tumor Stage', 'tumor_stage', TUMOR_STAGE_OPTIONS)}
-      {renderSelectField('Nodes Stage', 'nodes_stage', NODES_STAGE_OPTIONS)}
-      {renderSelectField('Staging Modalities', 'staging_modalities', STAGING_MODALITIES_OPTIONS)}
-      {renderSelectField('Distant Metastatis Stage', 'distant_metastasis_stage', DISTANT_METASTASIS_STAGE_OPTIONS)}
-      {renderBooleanField('Bone-Only Metastatis', 'bone_only_metastasis_status')}
+      {renderSelectField('Histologic Type', 'histologic_type', histologicOptions.length ? histologicOptions.map(o => o.value) : HISTOLOGIC_TYPE_OPTIONS, true, false, histologicSource)}
+      {renderSelectField('Menopausal Status', 'menopausal_status', MENOPAUSAL_OPTIONS)}
+      {renderSelectField('Tumor Stage', 'tumor_stage', TUMOR_STAGE_OPTIONS, false, false, tumorStageSource)}
+      {renderSelectField('Nodes Stage', 'nodes_stage', NODES_STAGE_OPTIONS, false, false, nodesStageSource)}
+      {renderSelectField('Staging Modalities', 'staging_modalities', STAGING_MODALITIES_OPTIONS, false, false, stagingModalitySource)}
+      {renderSelectField('Distant Metastasis Stage', 'distant_metastasis_stage', DISTANT_METASTASIS_STAGE_OPTIONS, false, false, distantMetSource)}
+      {renderBooleanField('Bone-Only Metastasis', 'bone_only_metastasis_status')}
       {renderBooleanField('Measurable Disease by RECIST', 'measurable_disease_by_recist_status')}
-      
+
       <Grid item xs={12}>
         <Divider sx={{ my: 2 }} />
         <Typography variant="h6" gutterBottom sx={{ mt: 2 }}>
           Receptor Status
         </Typography>
       </Grid>
-      {renderSelectField('Estrogen Receptor (ER) Status', 'estrogen_receptor_status', ER_PR_OPTIONS)}
-      {renderSelectField('Progesterone Receptor (PR) Status', 'progesterone_receptor_status', ER_PR_OPTIONS)}
-      {renderSelectField('HER2 Status', 'her2_status', HER2_OPTIONS)}
-      {renderSelectField('Androgen Receptor Status', 'androgen_receptor_status', ER_PR_OPTIONS)}
+      {renderSelectField('Estrogen Receptor (ER) Status', 'estrogen_receptor_status', ER_OPTIONS, false, false, erSource)}
+      {renderSelectField('Progesterone Receptor (PR) Status', 'progesterone_receptor_status', PR_OPTIONS, false, false, prSource)}
+      {renderSelectField('HER2 Status', 'her2_status', HER2_OPTIONS, false, false, her2Source)}
+      {renderSelectField('HR Status', 'hr_status', HR_OPTIONS, false, false, hrSource)}
+      {renderSelectField('HRD Status', 'hrd_status', HRD_OPTIONS, false, false, hrdSource)}
+      {renderSelectField('Androgen Receptor Status', 'androgen_receptor_status', ER_OPTIONS)}
       
       <Grid item xs={12} sm={6}>
         <TextField
@@ -904,7 +1078,7 @@ const PatientDetail: React.FC = () => {
         </Typography>
       </Grid>
       {renderTextField('Ki-67 Proliferation Index (%)', 'ki67_proliferation_index', false, 'number')}
-      {renderTextField('PD-L1 Status (%)', 'pd_l1_tumor_cels', false, 'number')}
+      {renderTextField('PD-L1 Status (%)', 'pd_l1_tumor_cells', false, 'number')}
       {renderTextField('Oncotype DX Score', 'oncotype_dx_score', false, 'number')}
       
       <Grid item xs={12}>
@@ -1026,13 +1200,15 @@ const PatientDetail: React.FC = () => {
       <Grid item xs={12}>
         <Typography variant="h6" gutterBottom>Disease Characteristics</Typography>
       </Grid>
-      {renderTextField('Histologic Subtype', 'histologic_type', true)}
+      {renderSelectField('Histologic Subtype', 'histologic_type', histologicOptions.length ? histologicOptions.map(o => o.value) : HISTOLOGIC_TYPE_OPTIONS, true, false, histologicSource)}
       {renderSelectField('Ann Arbor Stage', 'stage', STAGE_OPTIONS)}
+      {renderSelectField('Tumor Grade', 'tumor_grade', FL_TUMOR_GRADE_OPTIONS, false, false, flGradeSource)}
+      {renderSelectField('GELF Criteria', 'gelf_criteria_status', GELF_OPTIONS, false, false, gelfSource)}
       {renderTextField('FLIPI Score', 'flipi_score', false, 'number')}
-      {renderSelectField('FLIPI Risk Category', 'flipi_risk_category', FLIPI_RISK_OPTIONS)}
+      {renderSelectField('FLIPI Risk Category', 'flipi_risk_category', FLIPI_RISK_OPTIONS, false, false, flipiSource)}
       {renderSelectField('Bulky Disease', 'bulky_disease', YES_NO_OPTIONS)}
       {renderSelectField('B Symptoms', 'b_symptoms', YES_NO_OPTIONS)}
-      
+
       <Grid item xs={12}>
         <Divider sx={{ my: 2 }} />
         <Typography variant="h6" gutterBottom sx={{ mt: 2 }}>
@@ -1056,6 +1232,8 @@ const PatientDetail: React.FC = () => {
       {renderSelectField('ISS Stage', 'stage', ISS_STAGE_OPTIONS)}
       {renderSelectField('R-ISS Stage', 'r_iss_stage', ISS_STAGE_OPTIONS)}
       {renderTextField('Durie-Salmon Stage', 'durie_salmon_stage')}
+      {renderSelectField('Progression Status', 'progression', MM_PROGRESSION_OPTIONS, false, false, progressionSource)}
+      {renderMultiSelectField('Stem Cell Transplant History', 'stem_cell_transplant_history', STEM_CELL_TRANSPLANT_OPTIONS, true)}
       
       <Grid item xs={12}>
         <Divider sx={{ my: 2 }} />
@@ -1094,6 +1272,50 @@ const PatientDetail: React.FC = () => {
     </Grid>
   );
 
+  const renderCLLTab = () => (
+    <Grid container spacing={3}>
+      <Grid item xs={12}>
+        <Typography variant="h6" gutterBottom>CLL Disease Characteristics</Typography>
+      </Grid>
+      {renderSelectField('Binet Stage', 'binet_stage', BINET_STAGE_OPTIONS)}
+      {renderSelectField('Tumor Burden', 'tumor_burden', TUMOR_BURDEN_OPTIONS)}
+      {renderSelectField('Disease Activity', 'disease_activity', DISEASE_ACTIVITY_OPTIONS)}
+      {renderSelectField('Richter Transformation', 'richter_transformation', RICHTER_TRANSFORMATION_OPTIONS)}
+      {renderMultiSelectField('Protein Expressions', 'protein_expressions', PROTEIN_EXPRESSION_OPTIONS, true)}
+
+      <Grid item xs={12}>
+        <Divider sx={{ my: 2 }} />
+        <Typography variant="h6" gutterBottom sx={{ mt: 2 }}>
+          Laboratory Markers
+        </Typography>
+      </Grid>
+      {renderTextField('Absolute Lymphocyte Count (×10⁹/L)', 'absolute_lymphocyte_count', false, 'number')}
+      {renderTextField('Lymphocyte Doubling Time (months)', 'lymphocyte_doubling_time', false, 'number')}
+      {renderTextField('Serum Beta-2 Microglobulin (mg/L)', 'serum_beta2_microglobulin_level', false, 'number')}
+      {renderTextField('Clonal B-Lymphocyte Count', 'clonal_b_lymphocyte_count', false, 'number')}
+      {renderTextField('Clonal Bone Marrow B-Lymphocytes (%)', 'clonal_bone_marrow_b_lymphocytes', false, 'number')}
+      {renderTextField('QTcF Value (ms)', 'qtcf_value', false, 'number')}
+      {renderTextField('Largest Lymph Node Size (cm)', 'largest_lymph_node_size', false, 'number')}
+      {renderTextField('Spleen Size (cm)', 'spleen_size', false, 'number')}
+
+      <Grid item xs={12}>
+        <Divider sx={{ my: 2 }} />
+        <Typography variant="h6" gutterBottom sx={{ mt: 2 }}>
+          Clinical Findings
+        </Typography>
+      </Grid>
+      {renderBooleanField('TP53 Disruption', 'tp53_disruption')}
+      {renderBooleanField('Bone Marrow Involvement', 'bone_marrow_involvement')}
+      {renderBooleanField('Measurable Disease (IWCLL)', 'measurable_disease_iwcll')}
+      {renderBooleanField('Splenomegaly', 'splenomegaly')}
+      {renderBooleanField('Hepatomegaly', 'hepatomegaly')}
+      {renderBooleanField('Lymphadenopathy', 'lymphadenopathy')}
+      {renderBooleanField('Autoimmune Cytopenias Refractory to Steroids', 'autoimmune_cytopenias_refractory_to_steroids')}
+      {renderBooleanField('BTK Inhibitor Refractory', 'btk_inhibitor_refractory')}
+      {renderBooleanField('BCL-2 Inhibitor Refractory', 'bcl2_inhibitor_refractory')}
+    </Grid>
+  );
+
   const renderDiseaseSpecificTab = () => {
     const diseaseType = getDiseaseType();
     switch (diseaseType) {
@@ -1103,15 +1325,17 @@ const PatientDetail: React.FC = () => {
         return renderLymphomaTab();
       case 'myeloma':
         return renderMyelomaTab();
+      case 'cll':
+        return renderCLLTab();
       default:
         return (
           <Grid container spacing={3}>
             {renderSelectField('Disease', 'disease', DISEASE_OPTIONS)}
             {renderSelectField('Stage', 'stage', STAGE_OPTIONS)}
-            {renderSelectField('Histologic Type', 'histologic_type', HISTOLOGIC_TYPE_OPTIONS, true)}
+            {renderSelectField('Histologic Type', 'histologic_type', histologicOptions.length ? histologicOptions.map(o => o.value) : HISTOLOGIC_TYPE_OPTIONS, true, false, histologicSource)}
             <Grid item xs={12}>
               <Typography variant="body2" color="text.secondary">
-                Disease-specific fields are available for Breast Cancer, Follicular Lymphoma, and Multiple Myeloma.
+                Disease-specific fields are available for Breast Cancer, Follicular Lymphoma, Multiple Myeloma, and CLL.
               </Typography>
             </Grid>
           </Grid>
@@ -1226,21 +1450,21 @@ const PatientDetail: React.FC = () => {
               </Typography>
             </Grid>
             
-            {renderSelectField('Ethnicity', 'ethnicity', ETHNICITY_OPTIONS, true)}
-            
+            {renderSelectField('Ethnicity', 'ethnicity', ETHNICITY_OPTIONS, true, false, ethnicitySource)}
+
             <Grid item xs={12}>
               <Divider sx={{ my: 2 }} />
               <Typography variant="h6" gutterBottom sx={{ mt: 2 }}>
                 Clinical Summary
               </Typography>
             </Grid>
-            
-            {renderSelectField('Disease', 'disease', DISEASE_OPTIONS)}
-            {renderSelectField('Stage', 'stage', STAGE_OPTIONS)}
-            {renderSelectField('Histologic Type', 'histologic_type', HISTOLOGIC_TYPE_OPTIONS, true)}
-            {renderSelectField('ECOG Performance Status', 'ecog_performance_status', ECOG_OPTIONS)}
+
+            {renderSelectField('Disease', 'disease', DISEASE_OPTIONS, false, false, diseaseSource)}
+            {renderSelectField('Stage', 'stage', STAGE_OPTIONS, false, false, cancerStageSource)}
+            {renderSelectField('Histologic Type', 'histologic_type', histologicOptions.length ? histologicOptions.map(o => o.value) : HISTOLOGIC_TYPE_OPTIONS, true, false, histologicSource)}
+            {renderSelectField('ECOG Performance Status', 'ecog_performance_status', ECOG_OPTIONS, false, false, ecogSource)}
             {renderDateField('ECOG Assessment Date', 'ecog_assessment_date')}
-            {renderSelectField('Karnofsky Performance Score', 'karnofsky_performance_score', KARNOFSKY_OPTIONS)}
+            {renderSelectField('Karnofsky Performance Score', 'karnofsky_performance_score', KARNOFSKY_OPTIONS, false, false, karnofskySource)}
             
             <Grid item xs={12}>
               <Divider sx={{ my: 2 }} />
@@ -1276,33 +1500,33 @@ const PatientDetail: React.FC = () => {
                 First Line Therapy
               </Typography>
             </Grid>
-            {renderSelectField('First Line Therapy', 'first_line_therapy', getTherapyOptions('first'), true)}
+            {renderSelectField('First Line Therapy', 'first_line_therapy', getTherapyOptions('first'), true, false, getDiseaseType() === 'breast' ? bcFirstLineSource : null)}
             {renderDateField('First Line Start Date', 'first_line_start_date')}
             {renderDateField('First Line End Date', 'first_line_end_date')}
             {renderSelectField('Therapy Intent', 'first_line_intent', THERAPY_INTENT_OPTIONS)}
             {renderSelectField('Reason for Discontinuation', 'first_line_discontinuation_reason', DISCONTINUATION_REASON_OPTIONS)}
             {renderSelectField('First Line Outcome', 'first_line_outcome', THERAPY_OUTCOME_OPTIONS)}
-            
+
             <Grid item xs={12}>
               <Divider sx={{ my: 2 }} />
               <Typography variant="h6" gutterBottom sx={{ mt: 2 }}>
                 Second Line Therapy
               </Typography>
             </Grid>
-            {renderSelectField('Second Line Therapy', 'second_line_therapy', getTherapyOptions('second'), true)}
+            {renderSelectField('Second Line Therapy', 'second_line_therapy', getTherapyOptions('second'), true, false, getDiseaseType() === 'breast' ? bcSecondLineSource : null)}
             {renderDateField('Second Line Start Date', 'second_line_start_date')}
             {renderDateField('Second Line End Date', 'second_line_end_date')}
             {renderSelectField('Therapy Intent', 'second_line_intent', THERAPY_INTENT_OPTIONS)}
             {renderSelectField('Reason for Discontinuation', 'second_line_discontinuation_reason', DISCONTINUATION_REASON_OPTIONS)}
             {renderSelectField('Second Line Outcome', 'second_line_outcome', THERAPY_OUTCOME_OPTIONS)}
-            
+
             <Grid item xs={12}>
               <Divider sx={{ my: 2 }} />
               <Typography variant="h6" gutterBottom sx={{ mt: 2 }}>
                 Later Line Therapy
               </Typography>
             </Grid>
-            {renderSelectField('Later Line Therapy', 'later_therapy', getTherapyOptions('later'), true)}
+            {renderSelectField('Later Line Therapy', 'later_therapy', getTherapyOptions('later'), true, false, getDiseaseType() === 'breast' ? bcLaterLineSource : null)}
             {renderDateField('Later Line Start Date', 'later_start_date')}
             {renderDateField('Later Line End Date', 'later_end_date')}
             {renderSelectField('Therapy Intent', 'later_intent', THERAPY_INTENT_OPTIONS)}
@@ -1423,14 +1647,6 @@ const PatientDetail: React.FC = () => {
         <TabPanel value={activeTab} index={5}>
           <Typography variant="h6" gutterBottom>Lifestyle & Behavior</Typography>
           <Grid container spacing={3}>
-            <Grid item xs={12}>
-              <Typography variant="subtitle1" fontWeight="bold" gutterBottom sx={{ mt: 1 }}>
-                Performance Status
-              </Typography>
-            </Grid>
-            {renderSelectField('ECOG Performance Status', 'ecog_performance_status', ECOG_OPTIONS)}
-            {renderSelectField('Karnofsky Performance Score', 'karnofsky_performance_score', KARNOFSKY_OPTIONS)}
-            
             <Grid item xs={12}>
               <Divider sx={{ my: 2 }} />
               <Typography variant="subtitle1" fontWeight="bold" gutterBottom sx={{ mt: 2 }}>

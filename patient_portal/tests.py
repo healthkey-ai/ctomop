@@ -2414,10 +2414,11 @@ class ProvenancePatchTest(_SmartBase):
         resp = self.write_client.post(
             '/api/conditions/',
             {
+                'condition_occurrence_id': 79901,
                 'person': self.person.person_id,
-                'condition_concept_id': 0,
+                'condition_concept': self.condition_concept.concept_id,
                 'condition_start_date': '2024-01-01',
-                'condition_type_concept_id': 0,
+                'condition_type_concept': self.type_concept.concept_id,
             },
             format='json',
             HTTP_X_PROVENANCE_SOURCE='EHR_SYNC',
@@ -2425,7 +2426,7 @@ class ProvenancePatchTest(_SmartBase):
         )
         self.assertEqual(resp.status_code, 201)
         from omop_core.models import ConditionOccurrence
-        co = ConditionOccurrence.objects.filter(person=self.person).order_by('-id').first()
+        co = ConditionOccurrence.objects.filter(person=self.person).order_by('-condition_occurrence_id').first()
         self.assertIsNotNone(co)
         prov = ProvenanceRecord.objects.filter(object_id=co.pk).first()
         self.assertIsNotNone(prov, 'No ProvenanceRecord created for direct OMOP write')

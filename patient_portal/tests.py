@@ -2492,10 +2492,18 @@ class AuditLogMiddlewareTest(_SmartBase):
             audit_logger.removeHandler(capture)
         return [json.loads(r) for r in records]
 
-    def test_patch_emits_audit_log(self):
-        """A PATCH request must produce exactly one audit log entry."""
-        person = Person.objects.create(person_id=88801)
+    def _make_person_and_pi(self, person_id):
+        person = Person.objects.create(person_id=person_id)
         pi = PatientInfo.objects.create(person=person)
+        return person, pi
+
+    # ------------------------------------------------------------------
+    # HTTP method coverage
+    # ------------------------------------------------------------------
+
+    def test_patch_emits_audit_log(self):
+        """PATCH produces exactly one audit log entry."""
+        _, pi = self._make_person_and_pi(88801)
 
         logs = self._capture_audit_logs(
             self.write_client.patch,
@@ -2509,13 +2517,49 @@ class AuditLogMiddlewareTest(_SmartBase):
         self.assertEqual(entry['event'], 'api_write')
         self.assertEqual(entry['method'], 'PATCH')
         self.assertIn('patient-info', entry['path'])
-        self.assertIsNotNone(entry['status_code'])
         self.assertEqual(entry['client_id'], 'foundation-client-id')
 
+    def test_post_emits_audit_log(self):
+        """POST produces exactly one audit log entry."""
+        payload = {
+            'person': self.person.pk,
+            'measurement_concept': self.type_concept.pk,
+            'measurement_date': '2024-01-01',
+            'measurement_type_concept': self.type_concept.pk,
+            'measurement_id': 99901,
+        }
+        logs = self._capture_audit_logs(
+            self.write_client.post,
+            '/api/measurements/',
+            payload,
+            format='json',
+        )
+
+        self.assertEqual(len(logs), 1)
+        self.assertEqual(logs[0]['method'], 'POST')
+        self.assertIn('measurements', logs[0]['path'])
+
+    def test_delete_emits_audit_log(self):
+        """DELETE produces exactly one audit log entry."""
+        from omop_core.models import Measurement
+        m = Measurement.objects.create(
+            measurement_id=99902,
+            person=self.person,
+            measurement_concept=self.type_concept,
+            measurement_date='2024-01-01',
+            measurement_type_concept=self.type_concept,
+        )
+        logs = self._capture_audit_logs(
+            self.write_client.delete,
+            f'/api/measurements/{m.measurement_id}/',
+        )
+
+        self.assertEqual(len(logs), 1)
+        self.assertEqual(logs[0]['method'], 'DELETE')
+
     def test_get_does_not_emit_audit_log(self):
-        """A GET request must NOT produce any audit log entry."""
-        person = Person.objects.create(person_id=88802)
-        pi = PatientInfo.objects.create(person=person)
+        """GET produces no audit log entries."""
+        _, pi = self._make_person_and_pi(88802)
 
         logs = self._capture_audit_logs(
             self.read_client.get,
@@ -2524,10 +2568,21 @@ class AuditLogMiddlewareTest(_SmartBase):
 
         self.assertEqual(len(logs), 0, f'Unexpected audit logs for GET: {logs}')
 
+    def test_list_get_does_not_emit_audit_log(self):
+        """GET list endpoint produces no audit log entries."""
+        logs = self._capture_audit_logs(
+            self.read_client.get,
+            '/api/patient-info/',
+        )
+        self.assertEqual(len(logs), 0)
+
+    # ------------------------------------------------------------------
+    # Log content correctness
+    # ------------------------------------------------------------------
+
     def test_audit_log_contains_required_fields(self):
-        """Audit entry must include all fields from the acceptance criteria."""
-        person = Person.objects.create(person_id=88803)
-        pi = PatientInfo.objects.create(person=person)
+        """Every audit entry must include all fields from the acceptance criteria."""
+        _, pi = self._make_person_and_pi(88803)
 
         logs = self._capture_audit_logs(
             self.write_client.patch,
@@ -2539,4 +2594,90 @@ class AuditLogMiddlewareTest(_SmartBase):
         self.assertEqual(len(logs), 1)
         entry = logs[0]
         for field in ('event', 'method', 'path', 'status_code', 'client_id', 'ip_address', 'duration_ms'):
-            self.assertIn(field, entry, f'Missing field: {field}')
+            self.assertIn(field, entry, f'Missing required audit field: {field}')
+
+    def test_audit_log_is_valid_json(self):
+        """Each audit line must be parseable as JSON (SIEM-compatible)."""
+        import logging as _logging
+
+        raw_records = []
+
+        class _RawCapture(_logging.Handler):
+            def emit(self, record):
+                raw_records.append(record.getMessage())
+
+        capture = _RawCapture()
+        _logging.getLogger('audit').addHandler(capture)
+        try:
+            _, pi = self._make_person_and_pi(88804)
+            self.write_client.patch(f'/api/patient-info/{pi.pk}/', {'ecog_status': '0'}, format='json')
+        finally:
+            _logging.getLogger('audit').removeHandler(capture)
+
+        self.assertEqual(len(raw_records), 1)
+        try:
+            parsed = json.loads(raw_records[0])
+        except json.JSONDecodeError as exc:
+            self.fail(f'Audit log is not valid JSON: {exc}\nRaw: {raw_records[0]}')
+        self.assertIsInstance(parsed, dict)
+
+    def test_audit_log_captures_status_code(self):
+        """status_code in the log must reflect the actual HTTP response status."""
+        _, pi = self._make_person_and_pi(88805)
+        # Patch a non-existent resource to get a predictable 404
+        logs = self._capture_audit_logs(
+            self.write_client.patch,
+            '/api/patient-info/999999/',
+            {'ecog_status': '3'},
+            format='json',
+        )
+        self.assertEqual(len(logs), 1)
+        self.assertEqual(logs[0]['status_code'], 404)
+
+    def test_audit_log_client_id_from_oauth_token(self):
+        """client_id in the log must reflect the OAuth2 application's client_id."""
+        _, pi = self._make_person_and_pi(88806)
+
+        logs = self._capture_audit_logs(
+            self.write_client.patch,
+            f'/api/patient-info/{pi.pk}/',
+            {'ecog_status': '1'},
+            format='json',
+        )
+
+        self.assertEqual(len(logs), 1)
+        self.assertEqual(logs[0]['client_id'], 'foundation-client-id')
+
+    def test_audit_log_no_client_id_for_unauthenticated(self):
+        """Unauthenticated requests must log client_id as null, not raise."""
+        anon = APIClient()
+        logs = self._capture_audit_logs(
+            anon.patch,
+            '/api/patient-info/1/',
+            {'ecog_status': '0'},
+            format='json',
+        )
+        # Unauthenticated returns 401/403; middleware must still emit a log entry
+        self.assertEqual(len(logs), 1)
+        self.assertIsNone(logs[0]['client_id'])
+
+    # ------------------------------------------------------------------
+    # Reliability: logging failure must not block the response
+    # ------------------------------------------------------------------
+
+    def test_logging_failure_does_not_block_response(self):
+        """If the audit logger raises, the API response must still be returned."""
+        import logging as _logging
+        from unittest.mock import patch as mock_patch
+
+        _, pi = self._make_person_and_pi(88807)
+
+        with mock_patch.object(_logging.getLogger('audit'), 'info', side_effect=RuntimeError('log exploded')):
+            response = self.write_client.patch(
+                f'/api/patient-info/{pi.pk}/',
+                {'ecog_status': '1'},
+                format='json',
+            )
+
+        # Response must be returned regardless of logging failure
+        self.assertIn(response.status_code, range(200, 600))

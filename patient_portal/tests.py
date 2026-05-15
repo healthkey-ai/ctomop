@@ -2465,3 +2465,78 @@ class ProvenanceFhirUploadTest(_SmartBase):
             format='multipart',
         )
         self.assertEqual(resp.status_code, 400)
+
+
+# ---------------------------------------------------------------------------
+# HKI-SEC-07: Audit log middleware
+# ---------------------------------------------------------------------------
+
+class AuditLogMiddlewareTest(_SmartBase):
+    """Audit log middleware emits JSON for mutating requests, silent on reads."""
+
+    def _capture_audit_logs(self, handler, *args, **kwargs):
+        """Call handler and return list of parsed audit log JSON entries emitted."""
+        import logging
+        records = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record.getMessage())
+
+        capture = _Capture()
+        audit_logger = logging.getLogger('audit')
+        audit_logger.addHandler(capture)
+        try:
+            handler(*args, **kwargs)
+        finally:
+            audit_logger.removeHandler(capture)
+        return [json.loads(r) for r in records]
+
+    def test_patch_emits_audit_log(self):
+        """A PATCH request must produce exactly one audit log entry."""
+        person = Person.objects.create(person_id=88801)
+        pi = PatientInfo.objects.create(person=person)
+
+        logs = self._capture_audit_logs(
+            self.write_client.patch,
+            f'/api/patient-info/{pi.pk}/',
+            {'ecog_status': '1'},
+            format='json',
+        )
+
+        self.assertEqual(len(logs), 1)
+        entry = logs[0]
+        self.assertEqual(entry['event'], 'api_write')
+        self.assertEqual(entry['method'], 'PATCH')
+        self.assertIn('patient-info', entry['path'])
+        self.assertIsNotNone(entry['status_code'])
+        self.assertEqual(entry['client_id'], 'foundation-client-id')
+
+    def test_get_does_not_emit_audit_log(self):
+        """A GET request must NOT produce any audit log entry."""
+        person = Person.objects.create(person_id=88802)
+        pi = PatientInfo.objects.create(person=person)
+
+        logs = self._capture_audit_logs(
+            self.read_client.get,
+            f'/api/patient-info/{pi.pk}/',
+        )
+
+        self.assertEqual(len(logs), 0, f'Unexpected audit logs for GET: {logs}')
+
+    def test_audit_log_contains_required_fields(self):
+        """Audit entry must include all fields from the acceptance criteria."""
+        person = Person.objects.create(person_id=88803)
+        pi = PatientInfo.objects.create(person=person)
+
+        logs = self._capture_audit_logs(
+            self.write_client.patch,
+            f'/api/patient-info/{pi.pk}/',
+            {'ecog_status': '2'},
+            format='json',
+        )
+
+        self.assertEqual(len(logs), 1)
+        entry = logs[0]
+        for field in ('event', 'method', 'path', 'status_code', 'client_id', 'ip_address', 'duration_ms'):
+            self.assertIn(field, entry, f'Missing field: {field}')

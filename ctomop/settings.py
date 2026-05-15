@@ -56,7 +56,32 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'patient_portal.api.middleware.AuditLogMiddleware',
 ]
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'audit_json': {
+            '()': 'logging.Formatter',
+            'format': '%(message)s',
+        },
+    },
+    'handlers': {
+        'audit_stdout': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'audit_json',
+        },
+    },
+    'loggers': {
+        'audit': {
+            'handlers': ['audit_stdout'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+    },
+}
 
 ROOT_URLCONF = 'ctomop.urls'
 

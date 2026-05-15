@@ -353,12 +353,34 @@ describe('LabsTab - new_field', () => {
 ### Running Tests
 
 ```bash
-# Backend tests
-.venv/bin/python manage.py test omop_core patient_portal
+# Backend tests — always run against the dev PostgreSQL DB
+DATABASE_URL="postgresql://ctomop_dev_user:IehVp8TGNcelOymGcjtfL6Up6W63DOf2@dpg-d7pqr35ckfvc73bm0lc0-a.oregon-postgres.render.com/ctomop_dev" \
+  .venv/bin/python manage.py test omop_core patient_portal --keepdb
 
 # Frontend tests
 cd frontend && npm test -- --watchAll=false
 ```
+
+---
+
+## Rule: Tests for Every New Feature
+
+**Every new feature must have tests written and run before the work is considered complete.**
+
+- Write tests immediately after implementing the feature — not as a follow-up.
+- Tests must be run against the dev PostgreSQL database (see Running Tests above).
+- The feature is not done until the tests pass.
+
+**What to test for a new API endpoint or middleware:**
+- The happy path (correct input → expected output/status)
+- All relevant HTTP methods (GET, POST, PATCH, DELETE) if applicable
+- Authentication/authorization edge cases (unauthenticated, wrong scope, etc.)
+- Failure cases (invalid input, missing resource, etc.)
+- That the feature does NOT fire when it shouldn't (e.g., read-only requests for write-only logic)
+
+**Test placement:**
+- Backend feature tests → `patient_portal/tests.py` (or `omop_core/tests.py` for model-level logic)
+- New test classes should inherit the appropriate base (`_SmartBase` for OAuth-authenticated tests, `TestCase` for pure model/logic tests)
 
 ---
 

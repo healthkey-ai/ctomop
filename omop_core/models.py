@@ -127,6 +127,68 @@ class Concept(models.Model):
         return f"{self.concept_id}: {self.concept_name}"
 
 
+class Relationship(models.Model):
+    """OMOP CDM Relationship table - defines relationships between concepts."""
+    relationship_id = models.CharField(max_length=20, primary_key=True)
+    relationship_name = models.CharField(max_length=255)
+    is_hierarchical = models.CharField(max_length=1)
+    defines_ancestry = models.CharField(max_length=1)
+    reverse_relationship_id = models.CharField(max_length=20)
+    relationship_concept_id = models.IntegerField()
+
+    class Meta:
+        db_table = 'relationship'
+
+    def __str__(self):
+        return self.relationship_id
+
+
+class ConceptRelationship(models.Model):
+    """OMOP CDM Concept Relationship table - pairwise relationships between concepts."""
+    concept_1 = models.ForeignKey(
+        Concept, on_delete=models.DO_NOTHING,
+        related_name='relationships_as_source', db_column='concept_id_1',
+    )
+    concept_2 = models.ForeignKey(
+        Concept, on_delete=models.DO_NOTHING,
+        related_name='relationships_as_target', db_column='concept_id_2',
+    )
+    relationship = models.ForeignKey(
+        Relationship, on_delete=models.DO_NOTHING, db_column='relationship_id',
+    )
+    valid_start_date = models.DateField()
+    valid_end_date = models.DateField()
+    invalid_reason = models.CharField(max_length=1, null=True, blank=True)
+
+    class Meta:
+        db_table = 'concept_relationship'
+        unique_together = [('concept_1', 'concept_2', 'relationship')]
+
+    def __str__(self):
+        return f'{self.concept_1_id} --[{self.relationship_id}]--> {self.concept_2_id}'
+
+
+class ConceptAncestor(models.Model):
+    """OMOP CDM Concept Ancestor table - hierarchical ancestry between concepts."""
+    ancestor_concept = models.ForeignKey(
+        Concept, on_delete=models.DO_NOTHING,
+        related_name='descendants', db_column='ancestor_concept_id',
+    )
+    descendant_concept = models.ForeignKey(
+        Concept, on_delete=models.DO_NOTHING,
+        related_name='ancestors', db_column='descendant_concept_id',
+    )
+    min_levels_of_separation = models.IntegerField()
+    max_levels_of_separation = models.IntegerField()
+
+    class Meta:
+        db_table = 'concept_ancestor'
+        unique_together = [('ancestor_concept', 'descendant_concept')]
+
+    def __str__(self):
+        return f'{self.ancestor_concept_id} -> {self.descendant_concept_id}'
+
+
 class Location(models.Model):
     """OMOP CDM Location table - geographic locations."""
     location_id = models.BigIntegerField(primary_key=True)

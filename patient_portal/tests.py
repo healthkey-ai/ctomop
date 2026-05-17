@@ -22,6 +22,7 @@ from omop_core.models import (
     Concept, ConceptClass, Domain, Vocabulary,
     Person, PatientInfo, ProvenanceRecord,
     ConditionOccurrence, DrugExposure, Measurement, ProcedureOccurrence,
+    Relationship, ConceptRelationship, ConceptAncestor,
 )
 from omop_oncology.models import Episode, EpisodeEvent
 
@@ -2956,3 +2957,90 @@ class PatientInfoOmopSyncTest(_SmartBase):
             hasattr(views_mod, '_LAB_FIELD_TO_LOINC'),
             '_LAB_FIELD_TO_LOINC should have been removed from views.py',
         )
+
+
+class VocabularyRelationshipModelTest(TestCase):
+    """Verify Relationship, ConceptRelationship, ConceptAncestor models exist and are queryable."""
+
+    def setUp(self):
+        _make_vocab_fixtures()
+        vocab = Vocabulary.objects.get(vocabulary_id='TEST')
+        domain = Domain.objects.get(domain_id='Drug')
+        cc = ConceptClass.objects.get(concept_class_id='Clinical Finding')
+        self.c1 = Concept.objects.create(
+            concept_id=9901001, concept_name='Drug A',
+            domain=domain, vocabulary=vocab, concept_class=cc,
+            concept_code='A1',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        self.c2 = Concept.objects.create(
+            concept_id=9901002, concept_name='Drug Class B',
+            domain=domain, vocabulary=vocab, concept_class=cc,
+            concept_code='B1',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+
+    def test_relationship_model(self):
+        Relationship.objects.create(
+            relationship_id='test-maps-to',
+            relationship_name='Test Maps To',
+            is_hierarchical='0',
+            defines_ancestry='0',
+            reverse_relationship_id='test-mapped-from',
+            relationship_concept_id=0,
+        )
+        self.assertEqual(
+            Relationship.objects.get(pk='test-maps-to').relationship_name,
+            'Test Maps To',
+        )
+
+    def test_concept_relationship_model(self):
+        r = Relationship.objects.create(
+            relationship_id='Maps to',
+            relationship_name='Maps to',
+            is_hierarchical='0',
+            defines_ancestry='0',
+            reverse_relationship_id='Mapped from',
+            relationship_concept_id=0,
+        )
+        ConceptRelationship.objects.create(
+            concept_1=self.c1,
+            concept_2=self.c2,
+            relationship=r,
+            valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31),
+        )
+        self.assertEqual(
+            ConceptRelationship.objects.filter(concept_1=self.c1).count(), 1
+        )
+
+    def test_concept_ancestor_model(self):
+        ConceptAncestor.objects.create(
+            ancestor_concept=self.c2,
+            descendant_concept=self.c1,
+            min_levels_of_separation=1,
+            max_levels_of_separation=1,
+        )
+        self.assertEqual(
+            ConceptAncestor.objects.filter(descendant_concept=self.c1).count(), 1
+        )
+
+    def test_unique_together_concept_relationship(self):
+        from django.db import IntegrityError
+        r = Relationship.objects.create(
+            relationship_id='Is a',
+            relationship_name='Is a',
+            is_hierarchical='1',
+            defines_ancestry='1',
+            reverse_relationship_id='Subsumes',
+            relationship_concept_id=0,
+        )
+        ConceptRelationship.objects.create(
+            concept_1=self.c1, concept_2=self.c2, relationship=r,
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        with self.assertRaises(IntegrityError):
+            ConceptRelationship.objects.create(
+                concept_1=self.c1, concept_2=self.c2, relationship=r,
+                valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+            )

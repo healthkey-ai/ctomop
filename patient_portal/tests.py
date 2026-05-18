@@ -2956,3 +2956,280 @@ class PatientInfoOmopSyncTest(_SmartBase):
             hasattr(views_mod, '_LAB_FIELD_TO_LOINC'),
             '_LAB_FIELD_TO_LOINC should have been removed from views.py',
         )
+
+
+# ---------------------------------------------------------------------------
+# MyChart / SMART-on-FHIR OAuth client tests
+# ---------------------------------------------------------------------------
+
+class MyChartFlowTest(TestCase):
+    """Cover /start, /finish, /organizations.
+
+    Epic and Airflow are mocked at the client class so the service runs end-to-end
+    in-memory: PKCE generation, OAuth2State persistence, FhirToken upsert, DAG
+    trigger. The seed data from migration 0065 (epic-sandbox EpicOrganization +
+    Epic Sandbox endpoint) is relied on.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.models import EpicEndpoint, EpicOrganization, Organization
+        cls.user = User.objects.create_user(username='patient1', password='pw')
+        cls.other_user = User.objects.create_user(username='patient2', password='pw')
+        # Seed rows that migration 0065 normally creates; safe to get_or_create
+        # so the same code works whether migrations populated them or not.
+        Organization.objects.get_or_create(
+            slug='mychart-self-service',
+            defaults={'name': 'MyChart Self-Service'},
+        )
+        endpoint, _ = EpicEndpoint.objects.get_or_create(
+            url='https://fhir.epic.com/interconnect-fhir-oauth/api/FHIR/R4',
+            defaults={'name': 'Epic Sandbox', 'is_active': True},
+        )
+        cls.epic_org, _ = EpicOrganization.objects.get_or_create(
+            alias='epic-sandbox',
+            defaults={'title': 'Epic Sandbox', 'endpoint': endpoint, 'is_active': True},
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+    # ---- /organizations ----------------------------------------------
+
+    def test_organizations_requires_auth(self):
+        anon = APIClient()
+        self.assertEqual(
+            anon.get('/api/mychart/organizations/').status_code,
+            status.HTTP_401_UNAUTHORIZED,
+        )
+
+    def test_organizations_lists_active_only(self):
+        from omop_core.models import EpicEndpoint, EpicOrganization
+        ep = EpicEndpoint.objects.create(url='https://example/inactive', name='Inactive Hosp')
+        EpicOrganization.objects.create(
+            alias='inactive-hosp', title='Inactive Hosp', endpoint=ep, is_active=False,
+        )
+        resp = self.client.get('/api/mychart/organizations/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        aliases = [o['alias'] for o in resp.data]
+        self.assertIn('epic-sandbox', aliases)
+        self.assertNotIn('inactive-hosp', aliases)
+
+    # ---- /start ------------------------------------------------------
+
+    def _smart_config(self):
+        from patient_portal.mychart.dtos import SmartConfiguration
+        return SmartConfiguration(
+            authorization_endpoint='https://fhir.epic.com/oauth2/authorize',
+            token_endpoint='https://fhir.epic.com/oauth2/token',
+            issuer='https://fhir.epic.com',
+            jwks_uri='https://fhir.epic.com/oauth2/jwks',
+        )
+
+    def test_start_requires_auth(self):
+        anon = APIClient()
+        resp = anon.post('/api/mychart/start/', {'organization_alias': 'epic-sandbox'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_start_503_when_client_id_unset(self):
+        import logging
+        from django.test import override_settings
+        # Django's default 5xx logger triggers a Python-3.14 template copy bug
+        # on logging; mute it for this assertion.
+        logging.disable(logging.CRITICAL)
+        try:
+            with override_settings(EPIC_CLIENT_ID=''):
+                resp = self.client.post(
+                    '/api/mychart/start/',
+                    {'organization_alias': 'epic-sandbox'},
+                    format='json',
+                )
+        finally:
+            logging.disable(logging.NOTSET)
+        self.assertEqual(resp.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+
+    def test_start_400_on_unknown_org(self):
+        from unittest.mock import patch
+        with patch(
+            'patient_portal.mychart.client.EpicClientImplementation.get_smart_configuration',
+            return_value=self._smart_config(),
+        ):
+            resp = self.client.post(
+                '/api/mychart/start/', {'organization_alias': 'nope'}, format='json',
+            )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_start_returns_url_and_persists_state(self):
+        from urllib.parse import urlparse, parse_qs
+        from unittest.mock import patch
+        from omop_core.models import OAuth2State
+
+        with patch(
+            'patient_portal.mychart.client.EpicClientImplementation.get_smart_configuration',
+            return_value=self._smart_config(),
+        ):
+            resp = self.client.post(
+                '/api/mychart/start/', {'organization_alias': 'epic-sandbox'}, format='json',
+            )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIn('url', resp.data)
+        self.assertIn('state', resp.data)
+
+        parsed = urlparse(resp.data['url'])
+        qs = parse_qs(parsed.query)
+        self.assertEqual(qs['response_type'], ['code'])
+        self.assertEqual(qs['code_challenge_method'], ['S256'])
+        self.assertEqual(qs['state'], [resp.data['state']])
+        self.assertEqual(qs['aud'], [self.epic_org.endpoint.url])
+        self.assertIn('code_challenge', qs)
+        self.assertIn('nonce', qs)
+        # Scope should include the configured set
+        self.assertIn('openid', qs['scope'][0])
+
+        oauth_state = OAuth2State.objects.get(state=resp.data['state'])
+        self.assertEqual(oauth_state.user_id, self.user.id)
+        self.assertEqual(oauth_state.endpoint_id, self.epic_org.endpoint_id)
+        self.assertEqual(
+            oauth_state.metadata['token_endpoint'],
+            'https://fhir.epic.com/oauth2/token',
+        )
+
+    # ---- /finish -----------------------------------------------------
+
+    def _seed_state(self, user=None) -> str:
+        from omop_core.models import OAuth2State
+        oauth_state = OAuth2State.objects.create(
+            state='test-state-abc',
+            code_verifier='verifier-xyz',
+            provider=OAuth2State.PROVIDER_EPIC,
+            user=user or self.user,
+            endpoint=self.epic_org.endpoint,
+            metadata={
+                'token_endpoint': 'https://fhir.epic.com/oauth2/token',
+                'nonce': 'nonce-123',
+                'epic_organization_alias': 'epic-sandbox',
+            },
+        )
+        return oauth_state.state
+
+    def _token_response(self, patient='ePatient123'):
+        from patient_portal.mychart.dtos import TokenExchangeResponse
+        return TokenExchangeResponse(
+            access_token='access-1',
+            refresh_token='refresh-1',
+            id_token='id-1',
+            expires_in=3600,
+            scope='openid patient/*.read offline_access',
+            patient=patient,
+        )
+
+    def test_finish_exchanges_code_stores_token_and_triggers_dag(self):
+        from unittest.mock import patch
+        from django.test import override_settings
+        from omop_core.models import FhirToken, OAuth2State
+
+        state = self._seed_state()
+
+        with override_settings(
+            AIRFLOW_URL='https://airflow.example/api/v1',
+            AIRFLOW_USERNAME='u', AIRFLOW_PASSWORD='p',
+        ), patch(
+            'patient_portal.mychart.client.EpicClientImplementation.exchange_code_for_tokens',
+            return_value=self._token_response(),
+        ) as _exchange, patch(
+            'patient_portal.infrastructure.airflow_client.AirflowClientImplementation.create_dag_run',
+            return_value='dag-run-42',
+        ) as create_dag_run:
+            resp = self.client.post(
+                '/api/mychart/finish/',
+                {'code': 'authcode', 'state': state},
+                format='json',
+            )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data['fhir_patient_id'], 'ePatient123')
+        self.assertEqual(resp.data['dag_run_id'], 'dag-run-42')
+
+        token = FhirToken.objects.get(user=self.user, endpoint=self.epic_org.endpoint)
+        self.assertEqual(token.access_token, 'access-1')
+        self.assertEqual(token.refresh_token, 'refresh-1')
+        self.assertEqual(token.fhir_patient_id, 'ePatient123')
+        self.assertFalse(token.is_expired())
+
+        self.assertFalse(OAuth2State.objects.filter(state=state).exists())
+
+        create_dag_run.assert_called_once()
+        kwargs = create_dag_run.call_args.kwargs
+        conf = kwargs.get('conf') or create_dag_run.call_args.args[2]
+        self.assertEqual(conf['fhir_token_id'], token.id)
+        self.assertEqual(conf['fhir_patient_id'], 'ePatient123')
+
+    def test_finish_skips_dag_when_airflow_not_configured(self):
+        from unittest.mock import patch
+        from django.test import override_settings
+        from omop_core.models import FhirToken
+
+        state = self._seed_state()
+        with override_settings(AIRFLOW_URL=''), patch(
+            'patient_portal.mychart.client.EpicClientImplementation.exchange_code_for_tokens',
+            return_value=self._token_response(),
+        ):
+            resp = self.client.post(
+                '/api/mychart/finish/',
+                {'code': 'authcode', 'state': state},
+                format='json',
+            )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertIsNone(resp.data['dag_run_id'])
+        self.assertTrue(FhirToken.objects.filter(user=self.user).exists())
+
+    def test_finish_rejects_unknown_state(self):
+        resp = self.client.post(
+            '/api/mychart/finish/',
+            {'code': 'authcode', 'state': 'never-seen'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_finish_rejects_state_owned_by_other_user(self):
+        state = self._seed_state(user=self.other_user)
+        resp = self.client.post(
+            '/api/mychart/finish/',
+            {'code': 'authcode', 'state': state},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('not belong', resp.data['error'])
+
+    def test_finish_upsert_overwrites_existing_token(self):
+        from datetime import timedelta
+        from unittest.mock import patch
+        from django.utils import timezone
+        from omop_core.models import FhirToken
+
+        FhirToken.objects.create(
+            user=self.user,
+            endpoint=self.epic_org.endpoint,
+            access_token='old',
+            refresh_token='old-refresh',
+            id_token='',
+            expires_at=timezone.now() + timedelta(seconds=10),
+            scope='',
+            fhir_patient_id='ePatientOld',
+        )
+        state = self._seed_state()
+        with patch(
+            'patient_portal.mychart.client.EpicClientImplementation.exchange_code_for_tokens',
+            return_value=self._token_response(patient='ePatientNew'),
+        ):
+            resp = self.client.post(
+                '/api/mychart/finish/',
+                {'code': 'authcode', 'state': state},
+                format='json',
+            )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        token = FhirToken.objects.get(user=self.user, endpoint=self.epic_org.endpoint)
+        self.assertEqual(token.access_token, 'access-1')
+        self.assertEqual(token.fhir_patient_id, 'ePatientNew')

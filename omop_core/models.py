@@ -66,6 +66,96 @@ class ApplicationOrganization(models.Model):
         return f"{self.application.name} → {self.organization.name}"
 
 
+class EpicEndpoint(models.Model):
+    """A FHIR R4 base URL exposed by an Epic-backed organization."""
+    url = models.TextField(unique=True, help_text="FHIR R4 base URL, no trailing slash")
+    name = models.CharField(max_length=200, help_text="Human-readable label, e.g., 'Epic Sandbox'")
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'epic_endpoint'
+
+    def __str__(self):
+        return self.name
+
+
+class EpicOrganization(models.Model):
+    """A hospital/health-system entry the patient picks from at /start.
+
+    Distinct from `Organization` (the multi-tenant scoping concept). One
+    EpicOrganization points to one EpicEndpoint; multiple orgs may share an
+    endpoint if a health system fronts several brands behind one FHIR base URL.
+    """
+    alias = models.SlugField(max_length=80, unique=True, help_text="Stable id used by the frontend picker")
+    title = models.CharField(max_length=200)
+    endpoint = models.ForeignKey(EpicEndpoint, on_delete=models.PROTECT, related_name='organizations')
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'epic_organization'
+
+    def __str__(self):
+        return self.title
+
+
+class OAuth2State(models.Model):
+    """PKCE state held between /start and /finish.
+
+    One row per in-flight authorization. Deleted on successful /finish, garbage
+    collected on a cron (stale rows older than 1h are useless).
+    """
+    PROVIDER_EPIC = 'epic'
+    PROVIDER_CHOICES = [(PROVIDER_EPIC, 'Epic')]
+
+    state = models.CharField(max_length=64, unique=True, db_index=True)
+    code_verifier = models.CharField(max_length=128)
+    provider = models.CharField(max_length=16, choices=PROVIDER_CHOICES, default=PROVIDER_EPIC)
+    user = models.ForeignKey('auth.User', on_delete=models.CASCADE, related_name='oauth_states')
+    endpoint = models.ForeignKey(EpicEndpoint, on_delete=models.CASCADE)
+    metadata = models.JSONField(default=dict, blank=True, help_text="token_endpoint, nonce, etc.")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'oauth2_state'
+
+    def __str__(self):
+        return f"{self.provider} state for user {self.user_id}"
+
+
+class FhirToken(models.Model):
+    """OAuth tokens obtained from an Epic endpoint for a specific user.
+
+    One row per (user, endpoint). Refreshed in place by `FHIR_TOKEN_MONITOR`
+    or by the extract DAGs as needed. `fhir_patient_id` is Epic's Patient
+    resource id, returned in the token response for patient-launch flows; the
+    eventual OMOP `Person.person_source_value` will be `"Patient/{fhir_patient_id}"`
+    so the join is by string.
+    """
+    user = models.ForeignKey('auth.User', on_delete=models.CASCADE, related_name='fhir_tokens')
+    endpoint = models.ForeignKey(EpicEndpoint, on_delete=models.PROTECT, related_name='tokens')
+    access_token = models.TextField()
+    refresh_token = models.TextField(blank=True, default='')
+    id_token = models.TextField(blank=True, default='')
+    expires_at = models.DateTimeField()
+    scope = models.TextField(blank=True, default='')
+    fhir_patient_id = models.CharField(max_length=128, blank=True, default='', db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'fhir_token'
+        unique_together = (('user', 'endpoint'),)
+
+    def is_expired(self) -> bool:
+        from django.utils import timezone
+        return timezone.now() >= self.expires_at
+
+    def __str__(self):
+        return f"FhirToken(user={self.user_id}, endpoint={self.endpoint_id})"
+
+
 class Vocabulary(models.Model):
     """OMOP CDM Vocabulary table - standardized vocabularies."""
     vocabulary_id = models.CharField(max_length=20, primary_key=True)
@@ -1504,3 +1594,180 @@ class PatientTrialEnrollment(models.Model):
         return f"Person {self.person_id} — trial {self.trial_id} ({self.status})"
 
 
+class Institution(models.Model):
+    """A SMART-on-FHIR–capable EHR or aggregator a patient can connect to."""
+
+    slug = models.SlugField(
+        max_length=64, unique=True,
+        help_text="Stable identifier used in URLs and DAG conf (e.g. 'epic_uw', 'cerner').",
+    )
+    display_name = models.CharField(max_length=200)
+
+    # SMART/FHIR endpoint config
+    fhir_base = models.URLField(
+        help_text="Base FHIR URL; passed as the `aud` claim during OAuth.",
+    )
+    smart_config_url = models.URLField(
+        help_text=".well-known/smart-configuration; resolves authorize + token endpoints.",
+    )
+    client_id = models.CharField(max_length=200)
+    scopes = models.CharField(
+        max_length=500,
+        help_text="Space-separated OAuth scopes requested at /authorize.",
+    )
+    redirect_uri = models.URLField(
+        help_text="Must match the redirect URI registered with the vendor.",
+    )
+
+    # Asymmetric client auth (private_key_jwt). Null = public client / PKCE only.
+    jwks_kid = models.CharField(
+        max_length=100, null=True, blank=True,
+        help_text="`kid` of the signing key in our JWKS. Empty disables JWT client auth.",
+    )
+
+    # Capabilities
+    supports_bulk_export = models.BooleanField(
+        default=False,
+        help_text="True → fhir_extract uses $export; False → paginated fallback.",
+    )
+
+    # Retry / backoff parameters — encode per-vendor observed behaviour
+    # (HealthTree v1.1 Section 2.3.4). Defaults are conservative.
+    base_backoff_seconds = models.IntegerField(default=1)
+    max_backoff_seconds = models.IntegerField(default=300)
+    max_retry_count = models.IntegerField(default=5)
+    respect_retry_after = models.BooleanField(default=True)
+    jitter_factor = models.FloatField(default=0.1)
+    retryable_status_codes = models.JSONField(
+        default=list,
+        help_text="HTTP statuses treated as transient (e.g. [429, 502, 503, 504]).",
+    )
+    daily_quota_reset_utc_hour = models.IntegerField(
+        null=True, blank=True,
+        help_text="UTC hour at which the vendor's daily quota resets, if applicable.",
+    )
+
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "fhir_institution"
+        ordering = ["slug"]
+
+    def __str__(self):
+        return f"{self.display_name} ({self.slug})"
+
+
+class FhirConnection(models.Model):
+    STATUS_CONNECTED = "connected"
+    STATUS_EXPIRING_SOON = "expiring_soon"
+    STATUS_NEEDS_REAUTH = "needs_reauth"
+    STATUS_REVOKED = "revoked"
+    STATUS_DEGRADED = "degraded"
+    STATUS_CHOICES = [
+        (STATUS_CONNECTED, "Connected"),
+        (STATUS_EXPIRING_SOON, "Expiring soon"),
+        (STATUS_NEEDS_REAUTH, "Needs re-authentication"),
+        (STATUS_REVOKED, "Revoked by patient"),
+        (STATUS_DEGRADED, "Degraded (repeated failures)"),
+    ]
+
+    person = models.ForeignKey(
+        Person, on_delete=models.CASCADE,
+        related_name="fhir_connections",
+        db_column="person_id",
+    )
+    institution = models.ForeignKey(
+        Institution, on_delete=models.PROTECT,
+        related_name="connections",
+    )
+    organization = models.ForeignKey(
+        "Organization", on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name="fhir_connections",
+        help_text="Owning tenant org, derived from the session that initiated the connect.",
+    )
+
+    # Tokens — Fernet ciphertext. Plaintext is never persisted.
+    access_token_encrypted = models.TextField()
+    refresh_token_encrypted = models.TextField()
+    expires_at = models.DateTimeField(help_text="UTC instant at which access_token expires.")
+    scope_granted = models.CharField(max_length=500, blank=True, default="")
+
+    # FHIR-side patient identifier returned in the SMART token response. This is
+    # institution-scoped — different from `person_id`. Used to address the
+    # patient at the EHR's FHIR API (Patient/{fhir_patient_id}/$everything).
+    fhir_patient_id = models.CharField(max_length=200, null=True, blank=True)
+
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default=STATUS_CONNECTED,
+    )
+
+    # Sync watermarks — read by Airflow to drive incremental `_lastUpdated` syncs.
+    last_successful_sync = models.DateTimeField(null=True, blank=True)
+    last_attempted_sync = models.DateTimeField(null=True, blank=True)
+    last_token_refresh_at = models.DateTimeField(null=True, blank=True)
+    failure_count = models.IntegerField(default=0)
+    last_error = models.TextField(blank=True, default="")
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "fhir_connection"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["person", "institution"],
+                name="fhir_connection_person_institution_unique",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["expires_at"]),
+            models.Index(fields=["status"]),
+            models.Index(fields=["institution", "status"]),
+        ]
+
+    def __str__(self):
+        return f"FhirConnection {self.institution_id} for Person {self.person_id}"
+
+    @property
+    def is_expired(self) -> bool:
+        from django.utils import timezone
+        return self.expires_at <= timezone.now()
+
+    def is_expiring_within(self, **timedelta_kwargs) -> bool:
+        """e.g. `conn.is_expiring_within(days=14)` for the token-monitor DAG."""
+        from datetime import timedelta
+        from django.utils import timezone
+        return self.expires_at <= timezone.now() + timedelta(**timedelta_kwargs)
+
+
+class FhirOauthState(models.Model):
+    state = models.CharField(
+        max_length=64, primary_key=True,
+        help_text="The OAuth `state` query param; verified on callback.",
+    )
+    person = models.ForeignKey(
+        Person, on_delete=models.CASCADE,
+        related_name="fhir_oauth_states",
+        db_column="person_id",
+    )
+    institution = models.ForeignKey(Institution, on_delete=models.CASCADE)
+
+    code_verifier = models.CharField(max_length=128)
+    nonce = models.CharField(max_length=64)
+
+    return_to = models.CharField(
+        max_length=500, blank=True, default="",
+        help_text="App-internal path to redirect to on successful callback.",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "fhir_oauth_state"
+        indexes = [models.Index(fields=["created_at"])]
+
+    def __str__(self):
+        return f"FhirOauthState({self.state[:8]}…, person={self.person_id})"

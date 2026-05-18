@@ -131,8 +131,8 @@ class Relationship(models.Model):
     """OMOP CDM Relationship table - defines relationships between concepts."""
     relationship_id = models.CharField(max_length=20, primary_key=True)
     relationship_name = models.CharField(max_length=255)
-    is_hierarchical = models.CharField(max_length=1)
-    defines_ancestry = models.CharField(max_length=1)
+    is_hierarchical = models.IntegerField()
+    defines_ancestry = models.IntegerField()
     reverse_relationship_id = models.CharField(max_length=20)
     relationship_concept_id = models.IntegerField()
 

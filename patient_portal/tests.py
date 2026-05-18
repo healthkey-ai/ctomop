@@ -2984,8 +2984,8 @@ class VocabularyRelationshipModelTest(TestCase):
         Relationship.objects.create(
             relationship_id='test-maps-to',
             relationship_name='Test Maps To',
-            is_hierarchical='0',
-            defines_ancestry='0',
+            is_hierarchical=0,
+            defines_ancestry=0,
             reverse_relationship_id='test-mapped-from',
             relationship_concept_id=0,
         )
@@ -2998,8 +2998,8 @@ class VocabularyRelationshipModelTest(TestCase):
         r = Relationship.objects.create(
             relationship_id='Maps to',
             relationship_name='Maps to',
-            is_hierarchical='0',
-            defines_ancestry='0',
+            is_hierarchical=0,
+            defines_ancestry=0,
             reverse_relationship_id='Mapped from',
             relationship_concept_id=0,
         )
@@ -3030,8 +3030,8 @@ class VocabularyRelationshipModelTest(TestCase):
         r = Relationship.objects.create(
             relationship_id='Is a',
             relationship_name='Is a',
-            is_hierarchical='1',
-            defines_ancestry='1',
+            is_hierarchical=1,
+            defines_ancestry=1,
             reverse_relationship_id='Subsumes',
             relationship_concept_id=0,
         )

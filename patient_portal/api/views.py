@@ -29,6 +29,7 @@ from omop_core.models import (
 )
 from omop_oncology.models import Episode, EpisodeEvent
 from omop_core.services.patient_info_service import refresh_patient_info
+from omop_core.services.lot_inference_service import infer_lot_for_person
 from omop_core.services.omop_write_service import sync_to_omop
 from omop_core.services.mappings import get_gender_concept
 from datetime import datetime
@@ -1440,6 +1441,7 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
 
                     # --- OMOP-first: refresh PatientInfo from OMOP tables ---
                     patient_info = refresh_patient_info(person)
+                    infer_lot_for_person(person)
 
                     # --- Patch fields from FHIR that aren't yet in OMOP tables ---
                     # These fields come from FHIR parsing but are not (yet) stored in OMOP.

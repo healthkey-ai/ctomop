@@ -221,16 +221,23 @@ def _segment_into_lots(windows: list[_CombinationWindow],
     current_end: Optional[date] = None
     current_exposure_ids: list = []
     current_procedure_ids: list = []
+    current_proc_subtypes: set = set()   # 'transplant' / 'cart' for current lot
     last_transplant_end: Optional[date] = None
     last_cart_date: Optional[date] = None
 
     def _flush(end_date: date) -> None:
         nonlocal lot_number, current_drugs, current_start, current_end
-        nonlocal current_exposure_ids, current_procedure_ids
+        nonlocal current_exposure_ids, current_procedure_ids, current_proc_subtypes
         if current_start is None:
             return
         regimen = _name_regimen(current_drugs)
-        phase = _assign_phase(current_start, lots, last_transplant_end, last_cart_date)
+        # Procedure-only lots get their phase from the procedure subtype.
+        if not current_drugs and 'transplant' in current_proc_subtypes:
+            phase = 'transplant'
+        elif not current_drugs and 'cart' in current_proc_subtypes:
+            phase = 'CAR T-Cell'
+        else:
+            phase = _assign_phase(current_start, lots, last_transplant_end, last_cart_date)
         lot_number += 1
         lots.append(_LineOfTherapy(
             lot_number=lot_number,
@@ -246,6 +253,7 @@ def _segment_into_lots(windows: list[_CombinationWindow],
         current_end = None
         current_exposure_ids = []
         current_procedure_ids = []
+        current_proc_subtypes = set()
 
     for _, item_type, item in timeline:
         if item_type == 'procedure':
@@ -257,12 +265,14 @@ def _segment_into_lots(windows: list[_CombinationWindow],
                         current_start = proc.date
                     current_end = proc.date
                     current_procedure_ids.append(proc.procedure_id)
+                    current_proc_subtypes.add(proc.subtype)
                     last_transplant_end = proc.date
                 else:
                     _flush(proc.date)
                     current_start = proc.date
                     current_end = proc.date
                     current_procedure_ids.append(proc.procedure_id)
+                    current_proc_subtypes.add(proc.subtype)
                     last_transplant_end = proc.date
 
             elif proc.subtype == 'cart':
@@ -270,6 +280,7 @@ def _segment_into_lots(windows: list[_CombinationWindow],
                 current_start = proc.date
                 current_end = proc.date
                 current_procedure_ids.append(proc.procedure_id)
+                current_proc_subtypes.add(proc.subtype)
                 last_cart_date = proc.date
 
         else:
@@ -376,26 +387,37 @@ def _persist_lots(person, lots: list[_LineOfTherapy]) -> None:
 
     for lot in lots:
         source_val = lot.source_value
-        episode, _ = Episode.objects.get_or_create(
+        # Look up an existing episode matching this person + lot_number + start date.
+        existing = Episode.objects.filter(
             person=person,
             episode_number=lot.lot_number,
             episode_start_date=lot.start,
-            defaults={
-                'episode_concept': episode_concept,
-                'episode_object_concept': ehr_concept,
-                'episode_type_concept': ehr_concept,
-                'episode_end_date': lot.end,
-                'episode_source_value': source_val,
-            },
-        )
-        if episode.episode_source_value != source_val or episode.episode_end_date != lot.end:
-            episode.episode_source_value = source_val
-            episode.episode_end_date = lot.end
-            episode.save(update_fields=['episode_source_value', 'episode_end_date'])
+        ).first()
+        if existing:
+            episode = existing
+            if episode.episode_source_value != source_val or episode.episode_end_date != lot.end:
+                episode.episode_source_value = source_val
+                episode.episode_end_date = lot.end
+                episode.save(update_fields=['episode_source_value', 'episode_end_date'])
+        else:
+            # Episode.episode_id is BigIntegerField(primary_key=True) — no autoincrement.
+            last_ep = Episode.objects.order_by('-episode_id').first()
+            new_ep_id = (last_ep.episode_id + 1) if last_ep else 1
+            episode = Episode.objects.create(
+                episode_id=new_ep_id,
+                person=person,
+                episode_concept=episode_concept,
+                episode_object_concept=ehr_concept,
+                episode_type_concept=ehr_concept,
+                episode_number=lot.lot_number,
+                episode_start_date=lot.start,
+                episode_end_date=lot.end,
+                episode_source_value=source_val,
+            )
 
         for exp_id in lot.exposure_ids:
             EpisodeEvent.objects.get_or_create(
-                episode=episode,
+                episode_id=episode.episode_id,
                 event_id=exp_id,
                 defaults={'episode_event_field_concept': field_concept},
             )

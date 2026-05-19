@@ -3279,3 +3279,356 @@ class RxNavServiceTest(TestCase):
             mock_open2.assert_not_called()
         self.assertIsNotNone(result)
         self.assertEqual(result.concept_code, '9876')
+
+
+class LotInferenceTest(_SmartBase):
+    """Tests for omop_core.services.lot_inference_service (ARTEMIS-lite + HealthTree)."""
+
+    def _make_exposure(self, person, drug_name, start, end=None, pk=None):
+        from omop_core.models import DrugExposure, Concept, Domain, Vocabulary, ConceptClass
+        from datetime import date as _date
+        # Create (or reuse) a concept whose concept_name matches the drug name so
+        # that _drug_key() in lot_inference_service resolves to the correct string.
+        domain_drug = Domain.objects.filter(domain_id='Drug').first()
+        vocab = Vocabulary.objects.filter(vocabulary_id='TEST').first()
+        cc = ConceptClass.objects.filter(concept_class_id='Clinical Finding').first()
+        # Use a stable concept_id derived from a hash of the drug name to avoid collisions.
+        import hashlib
+        drug_cid = int(hashlib.md5(drug_name.lower().encode()).hexdigest()[:8], 16) % 900000 + 100000
+        drug_concept, _ = Concept.objects.get_or_create(
+            concept_id=drug_cid,
+            defaults={
+                'concept_name': drug_name,
+                'domain': domain_drug,
+                'vocabulary': vocab,
+                'concept_class': cc,
+                'concept_code': drug_name.lower(),
+                'valid_start_date': _date(1970, 1, 1),
+                'valid_end_date': _date(2099, 12, 31),
+            },
+        )
+        type_concept = Concept.objects.filter(concept_id=32817).first()
+        if pk is None:
+            last = DrugExposure.objects.order_by('-drug_exposure_id').first()
+            pk = (last.drug_exposure_id + 1) if last else 1
+        return DrugExposure.objects.create(
+            drug_exposure_id=pk,
+            person=person,
+            drug_concept=drug_concept,
+            drug_exposure_start_date=start,
+            drug_exposure_end_date=end,
+            drug_type_concept=type_concept,
+            drug_source_value=drug_name,
+        )
+
+    def _make_procedure(self, person, snomed_code, proc_date, pk=None):
+        from omop_core.models import ProcedureOccurrence, Concept, Domain, Vocabulary, ConceptClass
+        from datetime import date as _date
+        type_concept = Concept.objects.filter(concept_id=32817).first()
+        # Create (or reuse) a concept for the SNOMED procedure code so the NOT NULL
+        # constraint on procedure_concept_id is satisfied.
+        domain_proc, _ = Domain.objects.get_or_create(
+            domain_id='Procedure',
+            defaults={'domain_name': 'Procedure', 'domain_concept_id': 10},
+        )
+        vocab = Vocabulary.objects.filter(vocabulary_id='TEST').first()
+        cc = ConceptClass.objects.filter(concept_class_id='Clinical Finding').first()
+        import hashlib
+        proc_cid = int(hashlib.md5(f'proc-{snomed_code}'.encode()).hexdigest()[:8], 16) % 900000 + 100000
+        concept, _ = Concept.objects.get_or_create(
+            concept_id=proc_cid,
+            defaults={
+                'concept_name': f'Procedure {snomed_code}',
+                'domain': domain_proc,
+                'vocabulary': vocab,
+                'concept_class': cc,
+                'concept_code': snomed_code,
+                'valid_start_date': _date(1970, 1, 1),
+                'valid_end_date': _date(2099, 12, 31),
+            },
+        )
+        if pk is None:
+            from omop_core.models import ProcedureOccurrence as PO
+            last = PO.objects.order_by('-procedure_occurrence_id').first()
+            pk = (last.procedure_occurrence_id + 1) if last else 1
+        return ProcedureOccurrence.objects.create(
+            procedure_occurrence_id=pk,
+            person=person,
+            procedure_concept=concept,
+            procedure_date=proc_date,
+            procedure_type_concept=type_concept,
+            procedure_source_value=snomed_code,
+        )
+
+    # ── Core ARTEMIS-lite tests ────────────────────────────────────────────
+
+    def test_single_drug_creates_one_episode(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode
+        person = Person.objects.create(person_id=92001)
+        self._make_exposure(person, 'Ibrutinib', date(2023, 1, 1), date(2023, 6, 30), pk=9200101)
+        lots = infer_lot_for_person(person)
+        self.assertEqual(len(lots), 1)
+        self.assertEqual(Episode.objects.filter(person=person).count(), 1)
+        ep = Episode.objects.get(person=person)
+        self.assertEqual(ep.episode_number, 1)
+
+    def test_combination_window_groups_drugs(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode
+        person = Person.objects.create(person_id=92002)
+        self._make_exposure(person, 'bortezomib',   date(2023, 1, 1),  date(2023, 6, 30), pk=9200201)
+        self._make_exposure(person, 'lenalidomide', date(2023, 1, 10), date(2023, 6, 30), pk=9200202)
+        self._make_exposure(person, 'dexamethasone',date(2023, 1, 15), date(2023, 6, 30), pk=9200203)
+        infer_lot_for_person(person)
+        self.assertEqual(Episode.objects.filter(person=person).count(), 1)
+        ep = Episode.objects.get(person=person)
+        self.assertIn('VRD', ep.episode_source_value)
+
+    def test_gap_rule_creates_new_lot(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode
+        person = Person.objects.create(person_id=92003)
+        self._make_exposure(person, 'bortezomib', date(2023, 1, 1), date(2023, 6, 30), pk=9200301)
+        self._make_exposure(person, 'carfilzomib', date(2024, 1, 1), date(2024, 6, 30), pk=9200302)
+        infer_lot_for_person(person)
+        self.assertEqual(Episode.objects.filter(person=person).count(), 2)
+
+    def test_switch_rule_creates_new_lot(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode
+        person = Person.objects.create(person_id=92004)
+        self._make_exposure(person, 'bortezomib',   date(2023, 1, 1), date(2023, 3, 31), pk=9200401)
+        self._make_exposure(person, 'lenalidomide', date(2023, 1, 1), date(2023, 3, 31), pk=9200402)
+        self._make_exposure(person, 'pomalidomide', date(2023, 4, 30), date(2023, 9, 30), pk=9200403)
+        self._make_exposure(person, 'daratumumab',  date(2023, 4, 30), date(2023, 9, 30), pk=9200404)
+        infer_lot_for_person(person)
+        self.assertEqual(Episode.objects.filter(person=person).count(), 2)
+
+    def test_supportive_agent_not_counted_in_switch(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode
+        person = Person.objects.create(person_id=92005)
+        self._make_exposure(person, 'bortezomib',   date(2023, 1, 1),  date(2023, 3, 31), pk=9200501)
+        self._make_exposure(person, 'bortezomib',   date(2023, 4, 15), date(2023, 6, 30), pk=9200502)
+        self._make_exposure(person, 'dexamethasone',date(2023, 4, 15), date(2023, 6, 30), pk=9200503)
+        infer_lot_for_person(person)
+        self.assertEqual(Episode.objects.filter(person=person).count(), 1)
+
+    def test_regimen_lookup_names_vrd(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode
+        person = Person.objects.create(person_id=92006)
+        self._make_exposure(person, 'bortezomib',   date(2023, 1, 1), date(2023, 6, 30), pk=9200601)
+        self._make_exposure(person, 'lenalidomide', date(2023, 1, 5), date(2023, 6, 30), pk=9200602)
+        self._make_exposure(person, 'dexamethasone',date(2023, 1, 5), date(2023, 6, 30), pk=9200603)
+        infer_lot_for_person(person)
+        ep = Episode.objects.get(person=person)
+        self.assertIn('VRD', ep.episode_source_value)
+
+    def test_regimen_lookup_names_daravrd(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode
+        person = Person.objects.create(person_id=92007)
+        for drug, pk in [('daratumumab', 9200701), ('bortezomib', 9200702),
+                         ('lenalidomide', 9200703), ('dexamethasone', 9200704)]:
+            self._make_exposure(person, drug, date(2023, 1, 1), date(2023, 6, 30), pk=pk)
+        infer_lot_for_person(person)
+        ep = Episode.objects.get(person=person)
+        self.assertIn('DaraVRD', ep.episode_source_value)
+
+    def test_alphabetic_fallback_name(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode
+        person = Person.objects.create(person_id=92008)
+        self._make_exposure(person, 'AlphaDrug', date(2023, 1, 1), date(2023, 6, 30), pk=9200801)
+        self._make_exposure(person, 'BetaDrug',  date(2023, 1, 5), date(2023, 6, 30), pk=9200802)
+        infer_lot_for_person(person)
+        ep = Episode.objects.get(person=person)
+        # _drug_key lowercases names; the fallback regimen name joins lowercase drug keys.
+        self.assertIn('alphadrug', ep.episode_source_value)
+        self.assertIn('betadrug', ep.episode_source_value)
+
+    def test_episode_events_linked(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode, EpisodeEvent
+        person = Person.objects.create(person_id=92009)
+        de = self._make_exposure(person, 'Ibrutinib', date(2023, 1, 1), date(2023, 6, 30), pk=9200901)
+        infer_lot_for_person(person)
+        ep = Episode.objects.get(person=person)
+        self.assertTrue(EpisodeEvent.objects.filter(episode_id=ep.episode_id, event_id=de.drug_exposure_id).exists())
+
+    def test_no_duplicate_episodes(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode
+        person = Person.objects.create(person_id=92010)
+        self._make_exposure(person, 'Ibrutinib', date(2023, 1, 1), date(2023, 6, 30), pk=9201001)
+        infer_lot_for_person(person, force=True)
+        infer_lot_for_person(person, force=True)
+        self.assertEqual(Episode.objects.filter(person=person).count(), 1)
+
+    def test_no_duplicate_episode_events(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode, EpisodeEvent
+        person = Person.objects.create(person_id=92011)
+        de = self._make_exposure(person, 'Ibrutinib', date(2023, 1, 1), date(2023, 6, 30), pk=9201101)
+        infer_lot_for_person(person, force=True)
+        infer_lot_for_person(person, force=True)
+        ep = Episode.objects.get(person=person)
+        self.assertEqual(EpisodeEvent.objects.filter(episode_id=ep.episode_id, event_id=de.drug_exposure_id).count(), 1)
+
+    def test_patient_info_refreshed(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        person = Person.objects.create(person_id=92012)
+        self._make_exposure(person, 'bortezomib',   date(2023, 1, 1), date(2023, 6, 30), pk=9201201)
+        self._make_exposure(person, 'lenalidomide', date(2023, 1, 5), date(2023, 6, 30), pk=9201202)
+        self._make_exposure(person, 'dexamethasone',date(2023, 1, 5), date(2023, 6, 30), pk=9201203)
+        infer_lot_for_person(person)
+        pi = PatientInfo.objects.filter(person=person).first()
+        self.assertIsNotNone(pi)
+        self.assertIsNotNone(pi.first_line_therapy)
+
+    def test_existing_episodes_skipped(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode
+        from omop_core.models import Concept
+        person = Person.objects.create(person_id=92013)
+        self._make_exposure(person, 'Ibrutinib', date(2023, 1, 1), date(2023, 6, 30), pk=9201301)
+        ep_concept = Concept.objects.filter(concept_id=32531).first()
+        ehr_concept = Concept.objects.filter(concept_id=32817).first()
+        from omop_oncology.models import Episode as _Ep
+        last_ep = _Ep.objects.order_by('-episode_id').first()
+        manual_ep_id = (last_ep.episode_id + 1) if last_ep else 1
+        Episode.objects.create(
+            episode_id=manual_ep_id,
+            person=person, episode_concept=ep_concept, episode_object_concept=ehr_concept,
+            episode_type_concept=ehr_concept, episode_number=1,
+            episode_start_date=date(2023, 1, 1), episode_source_value='Manual',
+        )
+        infer_lot_for_person(person)
+        self.assertEqual(Episode.objects.filter(person=person).count(), 1)
+        self.assertEqual(Episode.objects.get(person=person).episode_source_value, 'Manual')
+
+    def test_dry_run_no_db_writes(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode
+        person = Person.objects.create(person_id=92014)
+        self._make_exposure(person, 'Ibrutinib', date(2023, 1, 1), date(2023, 6, 30), pk=9201401)
+        lots = infer_lot_for_person(person, dry_run=True)
+        self.assertEqual(len(lots), 1)
+        self.assertEqual(Episode.objects.filter(person=person).count(), 0)
+
+    def test_management_command_single_patient(self):
+        from datetime import date
+        from omop_oncology.models import Episode
+        from django.core.management import call_command
+        person = Person.objects.create(person_id=92015)
+        self._make_exposure(person, 'Ibrutinib', date(2023, 1, 1), date(2023, 6, 30), pk=9201501)
+        call_command('infer_lot', person_id=person.person_id, verbosity=0)
+        self.assertEqual(Episode.objects.filter(person=person).count(), 1)
+
+    # ── HealthTree phase/procedure tests ──────────────────────────────────
+
+    def test_induction_label_first_lot(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode
+        person = Person.objects.create(person_id=92016)
+        self._make_exposure(person, 'bortezomib',   date(2023, 1, 1), date(2023, 6, 30), pk=9201601)
+        self._make_exposure(person, 'lenalidomide', date(2023, 1, 5), date(2023, 6, 30), pk=9201602)
+        self._make_exposure(person, 'dexamethasone',date(2023, 1, 5), date(2023, 6, 30), pk=9201603)
+        infer_lot_for_person(person)
+        ep = Episode.objects.get(person=person)
+        self.assertIn('induction', ep.episode_source_value)
+
+    def test_steroid_only_window_no_new_lot(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode
+        person = Person.objects.create(person_id=92017)
+        self._make_exposure(person, 'bortezomib',   date(2023, 1, 1), date(2023, 3, 31), pk=9201701)
+        self._make_exposure(person, 'dexamethasone', date(2023, 4, 1), date(2023, 4, 30), pk=9201702)
+        self._make_exposure(person, 'bortezomib',   date(2023, 5, 1), date(2023, 8, 31), pk=9201703)
+        infer_lot_for_person(person)
+        self.assertEqual(Episode.objects.filter(person=person).count(), 1)
+
+    def test_transplant_procedure_creates_new_lot(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode
+        person = Person.objects.create(person_id=92018)
+        self._make_exposure(person, 'bortezomib',   date(2023, 1, 1), date(2023, 6, 30), pk=9201801)
+        self._make_exposure(person, 'lenalidomide', date(2023, 1, 5), date(2023, 6, 30), pk=9201802)
+        self._make_exposure(person, 'dexamethasone',date(2023, 1, 5), date(2023, 6, 30), pk=9201803)
+        self._make_procedure(person, '425983008', date(2023, 7, 15), pk=9201804)
+        lots = infer_lot_for_person(person)
+        self.assertGreaterEqual(len(lots), 2)
+        eps = Episode.objects.filter(person=person).order_by('episode_number')
+        self.assertIn('induction', eps[0].episode_source_value)
+
+    def test_tandem_transplant_same_lot(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode
+        person = Person.objects.create(person_id=92019)
+        self._make_exposure(person, 'bortezomib',   date(2023, 1, 1), date(2023, 6, 30), pk=9201901)
+        self._make_procedure(person, '425983008', date(2023, 7, 1), pk=9201902)
+        self._make_procedure(person, '425983008', date(2023, 11, 1), pk=9201903)
+        lots = infer_lot_for_person(person)
+        transplant_lots = [l for l in lots if 'transplant' in l.phase_label]
+        self.assertEqual(len(transplant_lots), 1)
+
+    def test_consolidation_phase_label(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode
+        person = Person.objects.create(person_id=92020)
+        self._make_exposure(person, 'bortezomib',   date(2023, 1, 1), date(2023, 6, 30), pk=9202001)
+        self._make_exposure(person, 'dexamethasone',date(2023, 1, 5), date(2023, 6, 30), pk=9202002)
+        self._make_procedure(person, '425983008', date(2023, 7, 15), pk=9202003)
+        self._make_exposure(person, 'lenalidomide', date(2023, 9, 1), date(2023, 12, 31), pk=9202004)
+        infer_lot_for_person(person)
+        eps = Episode.objects.filter(person=person).order_by('episode_number')
+        labels = [ep.episode_source_value for ep in eps]
+        self.assertTrue(any('consolidation' in l for l in labels))
+
+    def test_maintenance_phase_label(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode
+        person = Person.objects.create(person_id=92021)
+        self._make_exposure(person, 'bortezomib',   date(2023, 1, 1), date(2023, 6, 30), pk=9202101)
+        self._make_exposure(person, 'dexamethasone',date(2023, 1, 5), date(2023, 6, 30), pk=9202102)
+        self._make_procedure(person, '425983008', date(2023, 7, 15), pk=9202103)
+        self._make_exposure(person, 'lenalidomide', date(2023, 11, 1), date(2024, 6, 30), pk=9202104)
+        infer_lot_for_person(person)
+        eps = Episode.objects.filter(person=person).order_by('episode_number')
+        labels = [ep.episode_source_value for ep in eps]
+        self.assertTrue(any('maintenance' in l for l in labels))
+
+    def test_cart_procedure_creates_new_lot(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode
+        person = Person.objects.create(person_id=92022)
+        self._make_exposure(person, 'pomalidomide', date(2023, 1, 1), date(2023, 6, 30), pk=9202201)
+        self._make_exposure(person, 'dexamethasone',date(2023, 1, 5), date(2023, 6, 30), pk=9202202)
+        self._make_procedure(person, '1156961008', date(2023, 8, 1), pk=9202203)
+        lots = infer_lot_for_person(person)
+        self.assertGreaterEqual(len(lots), 2)
+        cart_lots = [l for l in lots if 'CAR T-Cell' in l.phase_label]
+        self.assertEqual(len(cart_lots), 1)

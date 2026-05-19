@@ -3189,3 +3189,93 @@ class AthenaVocabularyLoadTest(TestCase):
             call_command('load_athena_vocabularies', path=tmpdir, dry_run=True)
         self.assertEqual(Concept.objects.count(), before_concepts)
         self.assertEqual(Relationship.objects.count(), before_rels)
+
+
+class RxNavServiceTest(TestCase):
+    """Test rxnav_service.resolve_drug() with mocked HTTP calls."""
+
+    def setUp(self):
+        _make_vocab_fixtures()
+        self.vocab_rxnorm, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='RxNorm',
+            defaults={'vocabulary_name': 'RxNorm', 'vocabulary_concept_id': 0},
+        )
+        self.domain_drug = Domain.objects.get(domain_id='Drug')
+        self.cc_ingredient, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Ingredient',
+            defaults={'concept_class_name': 'Ingredient', 'concept_class_concept_id': 0},
+        )
+
+    def _rxnav_response(self, rxcui, name):
+        import json
+        return json.dumps({
+            'drugGroup': {
+                'conceptGroup': [
+                    {'tty': 'IN', 'conceptProperties': [{'rxcui': rxcui, 'name': name}]}
+                ]
+            }
+        }).encode()
+
+    def _rxnav_empty(self):
+        import json
+        return json.dumps({'drugGroup': {'conceptGroup': []}}).encode()
+
+    def _mock_urlopen(self, payload):
+        from unittest.mock import MagicMock, patch
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = payload
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        return patch('urllib.request.urlopen', return_value=mock_resp)
+
+    def test_known_drug_returns_existing_concept_without_api_call(self):
+        """Drug already in local Concept table → returned without hitting RxNav."""
+        from omop_core.services.rxnav_service import resolve_drug
+        Concept.objects.create(
+            concept_id=9990001, concept_name='bortezomib',
+            domain=self.domain_drug, vocabulary=self.vocab_rxnorm,
+            concept_class=self.cc_ingredient,
+            concept_code='1421', standard_concept='S',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        with self._mock_urlopen(b'should not be called') as mock_open:
+            result = resolve_drug('bortezomib')
+            mock_open.assert_not_called()
+        self.assertEqual(result.concept_id, 9990001)
+
+    def test_unknown_drug_calls_rxnav_and_creates_concept(self):
+        """Drug not in local vocab → RxNav called → new Concept row created."""
+        from omop_core.services.rxnav_service import resolve_drug
+        with self._mock_urlopen(self._rxnav_response('1421', 'bortezomib')):
+            result = resolve_drug('Velcade')
+        self.assertIsNotNone(result)
+        self.assertEqual(result.concept_code, '1421')
+        self.assertEqual(result.vocabulary_id, 'RxNorm')
+        self.assertTrue(Concept.objects.filter(concept_code='1421', vocabulary_id='RxNorm').exists())
+
+    def test_rxnav_no_results_returns_none(self):
+        """RxNav returns no ingredient matches → resolve_drug returns None."""
+        from omop_core.services.rxnav_service import resolve_drug
+        with self._mock_urlopen(self._rxnav_empty()):
+            result = resolve_drug('unknowndrugxyz')
+        self.assertIsNone(result)
+
+    def test_rxnav_http_error_returns_none(self):
+        """RxNav HTTP error → resolve_drug returns None without raising."""
+        from omop_core.services.rxnav_service import resolve_drug
+        from unittest.mock import patch
+        with patch('urllib.request.urlopen', side_effect=Exception('network error')):
+            result = resolve_drug('anything')
+        self.assertIsNone(result)
+
+    def test_second_call_uses_cached_concept(self):
+        """After first call caches a Concept, second call returns it without API hit."""
+        from omop_core.services.rxnav_service import resolve_drug
+        with self._mock_urlopen(self._rxnav_response('9876', 'lenalidomide')) as mock_open:
+            resolve_drug('Revlimid')
+            call_count_after_first = mock_open.call_count
+        with self._mock_urlopen(b'should not be called') as mock_open2:
+            result = resolve_drug('lenalidomide')
+            mock_open2.assert_not_called()
+        self.assertIsNotNone(result)
+        self.assertEqual(result.concept_code, '9876')

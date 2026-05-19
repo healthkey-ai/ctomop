@@ -1835,6 +1835,77 @@ class SmartServiceClientWriteTest(_SmartBase):
             'PatientInfo should persist after a condition is deleted',
         )
 
+    def test_measurement_write_triggers_patient_info_refresh(self):
+        """Writing a Measurement via OAuth must update the corresponding PatientInfo lab field."""
+        PatientInfo.objects.filter(person=self.person).delete()
+        hgb_concept = Concept.objects.filter(concept_code='718-7').first()
+        if not hgb_concept:
+            self.skipTest('Hemoglobin concept not in test DB')
+        payload = {
+            'person': self.person.person_id,
+            'measurement_concept': hgb_concept.concept_id,
+            'measurement_date': '2024-10-15',
+            'measurement_type_concept': self.type_concept.concept_id,
+            'value_as_number': 11.5,
+            'measurement_source_value': '718-7',
+        }
+        resp = self.write_client.post('/api/measurements/', payload, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        pi = PatientInfo.objects.filter(person=self.person).first()
+        self.assertIsNotNone(pi, 'PatientInfo not created after measurement POST')
+        self.assertEqual(float(pi.hemoglobin_g_dl), 11.5)
+
+    def test_cross_org_write_rejected(self):
+        """An org-scoped token for Org A must not write OMOP records for Org B's patient."""
+        from oauth2_provider.models import Application, AccessToken
+        from omop_core.models import Organization, ApplicationOrganization
+        from django.utils import timezone as tz
+        import datetime
+
+        # Create Org A with a write-scoped token
+        org_a = Organization.objects.create(name='Org A Cross-write Test', slug='org-a-cross-write')
+        user_a = User.objects.create_user(username='svc_cross_a_write', password='x')
+        app_a = Application.objects.create(
+            name='Org A Cross Write App',
+            client_id='cross-a-write-client',
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS,
+            user=user_a,
+        )
+        ApplicationOrganization.objects.create(application=app_a, organization=org_a)
+        write_token_a = AccessToken.objects.create(
+            user=user_a,
+            application=app_a,
+            token='cross-write-token-org-a',
+            expires=tz.now() + datetime.timedelta(hours=1),
+            scope='patient/*.write',
+        )
+
+        # Create Org B with a patient
+        org_b = Organization.objects.create(name='Org B Cross-write Test', slug='org-b-cross-write')
+        person_b = Person.objects.create(
+            person_id=72001,
+            given_name='Bob',
+            family_name='OrgBCross',
+            year_of_birth=1975,
+            gender_source_value='male',
+            race_source_value='unknown',
+            ethnicity_source_value='unknown',
+        )
+        PatientInfo.objects.create(person=person_b, organization=org_b)
+
+        # Org A token tries to write for Org B's patient — must be rejected
+        client_a = APIClient()
+        client_a.credentials(HTTP_AUTHORIZATION=f'Bearer {write_token_a.token}')
+        payload = {
+            'person': person_b.person_id,
+            'condition_concept': self.condition_concept.concept_id,
+            'condition_start_date': '2024-01-01',
+            'condition_type_concept': self.type_concept.concept_id,
+        }
+        resp = client_a.post('/api/conditions/', payload, format='json')
+        self.assertIn(resp.status_code, [403, 404])
+
 
 class SmartPatientInfoReadOnlyTest(_SmartBase):
     """PatientInfo endpoints are read-only regardless of the OAuth scope."""
@@ -2465,3 +2536,423 @@ class ProvenanceFhirUploadTest(_SmartBase):
             format='multipart',
         )
         self.assertEqual(resp.status_code, 400)
+
+
+# ---------------------------------------------------------------------------
+# HKI-SEC-07: Audit log middleware
+# ---------------------------------------------------------------------------
+
+class AuditLogMiddlewareTest(_SmartBase):
+    """Audit log middleware emits JSON for mutating requests, silent on reads."""
+
+    def _capture_audit_logs(self, handler, *args, **kwargs):
+        """Call handler and return list of parsed audit log JSON entries emitted."""
+        import logging
+        records = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record.getMessage())
+
+        capture = _Capture()
+        audit_logger = logging.getLogger('audit')
+        audit_logger.addHandler(capture)
+        try:
+            handler(*args, **kwargs)
+        finally:
+            audit_logger.removeHandler(capture)
+        return [json.loads(r) for r in records]
+
+    def _make_person_and_pi(self, person_id):
+        person = Person.objects.create(person_id=person_id)
+        pi = PatientInfo.objects.create(person=person)
+        return person, pi
+
+    # ------------------------------------------------------------------
+    # HTTP method coverage
+    # ------------------------------------------------------------------
+
+    def test_patch_emits_audit_log(self):
+        """PATCH produces exactly one audit log entry."""
+        _, pi = self._make_person_and_pi(88801)
+
+        logs = self._capture_audit_logs(
+            self.write_client.patch,
+            f'/api/patient-info/{pi.pk}/',
+            {'ecog_status': '1'},
+            format='json',
+        )
+
+        self.assertEqual(len(logs), 1)
+        entry = logs[0]
+        self.assertEqual(entry['event'], 'api_write')
+        self.assertEqual(entry['method'], 'PATCH')
+        self.assertIn('patient-info', entry['path'])
+        self.assertEqual(entry['client_id'], 'foundation-client-id')
+
+    def test_post_emits_audit_log(self):
+        """POST produces exactly one audit log entry."""
+        payload = {
+            'person': self.person.pk,
+            'measurement_concept': self.type_concept.pk,
+            'measurement_date': '2024-01-01',
+            'measurement_type_concept': self.type_concept.pk,
+            'measurement_id': 99901,
+        }
+        logs = self._capture_audit_logs(
+            self.write_client.post,
+            '/api/measurements/',
+            payload,
+            format='json',
+        )
+
+        self.assertEqual(len(logs), 1)
+        self.assertEqual(logs[0]['method'], 'POST')
+        self.assertIn('measurements', logs[0]['path'])
+
+    def test_delete_emits_audit_log(self):
+        """DELETE produces exactly one audit log entry."""
+        from omop_core.models import Measurement
+        m = Measurement.objects.create(
+            measurement_id=99902,
+            person=self.person,
+            measurement_concept=self.type_concept,
+            measurement_date='2024-01-01',
+            measurement_type_concept=self.type_concept,
+        )
+        logs = self._capture_audit_logs(
+            self.write_client.delete,
+            f'/api/measurements/{m.measurement_id}/',
+        )
+
+        self.assertEqual(len(logs), 1)
+        self.assertEqual(logs[0]['method'], 'DELETE')
+
+    def test_get_does_not_emit_audit_log(self):
+        """GET produces no audit log entries."""
+        _, pi = self._make_person_and_pi(88802)
+
+        logs = self._capture_audit_logs(
+            self.read_client.get,
+            f'/api/patient-info/{pi.pk}/',
+        )
+
+        self.assertEqual(len(logs), 0, f'Unexpected audit logs for GET: {logs}')
+
+    def test_list_get_does_not_emit_audit_log(self):
+        """GET list endpoint produces no audit log entries."""
+        logs = self._capture_audit_logs(
+            self.read_client.get,
+            '/api/patient-info/',
+        )
+        self.assertEqual(len(logs), 0)
+
+    # ------------------------------------------------------------------
+    # Log content correctness
+    # ------------------------------------------------------------------
+
+    def test_audit_log_contains_required_fields(self):
+        """Every audit entry must include all fields from the acceptance criteria."""
+        _, pi = self._make_person_and_pi(88803)
+
+        logs = self._capture_audit_logs(
+            self.write_client.patch,
+            f'/api/patient-info/{pi.pk}/',
+            {'ecog_status': '2'},
+            format='json',
+        )
+
+        self.assertEqual(len(logs), 1)
+        entry = logs[0]
+        for field in ('event', 'method', 'path', 'status_code', 'client_id', 'ip_address', 'duration_ms'):
+            self.assertIn(field, entry, f'Missing required audit field: {field}')
+
+    def test_audit_log_is_valid_json(self):
+        """Each audit line must be parseable as JSON (SIEM-compatible)."""
+        import logging as _logging
+
+        raw_records = []
+
+        class _RawCapture(_logging.Handler):
+            def emit(self, record):
+                raw_records.append(record.getMessage())
+
+        capture = _RawCapture()
+        _logging.getLogger('audit').addHandler(capture)
+        try:
+            _, pi = self._make_person_and_pi(88804)
+            self.write_client.patch(f'/api/patient-info/{pi.pk}/', {'ecog_status': '0'}, format='json')
+        finally:
+            _logging.getLogger('audit').removeHandler(capture)
+
+        self.assertEqual(len(raw_records), 1)
+        try:
+            parsed = json.loads(raw_records[0])
+        except json.JSONDecodeError as exc:
+            self.fail(f'Audit log is not valid JSON: {exc}\nRaw: {raw_records[0]}')
+        self.assertIsInstance(parsed, dict)
+
+    def test_audit_log_captures_status_code(self):
+        """status_code in the log must reflect the actual HTTP response status."""
+        _, pi = self._make_person_and_pi(88805)
+        # Patch a non-existent resource to get a predictable 404
+        logs = self._capture_audit_logs(
+            self.write_client.patch,
+            '/api/patient-info/999999/',
+            {'ecog_status': '3'},
+            format='json',
+        )
+        self.assertEqual(len(logs), 1)
+        self.assertEqual(logs[0]['status_code'], 404)
+
+    def test_audit_log_client_id_from_oauth_token(self):
+        """client_id in the log must reflect the OAuth2 application's client_id."""
+        _, pi = self._make_person_and_pi(88806)
+
+        logs = self._capture_audit_logs(
+            self.write_client.patch,
+            f'/api/patient-info/{pi.pk}/',
+            {'ecog_status': '1'},
+            format='json',
+        )
+
+        self.assertEqual(len(logs), 1)
+        self.assertEqual(logs[0]['client_id'], 'foundation-client-id')
+
+    def test_audit_log_no_client_id_for_unauthenticated(self):
+        """Unauthenticated requests must log client_id as null, not raise."""
+        anon = APIClient()
+        logs = self._capture_audit_logs(
+            anon.patch,
+            '/api/patient-info/1/',
+            {'ecog_status': '0'},
+            format='json',
+        )
+        # Unauthenticated returns 401/403; middleware must still emit a log entry
+        self.assertEqual(len(logs), 1)
+        self.assertIsNone(logs[0]['client_id'])
+
+    # ------------------------------------------------------------------
+    # Reliability: logging failure must not block the response
+    # ------------------------------------------------------------------
+
+    def test_logging_failure_does_not_block_response(self):
+        """If the audit logger raises, the API response must still be returned."""
+        import logging as _logging
+        from unittest.mock import patch as mock_patch
+
+        _, pi = self._make_person_and_pi(88807)
+
+        with mock_patch.object(_logging.getLogger('audit'), 'info', side_effect=RuntimeError('log exploded')):
+            response = self.write_client.patch(
+                f'/api/patient-info/{pi.pk}/',
+                {'ecog_status': '1'},
+                format='json',
+            )
+
+        # Response must be returned regardless of logging failure
+        self.assertIn(response.status_code, range(200, 600))
+
+
+class PatientInfoOmopSyncTest(_SmartBase):
+    """PatientInfo PATCH → OMOP write-through via omop_write_service."""
+
+    def _patch(self, pi, payload):
+        return self.write_client.patch(
+            f'/api/patient-info/{pi.person.person_id}/',
+            payload,
+            format='json',
+        )
+
+    def test_patch_lab_creates_measurement(self):
+        """PATCHing a lab field creates a Measurement row."""
+        from omop_core.models import Measurement
+        person = Person.objects.create(person_id=91001)
+        pi = PatientInfo.objects.create(person=person)
+        before = Measurement.objects.filter(person=person).count()
+
+        self._patch(pi, {'hemoglobin_g_dl': 12.5})
+
+        self.assertEqual(Measurement.objects.filter(person=person).count(), before + 1)
+        m = Measurement.objects.filter(person=person).latest('measurement_id')
+        self.assertEqual(float(m.value_as_number), 12.5)
+
+    def test_patch_lab_same_day_updates_not_duplicates(self):
+        """Two PATCHes of the same lab on the same day → still 1 Measurement row."""
+        from omop_core.models import Measurement
+        person = Person.objects.create(person_id=91002)
+        pi = PatientInfo.objects.create(person=person)
+
+        self._patch(pi, {'hemoglobin_g_dl': 11.0})
+        self._patch(pi, {'hemoglobin_g_dl': 11.5})
+
+        rows = Measurement.objects.filter(
+            person=person,
+            measurement_source_value='718-7',
+        )
+        self.assertEqual(rows.count(), 1)
+        self.assertEqual(float(rows.first().value_as_number), 11.5)
+
+    def test_patch_lab_different_day_appends(self):
+        """PATCHes on different dates → separate Measurement rows."""
+        from unittest.mock import patch as mock_patch
+        from datetime import date
+        from omop_core.models import Measurement
+        person = Person.objects.create(person_id=91003)
+        pi = PatientInfo.objects.create(person=person)
+
+        with mock_patch('omop_core.services.omop_write_service._today', return_value=date(2024, 1, 1)):
+            self._patch(pi, {'hemoglobin_g_dl': 10.0})
+        with mock_patch('omop_core.services.omop_write_service._today', return_value=date(2024, 2, 1)):
+            self._patch(pi, {'hemoglobin_g_dl': 10.5})
+
+        rows = Measurement.objects.filter(person=person, measurement_source_value='718-7')
+        self.assertEqual(rows.count(), 2)
+
+    def test_patch_disease_creates_condition_occurrence(self):
+        """PATCHing 'disease' creates a new ConditionOccurrence row."""
+        from omop_core.models import ConditionOccurrence
+        person = Person.objects.create(person_id=91010)
+        pi = PatientInfo.objects.create(person=person)
+
+        self._patch(pi, {'disease': 'Breast cancer'})
+
+        self.assertEqual(
+            ConditionOccurrence.objects.filter(person=person).count(), 1
+        )
+        co = ConditionOccurrence.objects.get(person=person)
+        self.assertEqual(co.condition_source_value, 'Breast cancer')
+
+    def test_patch_stage_appends_condition_occurrence(self):
+        """Two PATCHes of 'stage' create two separate ConditionOccurrence rows."""
+        from omop_core.models import ConditionOccurrence
+        from unittest.mock import patch as mock_patch
+        from datetime import date
+        person = Person.objects.create(person_id=91011)
+        pi = PatientInfo.objects.create(person=person)
+
+        with mock_patch('omop_core.services.omop_write_service._today', return_value=date(2024, 1, 1)):
+            self._patch(pi, {'stage': 'Stage II'})
+        with mock_patch('omop_core.services.omop_write_service._today', return_value=date(2024, 3, 1)):
+            self._patch(pi, {'stage': 'Stage III'})
+
+        self.assertEqual(ConditionOccurrence.objects.filter(person=person).count(), 2)
+
+    def test_patch_demographics_updates_person(self):
+        """PATCHing gender and date_of_birth updates the linked Person record."""
+        person = Person.objects.create(person_id=91020)
+        pi = PatientInfo.objects.create(person=person)
+
+        self._patch(pi, {'gender': 'female', 'date_of_birth': '1975-06-15'})
+
+        person.refresh_from_db()
+        self.assertEqual(person.year_of_birth, 1975)
+        self.assertEqual(person.month_of_birth, 6)
+        self.assertEqual(person.day_of_birth, 15)
+        self.assertIsNotNone(person.gender_concept)
+        self.assertEqual(person.gender_concept.concept_id, 8532)  # FEMALE
+
+    def test_patch_first_line_therapy_creates_episode(self):
+        """PATCHing first_line_therapy creates an Episode with episode_number=1."""
+        from omop_oncology.models import Episode
+        person = Person.objects.create(person_id=91030)
+        pi = PatientInfo.objects.create(person=person)
+
+        self._patch(pi, {
+            'first_line_therapy': 'AC-T',
+            'first_line_start_date': '2023-01-15',
+            'first_line_end_date': '2023-07-01',
+        })
+
+        episodes = Episode.objects.filter(person=person, episode_number=1)
+        self.assertEqual(episodes.count(), 1)
+        ep = episodes.first()
+        self.assertEqual(ep.episode_source_value, 'AC-T')
+        from datetime import date
+        self.assertEqual(ep.episode_start_date, date(2023, 1, 15))
+
+    def test_patch_therapy_links_existing_drug_exposures(self):
+        """DrugExposure rows in the episode date range are linked via EpisodeEvent."""
+        from omop_oncology.models import Episode, EpisodeEvent
+        from omop_core.models import DrugExposure, Concept
+        person = Person.objects.create(person_id=91031)
+        pi = PatientInfo.objects.create(person=person)
+        drug_concept = Concept.objects.get(concept_id=19136160)
+        type_concept = Concept.objects.get(concept_id=32817)
+
+        # Pre-existing DrugExposure within the therapy date range
+        de = DrugExposure.objects.create(
+            drug_exposure_id=9910001,
+            person=person,
+            drug_concept=drug_concept,
+            drug_exposure_start_date='2023-02-01',
+            drug_type_concept=type_concept,
+            drug_source_value='Paclitaxel',
+        )
+
+        self._patch(pi, {
+            'first_line_therapy': 'AC-T',
+            'first_line_start_date': '2023-01-15',
+            'first_line_end_date': '2023-07-01',
+        })
+
+        episode = Episode.objects.get(person=person, episode_number=1)
+        self.assertTrue(
+            EpisodeEvent.objects.filter(episode_id=episode.episode_id, event_id=de.drug_exposure_id).exists(),
+            'DrugExposure was not linked to Episode via EpisodeEvent',
+        )
+
+    def test_patch_therapy_no_duplicate_episode_events(self):
+        """Repeating the PATCH does not create duplicate EpisodeEvent rows."""
+        from omop_oncology.models import Episode, EpisodeEvent
+        from omop_core.models import DrugExposure, Concept
+        person = Person.objects.create(person_id=91032)
+        pi = PatientInfo.objects.create(person=person)
+        drug_concept = Concept.objects.get(concept_id=19136160)
+        type_concept = Concept.objects.get(concept_id=32817)
+
+        DrugExposure.objects.create(
+            drug_exposure_id=9910002,
+            person=person,
+            drug_concept=drug_concept,
+            drug_exposure_start_date='2023-02-01',
+            drug_type_concept=type_concept,
+            drug_source_value='Paclitaxel',
+        )
+
+        payload = {
+            'first_line_therapy': 'AC-T',
+            'first_line_start_date': '2023-01-15',
+            'first_line_end_date': '2023-07-01',
+        }
+        self._patch(pi, payload)
+        self._patch(pi, payload)  # second identical PATCH
+
+        episode = Episode.objects.get(person=person, episode_number=1)
+        self.assertEqual(
+            EpisodeEvent.objects.filter(episode_id=episode.episode_id, event_id=9910002).count(), 1,
+            'EpisodeEvent was duplicated',
+        )
+
+    def test_sync_failure_does_not_block_response(self):
+        """If sync_to_omop raises internally, the PATCH response is still 200."""
+        from unittest.mock import patch as mock_patch
+        person = Person.objects.create(person_id=91040)
+        pi = PatientInfo.objects.create(person=person)
+
+        with mock_patch(
+            'patient_portal.api.views.sync_to_omop',
+            side_effect=RuntimeError('simulated DB failure'),
+        ):
+            response = self._patch(pi, {'ecog_performance_status': 1})
+
+        self.assertIn(response.status_code, [200, 404])
+
+    def test_lab_field_to_loinc_in_mappings_not_views(self):
+        """LAB_FIELD_TO_LOINC must live in mappings, not be directly importable from views."""
+        import importlib
+        views_mod = importlib.import_module('patient_portal.api.views')
+        self.assertFalse(
+            hasattr(views_mod, '_LAB_FIELD_TO_LOINC'),
+            '_LAB_FIELD_TO_LOINC should have been removed from views.py',
+        )

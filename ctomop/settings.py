@@ -56,7 +56,32 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'patient_portal.api.middleware.AuditLogMiddleware',
 ]
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'audit_json': {
+            '()': 'logging.Formatter',
+            'format': '%(message)s',
+        },
+    },
+    'handlers': {
+        'audit_stdout': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'audit_json',
+        },
+    },
+    'loggers': {
+        'audit': {
+            'handlers': ['audit_stdout'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+    },
+}
 
 ROOT_URLCONF = 'ctomop.urls'
 
@@ -208,3 +233,14 @@ if not DEBUG:
         csrf_origins.append(render_url)
     
     CSRF_TRUSTED_ORIGINS = csrf_origins
+
+
+# ---------------------------------------------------------------------------
+# Airflow integration
+# ---------------------------------------------------------------------------
+# REST API endpoint of the healthkey-etl Airflow instance and credentials.
+# `upload_fhir` triggers the `fhir_ingest` DAG through
+# `patient_portal.infrastructure.airflow_client`.
+AIRFLOW_URL = os.environ.get('AIRFLOW_URL', '')
+AIRFLOW_USERNAME = os.environ.get('AIRFLOW_USERNAME', '')
+AIRFLOW_PASSWORD = os.environ.get('AIRFLOW_PASSWORD', '')

@@ -252,11 +252,16 @@ class Command(BaseCommand):
                     continue
                 count += 1
                 if not dry_run:
+                    try:
+                        min_sep = int(row['min_levels_of_separation'])
+                        max_sep = int(row['max_levels_of_separation'])
+                    except (ValueError, KeyError):
+                        continue
                     batch.append(ConceptAncestor(
                         ancestor_concept_id=anc,
                         descendant_concept_id=desc,
-                        min_levels_of_separation=int(row['min_levels_of_separation']),
-                        max_levels_of_separation=int(row['max_levels_of_separation']),
+                        min_levels_of_separation=min_sep,
+                        max_levels_of_separation=max_sep,
                     ))
                     if len(batch) >= BATCH:
                         _bulk(ConceptAncestor, batch, dry_run)

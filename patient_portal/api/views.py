@@ -1852,6 +1852,35 @@ class MeasurementViewSet(_ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewS
     serializer_class = MeasurementSerializer
     permission_classes = [ScopedTokenPermission]
     queryset = Measurement.objects.all()
+    ordering_fields = ['measurement_date', 'measurement_id']
+    ordering = ['-measurement_date']
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        concept_id = self.request.query_params.get('measurement_concept_id')
+        if concept_id:
+            qs = qs.filter(measurement_concept_id=concept_id)
+        source_concept_id = self.request.query_params.get('measurement_source_concept_id')
+        if source_concept_id:
+            qs = qs.filter(measurement_source_concept_id=source_concept_id)
+        concept_code = self.request.query_params.get('concept_code')
+        if concept_code:
+            from omop_core.models import Concept
+            cids = list(
+                Concept.objects.filter(concept_code=concept_code)
+                .values_list('concept_id', flat=True)
+            )
+            qs = qs.filter(measurement_concept_id__in=cids)
+        date_gte = self.request.query_params.get('measurement_date__gte')
+        if date_gte:
+            qs = qs.filter(measurement_date__gte=date_gte)
+        date_lte = self.request.query_params.get('measurement_date__lte')
+        if date_lte:
+            qs = qs.filter(measurement_date__lte=date_lte)
+        visit_id = self.request.query_params.get('visit_occurrence_id')
+        if visit_id:
+            qs = qs.filter(visit_occurrence_id=visit_id)
+        return qs
 
 
 @method_decorator(csrf_exempt, name='dispatch')

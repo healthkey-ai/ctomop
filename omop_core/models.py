@@ -467,6 +467,16 @@ class Measurement(models.Model):
 
     class Meta:
         db_table = 'measurement'
+        indexes = [
+            models.Index(
+                fields=['person', 'measurement_concept', 'measurement_date'],
+                name='ix_meas_person_concept_date',
+            ),
+            models.Index(
+                fields=['person', 'measurement_source_concept', 'measurement_date'],
+                name='ix_meas_person_srcconcept_date',
+            ),
+        ]
 
     def __str__(self):
         return f"Measurement {self.measurement_id} for Person {self.person_id}"
@@ -501,6 +511,56 @@ class Observation(models.Model):
 
     def __str__(self):
         return f"Observation {self.observation_id} for Person {self.person_id}"
+
+
+class CareSite(models.Model):
+    """OMOP CDM Care Site table — healthcare delivery locations (labs, clinics)."""
+    care_site_id = models.BigIntegerField(primary_key=True)
+    care_site_name = models.CharField(max_length=255, null=True, blank=True)
+    place_of_service_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT,
+        related_name='care_sites', db_column='place_of_service_concept_id',
+        null=True, blank=True,
+    )
+    location = models.ForeignKey(
+        Location, on_delete=models.SET_NULL,
+        db_column='location_id', null=True, blank=True,
+    )
+    care_site_source_value = models.CharField(max_length=50, null=True, blank=True)
+    place_of_service_source_value = models.CharField(max_length=50, null=True, blank=True)
+
+    class Meta:
+        db_table = 'care_site'
+
+    def __str__(self):
+        return f"CareSite {self.care_site_id}: {self.care_site_name}"
+
+
+class LoincClass(models.Model):
+    """LOINC CLASS → display name mapping from LoincClass.csv (loinc.org archive)."""
+    code = models.CharField(max_length=32, primary_key=True)
+    display_name = models.CharField(max_length=128)
+
+    class Meta:
+        db_table = 'loinc_class'
+
+    def __str__(self):
+        return f"{self.code}: {self.display_name}"
+
+
+class LoincCodeClass(models.Model):
+    """Maps LOINC codes to their CLASS value (from Loinc.csv)."""
+    loinc_num = models.CharField(max_length=20, primary_key=True)
+    loinc_class = models.ForeignKey(
+        LoincClass, on_delete=models.CASCADE,
+        db_column='loinc_class_code', to_field='code',
+    )
+
+    class Meta:
+        db_table = 'loinc_code_class'
+
+    def __str__(self):
+        return f"{self.loinc_num} → {self.loinc_class_id}"
 
 
 # Choice classes for PatientInfo model

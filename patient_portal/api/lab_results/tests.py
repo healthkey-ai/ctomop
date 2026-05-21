@@ -1,0 +1,247 @@
+"""
+Tests for the lab results API (ResultsSummary + Sync endpoints).
+"""
+from datetime import date
+from decimal import Decimal
+
+from django.contrib.auth.models import User
+from django.test import TestCase
+from rest_framework import status
+from rest_framework.test import APIClient
+
+from omop_core.models import (
+    CareSite, Concept, ConceptClass, Domain, LoincClass, LoincCodeClass,
+    Measurement, Person, PatientInfo, Vocabulary, VisitOccurrence,
+)
+
+
+def _setup_vocab():
+    """Create minimum vocabulary fixtures for lab results tests."""
+    Vocabulary.objects.get_or_create(
+        vocabulary_id='LOINC',
+        defaults={'vocabulary_name': 'LOINC', 'vocabulary_concept_id': 0},
+    )
+    Vocabulary.objects.get_or_create(
+        vocabulary_id='UCUM',
+        defaults={'vocabulary_name': 'UCUM', 'vocabulary_concept_id': 0},
+    )
+    Vocabulary.objects.get_or_create(
+        vocabulary_id='HK-Labs',
+        defaults={'vocabulary_name': 'HealthKey Labs', 'vocabulary_concept_id': 0},
+    )
+    Domain.objects.get_or_create(
+        domain_id='Measurement',
+        defaults={'domain_name': 'Measurement', 'domain_concept_id': 21},
+    )
+    Domain.objects.get_or_create(
+        domain_id='Visit',
+        defaults={'domain_name': 'Visit', 'domain_concept_id': 8},
+    )
+    Domain.objects.get_or_create(
+        domain_id='Type Concept',
+        defaults={'domain_name': 'Type Concept', 'domain_concept_id': 58},
+    )
+    ConceptClass.objects.get_or_create(
+        concept_class_id='Lab Test',
+        defaults={'concept_class_name': 'Lab Test', 'concept_class_concept_id': 0},
+    )
+    ConceptClass.objects.get_or_create(
+        concept_class_id='Visit',
+        defaults={'concept_class_name': 'Visit', 'concept_class_concept_id': 0},
+    )
+    ConceptClass.objects.get_or_create(
+        concept_class_id='Clinical Finding',
+        defaults={'concept_class_name': 'Clinical Finding', 'concept_class_concept_id': 0},
+    )
+
+    today = date.today()
+    far_future = date(2099, 12, 31)
+
+    def _c(cid, name, domain_id, vocab_id, code=None):
+        Concept.objects.get_or_create(
+            concept_id=cid,
+            defaults={
+                'concept_name': name,
+                'domain_id': domain_id,
+                'vocabulary_id': vocab_id,
+                'concept_class_id': 'Lab Test',
+                'concept_code': code or str(cid),
+                'valid_start_date': today,
+                'valid_end_date': far_future,
+            },
+        )
+
+    # Concept 0 — required by OMOP as the "no matching concept" sentinel
+    _c(0, 'No matching concept', 'Measurement', 'LOINC', '0')
+    # LOINC concepts
+    _c(3000963, 'Hemoglobin [Mass/volume] in Blood', 'Measurement', 'LOINC', '718-7')
+    _c(3004249, 'Creatinine [Mass/volume] in Serum', 'Measurement', 'LOINC', '2160-0')
+    # UCUM unit
+    _c(8713, 'gram per deciliter', 'Measurement', 'UCUM', 'g/dL')
+    # Type concepts
+    _c(32865, 'Patient self-report', 'Type Concept', 'LOINC', '32865')
+    _c(32883, 'Document extraction', 'Type Concept', 'LOINC', '32883')
+    # Visit concept
+    _c(9202, 'Outpatient Visit', 'Visit', 'LOINC', '9202')
+
+    # LoincClass data
+    LoincClass.objects.get_or_create(code='HEM/BC', defaults={'display_name': 'Hematology'})
+    LoincClass.objects.get_or_create(code='CHEM', defaults={'display_name': 'Chemistry'})
+    LoincCodeClass.objects.get_or_create(loinc_num='718-7', defaults={'loinc_class_id': 'HEM/BC'})
+    LoincCodeClass.objects.get_or_create(loinc_num='2160-0', defaults={'loinc_class_id': 'CHEM'})
+
+
+class SyncViewTest(TestCase):
+    def setUp(self):
+        _setup_vocab()
+        self.user = User.objects.create_user(username='labsync', password='test')
+        self.person = Person.objects.create(person_id=1001)
+        PatientInfo.objects.create(person=self.person)
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+    def test_sync_loinc_matched(self):
+        resp = self.client.post('/api/lab-results/sync/', {
+            'person_id': 1001,
+            'measurements': [
+                {
+                    'loinc_code': '718-7',
+                    'test_name': 'Hemoglobin',
+                    'value': '13.5',
+                    'unit': 'g/dL',
+                    'measured_at': '2026-05-15',
+                    'range_low': '12.0',
+                    'range_high': '15.5',
+                },
+            ],
+            'lab_name': 'Quest Diagnostics',
+            'lab_date': '2026-05-15',
+            'report_filename': 'bloodwork.pdf',
+            'source_type': 'document_extraction',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data['count'], 1)
+        self.assertIn('visit_occurrence_id', resp.data)
+        self.assertEqual(len(resp.data['measurement_ids']), 1)
+
+        m = Measurement.objects.get(measurement_id=resp.data['measurement_ids'][0])
+        self.assertEqual(m.person_id, 1001)
+        self.assertEqual(m.measurement_concept_id, 3000963)
+        self.assertEqual(m.value_as_number, Decimal('13.50000'))
+        self.assertEqual(m.range_low, Decimal('12.00000'))
+        self.assertEqual(m.range_high, Decimal('15.50000'))
+
+        visit = VisitOccurrence.objects.get(
+            visit_occurrence_id=resp.data['visit_occurrence_id']
+        )
+        self.assertEqual(visit.visit_source_value, 'bloodwork.pdf')
+
+        care_site = CareSite.objects.get(care_site_name='Quest Diagnostics')
+        self.assertEqual(visit.care_site_id, care_site.care_site_id)
+
+    def test_sync_loinc_unmatched_creates_hk_concept(self):
+        resp = self.client.post('/api/lab-results/sync/', {
+            'person_id': 1001,
+            'measurements': [
+                {
+                    'loinc_code': '',
+                    'test_name': 'Obscure Regional Panel',
+                    'value': '42.0',
+                    'measured_at': '2026-05-10',
+                },
+            ],
+            'source_type': 'patient_self_report',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+        m = Measurement.objects.get(measurement_id=resp.data['measurement_ids'][0])
+        self.assertEqual(m.measurement_concept_id, 0)
+        self.assertIsNotNone(m.measurement_source_concept_id)
+
+        hk_concept = Concept.objects.get(concept_id=m.measurement_source_concept_id)
+        self.assertEqual(hk_concept.vocabulary_id, 'HK-Labs')
+        self.assertEqual(hk_concept.concept_code, 'hkl:obscure-regional-panel')
+
+    def test_sync_invalid_person_404(self):
+        resp = self.client.post('/api/lab-results/sync/', {
+            'person_id': 9999,
+            'measurements': [{'test_name': 'X', 'measured_at': '2026-01-01'}],
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class ResultsSummaryViewTest(TestCase):
+    def setUp(self):
+        _setup_vocab()
+        self.user = User.objects.create_user(username='reader', password='test')
+        self.person = Person.objects.create(person_id=2001)
+        PatientInfo.objects.create(person=self.person)
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+        type_concept = Concept.objects.get(concept_id=32883)
+        visit_concept = Concept.objects.get(concept_id=9202)
+        hgb_concept = Concept.objects.get(concept_id=3000963)
+
+        self.visit = VisitOccurrence.objects.create(
+            visit_occurrence_id=1,
+            person_id=2001,
+            visit_concept=visit_concept,
+            visit_start_date=date(2026, 5, 15),
+            visit_end_date=date(2026, 5, 15),
+            visit_type_concept=type_concept,
+            visit_source_value='report.pdf',
+        )
+
+        Measurement.objects.create(
+            measurement_id=1,
+            person_id=2001,
+            measurement_concept=hgb_concept,
+            measurement_date=date(2026, 5, 15),
+            measurement_type_concept=type_concept,
+            value_as_number=Decimal('13.5'),
+            range_low=Decimal('12.0'),
+            range_high=Decimal('15.5'),
+            visit_occurrence=self.visit,
+            unit_source_value='g/dL',
+        )
+        Measurement.objects.create(
+            measurement_id=2,
+            person_id=2001,
+            measurement_concept=hgb_concept,
+            measurement_date=date(2026, 4, 10),
+            measurement_type_concept=type_concept,
+            value_as_number=Decimal('11.0'),
+            range_low=Decimal('12.0'),
+            range_high=Decimal('15.5'),
+            unit_source_value='g/dL',
+        )
+
+    def test_summary_returns_grouped_card(self):
+        resp = self.client.get('/api/lab-results/summary/', {'person_id': 2001})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        results = resp.data['results']
+        self.assertEqual(len(results), 1)
+
+        card = results[0]
+        self.assertEqual(card['concept_id'], 3000963)
+        self.assertEqual(card['concept_code'], '718-7')
+        self.assertEqual(card['category'], 'Hematology')
+        self.assertEqual(len(card['values']), 2)
+
+        v1 = card['values'][0]
+        self.assertEqual(v1['status'], 'in_range')
+        self.assertEqual(str(v1['measured_at']), '2026-05-15')
+        self.assertEqual(v1['report_filename'], 'report.pdf')
+
+        v2 = card['values'][1]
+        self.assertEqual(v2['status'], 'below')
+
+    def test_summary_requires_person_id(self):
+        resp = self.client.get('/api/lab-results/summary/')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_summary_empty_for_unknown_person(self):
+        resp = self.client.get('/api/lab-results/summary/', {'person_id': 9999})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['results'], [])

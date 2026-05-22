@@ -4,7 +4,7 @@ Tests for the lab results API (ResultsSummary + Sync endpoints).
 from datetime import date
 from decimal import Decimal
 
-from patient_portal.models import Identity
+from patient_portal.models import Identity, PatientUser
 from django.test import TestCase
 from rest_framework import status
 from rest_framework.test import APIClient
@@ -95,6 +95,8 @@ class SyncViewTest(TestCase):
     def setUp(self):
         _setup_vocab()
         self.user = Identity.objects.create_user(email='labsync@test.com', password='test')
+        self.user.is_superuser = True
+        self.user.save()
         self.person = Person.objects.create(person_id=1001)
         PatientInfo.objects.create(person=self.person)
         self.client = APIClient()
@@ -176,6 +178,7 @@ class ResultsSummaryViewTest(TestCase):
         self.user = Identity.objects.create_user(email='reader@test.com', password='test')
         self.person = Person.objects.create(person_id=2001)
         PatientInfo.objects.create(person=self.person)
+        PatientUser.objects.create(identity=self.user, person=self.person)
         self.client = APIClient()
         self.client.force_authenticate(user=self.user)
 
@@ -246,13 +249,14 @@ class ResultsSummaryViewTest(TestCase):
         self.assertEqual(len(resp.data['results']), 1)
 
     def test_summary_no_linked_patient_404(self):
+        unlinked = Identity.objects.create_user(email='unlinked@test.com', password='test')
+        self.client.force_authenticate(user=unlinked)
         resp = self.client.get('/api/lab-results/summary/')
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
-    def test_summary_empty_for_unknown_person(self):
+    def test_summary_forbidden_for_other_person(self):
         resp = self.client.get('/api/lab-results/summary/', {'person_id': 9999})
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        self.assertEqual(resp.data['results'], [])
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
 
 class ValuesViewTest(TestCase):
@@ -261,6 +265,7 @@ class ValuesViewTest(TestCase):
         self.user = Identity.objects.create_user(email='valreader@test.com', password='test')
         self.person = Person.objects.create(person_id=3001)
         PatientInfo.objects.create(person=self.person)
+        PatientUser.objects.create(identity=self.user, person=self.person)
         self.client = APIClient()
         self.client.force_authenticate(user=self.user)
 
@@ -311,6 +316,8 @@ class ValuesViewTest(TestCase):
         self.assertEqual(resp.data['count'], 3)
 
     def test_values_no_linked_patient_404(self):
+        unlinked = Identity.objects.create_user(email='unlinked2@test.com', password='test')
+        self.client.force_authenticate(user=unlinked)
         resp = self.client.get('/api/lab-results/values/', {'concept_code': '718-7'})
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
@@ -332,6 +339,7 @@ class MeasurementDetailViewTest(TestCase):
         self.user = Identity.objects.create_user(email='measuser@test.com', password='test')
         self.person = Person.objects.create(person_id=4001)
         PatientInfo.objects.create(person=self.person)
+        PatientUser.objects.create(identity=self.user, person=self.person)
         self.client = APIClient()
         self.client.force_authenticate(user=self.user)
 
@@ -461,6 +469,7 @@ class VisitDeleteViewTest(TestCase):
         self.user = Identity.objects.create_user(email='visitdel@test.com', password='test')
         self.person = Person.objects.create(person_id=5001)
         PatientInfo.objects.create(person=self.person)
+        PatientUser.objects.create(identity=self.user, person=self.person)
         self.client = APIClient()
         self.client.force_authenticate(user=self.user)
 

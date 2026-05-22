@@ -47,13 +47,18 @@ def _normalize_slug(name):
 
 
 def _next_pk(model, pk_field):
-    last = model.objects.order_by(f'-{pk_field}').values_list(pk_field, flat=True).first()
+    last = (
+        model.objects.select_for_update()
+        .order_by(f'-{pk_field}')
+        .values_list(pk_field, flat=True)
+        .first()
+    )
     return (last + 1) if last else 1
 
 
 def _next_hk_concept_id():
     last = (
-        Concept.objects
+        Concept.objects.select_for_update()
         .filter(vocabulary_id=HK_LABS_VOCAB_ID)
         .order_by('-concept_id')
         .values_list('concept_id', flat=True)
@@ -88,6 +93,23 @@ class SyncRequestSerializer(serializers.Serializer):
         choices=['patient_self_report', 'document_extraction'],
         default='document_extraction',
     )
+
+    def validate_measurements(self, value):
+        if len(value) > 500:
+            raise serializers.ValidationError("Maximum 500 measurements per sync request.")
+        if len(value) == 0:
+            raise serializers.ValidationError("At least one measurement is required.")
+        return value
+
+    def validate_actor_iss(self, value):
+        if '|' in value:
+            raise serializers.ValidationError("Pipe character not allowed in actor_iss.")
+        return value
+
+    def validate_actor_sub(self, value):
+        if '|' in value:
+            raise serializers.ValidationError("Pipe character not allowed in actor_sub.")
+        return value
 
 
 class SyncView(APIView):
@@ -131,14 +153,26 @@ class SyncView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        # Authorization: check access only when actor is explicitly identified
+        # Authorization
         actor_identity = self._resolve_actor_identity(actor_iss, actor_sub, request.user)
         has_explicit_actor = bool(actor_iss and actor_sub)
-        if has_explicit_actor and actor_identity and is_on_behalf_of:
-            if not can_access_patient(actor_identity, person_id):
+
+        if is_on_behalf_of:
+            if has_explicit_actor and actor_identity is None:
                 return Response(
-                    {'detail': 'Actor does not have access to this patient.'},
+                    {'detail': 'Actor identity not found.'},
                     status=status.HTTP_403_FORBIDDEN,
+                )
+            if has_explicit_actor and actor_identity:
+                if not can_access_patient(actor_identity, person_id):
+                    return Response(
+                        {'detail': 'Actor does not have access to this patient.'},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+            elif not has_explicit_actor and not getattr(request.user, 'is_superuser', False):
+                return Response(
+                    {'detail': 'actor_iss and actor_sub required when writing on behalf of another person.'},
+                    status=status.HTTP_400_BAD_REQUEST,
                 )
 
         # Legacy org-scoped check (OAuth2 service clients)
@@ -290,9 +324,15 @@ class SyncView(APIView):
         type_concept = Concept.objects.filter(concept_id=type_concept_id).first()
 
         if not visit_concept:
-            visit_concept = Concept.objects.first()
+            raise ValueError(
+                f"Required OMOP concept {OUTPATIENT_VISIT_CONCEPT_ID} (Outpatient Visit) not found. "
+                "Run vocabulary import before syncing."
+            )
         if not type_concept:
-            type_concept = visit_concept
+            raise ValueError(
+                f"Required OMOP concept {type_concept_id} not found. "
+                "Run vocabulary import before syncing."
+            )
 
         return VisitOccurrence.objects.create(
             visit_occurrence_id=visit_id,
@@ -339,7 +379,10 @@ class SyncView(APIView):
 
         type_concept = Concept.objects.filter(concept_id=type_concept_id).first()
         if not type_concept:
-            type_concept = Concept.objects.first()
+            raise ValueError(
+                f"Required OMOP concept {type_concept_id} not found. "
+                "Run vocabulary import before syncing."
+            )
 
         m_id = _next_pk(Measurement, 'measurement_id')
         Measurement.objects.create(

@@ -20,9 +20,33 @@ MAX_VALUES_PER_CONCEPT = 10
 
 def _resolve_person_id(request):
     """Return (person_id, error_response) from query param or authenticated user."""
+    from omop_core.authorization import can_access_patient
+    from patient_portal.models import PatientUser
+
     person_id = request.query_params.get('person_id')
     if person_id:
-        return int(person_id), None
+        try:
+            pid = int(person_id)
+        except (ValueError, TypeError):
+            return None, Response(
+                {'detail': 'person_id must be an integer.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        # Verify caller has access to this patient
+        if request.user and request.user.is_authenticated:
+            own_pid = None
+            try:
+                own_pid = PatientUser.objects.get(identity=request.user).person_id
+            except PatientUser.DoesNotExist:
+                pass
+            if pid != own_pid and not can_access_patient(request.user, pid):
+                org = get_request_org(request)
+                if org is None:
+                    return None, Response(
+                        {'detail': 'Access denied.'},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+        return pid, None
 
     if not request.user or not request.user.is_authenticated:
         return None, Response(
@@ -30,7 +54,6 @@ def _resolve_person_id(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    from patient_portal.models import PatientUser
     try:
         pu = PatientUser.objects.get(identity=request.user)
         return pu.person_id, None
@@ -386,6 +409,8 @@ class MeasurementDetailView(APIView):
     permission_classes = [ScopedTokenPermission]
 
     def get_object(self, measurement_id, request):
+        from omop_core.authorization import can_access_patient
+
         try:
             m = Measurement.objects.select_related(
                 'measurement_type_concept', 'unit_concept', 'visit_occurrence',
@@ -399,6 +424,15 @@ class MeasurementDetailView(APIView):
             if not PatientInfo.objects.filter(
                 person_id=m.person_id, organization=org
             ).exists():
+                return None
+        elif request.user and request.user.is_authenticated:
+            from patient_portal.models import PatientUser
+            own_pid = None
+            try:
+                own_pid = PatientUser.objects.get(identity=request.user).person_id
+            except PatientUser.DoesNotExist:
+                pass
+            if m.person_id != own_pid and not can_access_patient(request.user, m.person_id):
                 return None
         return m
 
@@ -520,6 +554,8 @@ class VisitDeleteView(APIView):
     permission_classes = [ScopedTokenPermission]
 
     def delete(self, request, visit_id):
+        from omop_core.authorization import can_access_patient
+
         try:
             visit = VisitOccurrence.objects.get(visit_occurrence_id=visit_id)
         except VisitOccurrence.DoesNotExist:
@@ -534,6 +570,18 @@ class VisitDeleteView(APIView):
             if not PatientInfo.objects.filter(
                 person_id=visit.person_id, organization=org
             ).exists():
+                return Response(
+                    {'detail': 'Visit not found.'},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+        elif request.user and request.user.is_authenticated:
+            from patient_portal.models import PatientUser
+            own_pid = None
+            try:
+                own_pid = PatientUser.objects.get(identity=request.user).person_id
+            except PatientUser.DoesNotExist:
+                pass
+            if visit.person_id != own_pid and not can_access_patient(request.user, visit.person_id):
                 return Response(
                     {'detail': 'Visit not found.'},
                     status=status.HTTP_404_NOT_FOUND,

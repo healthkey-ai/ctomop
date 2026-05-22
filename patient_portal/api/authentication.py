@@ -117,9 +117,10 @@ class ServiceTokenAuthentication(BaseAuthentication):
     """Authenticate service-to-service calls via a pre-shared Bearer token."""
 
     def authenticate(self, request):
+        import hmac
         from django.conf import settings
 
-        secret = getattr(settings, "SERVICE_AUTH_TOKEN", "")
+        secret = getattr(settings, "SERVICE_AUTH_TOKEN", "").strip()
         if not secret:
             return None
 
@@ -127,7 +128,7 @@ class ServiceTokenAuthentication(BaseAuthentication):
         if not header.startswith("Bearer "):
             return None
 
-        if header[7:] != secret:
+        if not hmac.compare_digest(header[7:], secret):
             return None
 
         identity = Identity.objects.filter(is_superuser=True).first()

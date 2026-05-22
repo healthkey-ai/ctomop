@@ -1,46 +1,106 @@
 # Identity Architecture: OIDC-Based Shared Identity
 
-## Problem
+## Overview
 
-Three services authenticate the same Firebase users independently, each creating
-its own User record in its own database:
+All HealthKey platform services authenticate users via a shared OIDC-based
+Identity model. Each service stores a minimal `Identity` record: the
+`(issuer, sub)` tuple from the authentication provider. No email, no name,
+no password is stored for external identities.
 
-| Service | User Model | Identity Fields | Person Linkage |
+Any new service joining the platform adopts the same Identity model and
+token provider interface. The pattern is designed to scale to N services
+without coordination ... each service resolves identity independently from
+the same JWT.
+
+### Data Ownership
+
+The customer owns all patient data. HealthKey services are software the
+customer deploys to manage that data on the customer's behalf. ctomop
+stores OMOP clinical records in the customer's database. hk-labs processes
+lab uploads and writes results to ctomop. The customer controls the IdP,
+the user accounts, and the infrastructure.
+
+HealthKey services never hold data independently of the customer. In
+integrated mode, the customer's host app is the authority. In standalone
+mode, the customer runs the service directly and owns the local database.
+
+### Two Operating Modes
+
+Every HealthKey service can run in one of two modes:
+
+| Mode | Description |
+|---|---|
+| **Standalone** | The customer runs a service independently with local users (`iss="urn:local"`). The service has its own login, manages data in its own database. No dependency on other services or external IdPs. Suitable for development, on-prem deployments, or single-tenant use. |
+| **Integrated** | Services are embedded into the customer's host application (e.g. ht-phr) via Module Federation. Users authenticate via the customer's IdP (e.g. Firebase). The same JWT is sent to all HealthKey backends. Services communicate via REST APIs using `(issuer, sub)` as the shared identity anchor. |
+
+The Identity model and auth flow are identical in both modes. The only
+difference is which providers are listed in `PARTNER_AUTH_PROVIDERS` and
+whether cross-service URLs are configured. Switching between modes is a
+settings change, not a code change.
+
+In **standalone mode**, each service is fully self-contained:
+- Own user registration and login
+- Own data storage in the customer's database
+- Own admin interface
+- No external IdP, no host app, no cross-service calls
+
+In **integrated mode**, services are embedded in the customer's host app:
+- The customer's host app (e.g. ht-phr) owns the frontend, IdP, and user accounts
+- HealthKey services mount as Module Federation remotes in the host frontend
+- The customer's IdP token is forwarded to all HealthKey backends
+- hk-labs pushes lab results to ctomop on commit
+- ctomop serves lab results to the host frontend directly
+- All services resolve the same `(issuer, sub)` from the customer's JWT
+
+### HealthKey Platform Services
+
+| Service | Role | Identity Model | Domain Linkage |
 |---|---|---|---|
-| **ht-phr** | `AbstractUser` + custom fields | `firebase_uid`, `email`, `is_admin`, `has_medical_records` | `phr_person_id` (manual) |
-| **hk-labs** | `AbstractBaseUser` (email-only) | `firebase_uid`, `email`, `identity_level`, `mfa_enabled` | `ctomop_person_id` (manual) |
-| **ctomop** | Django default `User` | `username`, `email` | `PatientUser(user→User, person→Person)` + `PatientInfo.email` |
+| **hk-labs** | Lab report upload, extraction, LOINC matching | `accounts.Identity` | `UploadJob.user -> Identity` |
+| **ctomop** | OMOP CDM storage, lab results API, patient portal | `patient_portal.Identity` | `PatientUser(identity -> Identity, person -> Person)` |
 
-A single Firebase user (UID `abc123`) creates **three separate User rows** across
-three databases. These are linked only loosely by email, and person_id bridging
-requires manual admin setup.
+### Host Applications (Customers)
 
-### What's Wrong
+The customer's host application is not a HealthKey service. It owns the
+user base, the IdP, the patient data, and the frontend. It deploys
+HealthKey services as federated modules and API backends to manage that
+data.
 
-1. **Email is mutable** — Firebase allows email changes. The ctomop Firebase
-   provider looks up by email (not UID), so an email change breaks the link.
-2. **Manual person_id setup** — ht-phr stores `phr_person_id`, hk-labs stores
-   `ctomop_person_id`. Both require an admin to manually set the value.
-3. **User data diverges** — name updated in Firebase doesn't propagate to
-   hk-labs (which doesn't store names) or ctomop (which stores username at
-   creation time and never updates it).
-4. **No multi-provider path** — all three apps hard-code Firebase. Adding a
-   corporate SAML or OIDC provider means adding similar code in three places.
+| Host | IdP | Integration |
+|---|---|---|
+| **ht-phr** (HealthTree) | Firebase | Mounts `labs_remote` (hk-labs) and `labs_results_remote` (ctomop) via Module Federation |
+
+The host adopts the same Identity model pattern so its backend can resolve
+the same `(issuer, sub)` tuple when needed (e.g. for user profile storage).
+But the host's Identity table is its own.
+
+### Adding a New Service
+
+A new HealthKey service needs:
+1. Copy the `Identity` model (same fields, same constraints, same manager)
+2. Add `PARTNER_AUTH_PROVIDERS` setting with desired providers
+3. Set `AUTH_USER_MODEL` to point at the new Identity
+4. Optionally create an app-specific profile model for service-local fields
+
+A shared library (`healthkey-identity`) is planned to replace step 1 with
+a pip install. It will provide Identity, IdentityManager, TokenProvider,
+PartnerAuthentication, and the Firebase provider out of the box. Until
+then, copy from an existing service.
+
+The service then authenticates the same tokens as every other HealthKey
+service. Cross-service calls use `(issuer, sub)` as the identity anchor.
+No shared database, no shared auth service, no token exchange.
+
+The new service works standalone from day one. Integration with other
+services and host apps is additive ... configure the cross-service URLs
+and token providers and it joins the platform.
+
+User profile data (email, display name) is read from JWT claims at request
+time, never persisted in the service's database (except for local identities).
 
 ---
 
-## Design: OIDC-Based Identity
-
-### Core Principle
-
-The auth provider (Firebase, SAML, corporate OIDC) is the source of truth for
-user identity and profile data. Each service stores only a minimal **Identity**
-record: the OIDC `(issuer, sub)` tuple. No email, no name, no password.
-
-User profile data (email, display name) is read from JWT claims at request time,
-never persisted in the service's database.
-
-### OIDC Terminology
+## OIDC Terminology
 
 | OIDC Claim | Meaning | Example (Firebase) |
 |---|---|---|
@@ -49,72 +109,7 @@ never persisted in the service's database.
 | `email` | User's email | `user@example.com` |
 | `name` | Display name | `Jane Doe` |
 
-The `(iss, sub)` pair is globally unique and immutable. It replaces
-`firebase_uid` as the stable identity anchor.
-
-### Local Provider
-
-Not all identities come from external OIDC providers. Local identities are
-stored directly in the local PostgreSQL database using Django's password
-authentication. These use a synthetic issuer:
-
-| Claim | Value |
-|---|---|
-| `iss` | `urn:local` |
-| `sub` | UUID v4 (generated at creation time, immutable) |
-
-This means the Identity table is the single auth model for both external
-(Firebase, SAML) and local (password-based) users. Django admin login
-works via standard password auth against the Identity model — no token
-exchange needed.
-
-### Deployment Modes
-
-hk-labs and ctomop can each run in two modes:
-
-| Mode | Auth Providers | Users | Use Case |
-|---|---|---|---|
-| **Federated** | Firebase + local | External users via Firebase, admins via local | Production with ht-phr host |
-| **Standalone** | Local only | All users in local PostgreSQL | Development, on-prem, or single-tenant deployment |
-
-In **standalone mode**, `PARTNER_AUTH_PROVIDERS` is empty (no external
-providers configured). All users — patients, admins, service accounts —
-are local identities with `iss="urn:local"`. Users sign in with
-email + password through the app's own login form. The app is fully
-self-contained with no Firebase or external IdP dependency.
-
-In **federated mode**, external providers (Firebase, SAML) handle patient
-and end-user authentication. Local identities are reserved for admin
-users and service accounts (Django admin, management commands, API
-service tokens).
-
-The Identity model and auth flow are identical in both modes — the only
-difference is which providers are listed in `PARTNER_AUTH_PROVIDERS`.
-Switching from standalone to federated is a settings change, not a code
-change.
-
-```python
-# Standalone mode — all users local
-PARTNER_AUTH_PROVIDERS = []
-AUTHENTICATION_BACKENDS = [
-    "apps.accounts.backends.LocalIdentityBackend",
-]
-
-# Federated mode — Firebase for end users, local for admins
-PARTNER_AUTH_PROVIDERS = [
-    "apps.accounts.providers.firebase.FirebaseTokenProvider",
-]
-AUTHENTICATION_BACKENDS = [
-    "apps.accounts.backends.LocalIdentityBackend",
-]
-```
-
-In standalone mode, ctomop auto-provisions a Person + PatientInfo when a
-local identity is created (same `_ensure_person` logic, just triggered by
-local signup instead of Firebase token). hk-labs in standalone mode
-resolves person_id by calling ctomop with the identity's `(urn:local, sub)`
-pair — or, if ctomop is not connected, manages lab results locally
-(pre-migration behavior).
+The `(iss, sub)` pair is globally unique and immutable.
 
 ---
 
@@ -124,14 +119,9 @@ Each service stores the same minimal table:
 
 ```python
 class Identity(AbstractBaseUser, PermissionsMixin):
-    """Maps an OIDC subject (or local admin) to an internal ID.
-
-    External identities (Firebase, SAML): no user data stored locally.
-    Local identities (iss="urn:local"): email + password for Django admin.
-    """
     issuer = models.CharField(max_length=255)
         # "https://securetoken.google.com/<project>" or "urn:local"
-    sub = models.CharField(max_length=255)
+    sub = models.CharField(max_length=255, unique=True)
         # Firebase UID, SAML subject, or UUID for local
 
     # Only populated for local (iss="urn:local") identities
@@ -143,7 +133,7 @@ class Identity(AbstractBaseUser, PermissionsMixin):
     created_at = models.DateTimeField(auto_now_add=True)
 
     USERNAME_FIELD = "sub"
-    REQUIRED_FIELDS = []
+    REQUIRED_FIELDS = ["email"]
 
     objects = IdentityManager()
 
@@ -164,13 +154,26 @@ class Identity(AbstractBaseUser, PermissionsMixin):
 `AbstractBaseUser` provides the `password` field. For **local identities**
 (`iss="urn:local"`), the password is set and used for Django admin login.
 For **external identities** (Firebase, SAML), the password is set to
-unusable — authentication happens via token verification.
+unusable ... authentication happens via token verification.
 
 Local identities store `email` and `name` because there's no external
-JWT to read them from. External identities leave these fields blank — user
-data comes from `request.auth` (TokenClaims) per request.
+JWT to read them from. External identities leave these fields blank.
 
-### Request-Scoped User Data
+### Local Provider
+
+Local identities use a synthetic issuer:
+
+| Claim | Value |
+|---|---|
+| `iss` | `urn:local` |
+| `sub` | UUID v4 (generated at creation time, immutable) |
+
+Django admin login works via standard password auth against the Identity
+model. No token exchange needed.
+
+---
+
+## Request-Scoped User Data
 
 After token verification, the auth backend attaches claims to the request:
 
@@ -179,605 +182,30 @@ After token verification, the auth backend attaches claims to the request:
 class TokenClaims:
     issuer: str
     sub: str
-    email: str | None
+    email: str
     name: str | None
     raw: dict[str, Any]
 ```
 
-- `request.user` → `Identity` model instance (for FK references, permissions)
-- `request.auth` → `TokenClaims` (for user data)
+- `request.user` -> `Identity` model instance (for FK references, permissions)
+- `request.auth` -> `TokenClaims` (for user data)
 
-Any view that needs the user's email reads `request.auth.email`, not a database
-field.
+Any view that needs the user's email reads `request.auth.email`, not a
+database field.
 
-### Authentication Flow
+### Request Auth Normalization
 
-```
-Client sends: Authorization: Bearer <JWT>
-  │
-  ├─ decode_jwt_unverified(token) → extract iss, sub
-  │
-  ├─ Route to provider based on iss:
-  │    "https://securetoken.google.com/*" → FirebaseTokenProvider
-  │    "https://login.corp.example.com"   → CorporateSAMLProvider (future)
-  │
-  ├─ Provider.verify(token) → TokenClaims(issuer, sub, email, name, raw)
-  │
-  ├─ Identity.objects.get_or_create(issuer=claims.issuer, sub=claims.sub)
-  │
-  └─ return (identity, claims)
-```
-
-No email-based lookup. No IntegrityError dance. No provider-specific fields
-on the model.
-
----
-
-## Per-Service Specifics
-
-### ht-phr (Host Application)
-
-**Role:** Frontend host. Mounts federated modules from hk-labs and ctomop.
-Backend syncs Firebase custom claims and bridges to ctomop patient data.
-
-**Current model:**
-```python
-class User(AbstractUser):
-    firebase_uid: str
-    phr_person_id: BigInteger      # manual link to ctomop Person
-    identity_level: str            # ial1 / ial2
-    is_admin: bool                 # from Firebase ADMIN claim
-    has_medical_records: bool      # from Firebase MEDICAL_RECORDS claim
-```
-
-**Proposed:**
-```python
-# AUTH_USER_MODEL = "accounts.Identity"
-# Identity table: (issuer, sub) only
-
-class IdentityProfile(models.Model):
-    """ht-phr-specific fields. Not shared."""
-    identity = models.OneToOneField(Identity, on_delete=models.CASCADE,
-                                    related_name="phr_profile")
-    identity_level = models.CharField(max_length=4, default="ial1")
-```
-
-- `is_admin`, `has_medical_records` → read from `request.auth.raw` (Firebase
-  custom claims are in the JWT). No local storage needed.
-- `phr_person_id` → **removed**. ctomop resolves `(issuer, sub)` → Person
-  internally. ht-phr never needs to know the person_id.
-- `identity_level` → stays in a local profile table (app-specific concept).
-- Frontend reads email/name from the auth context (Firebase SDK), not from
-  the Django backend serializer.
-
-**Frontend token injection (unchanged):**
-```typescript
-// All three API clients use the same Firebase ID token
-client.interceptors.request.use(async (config) => {
-  const token = await auth.currentUser?.getIdToken();
-  config.headers.Authorization = `Bearer ${token}`;
-  return config;
-});
-```
-
-The host creates separate Axios instances for each backend, all carrying the
-same Firebase token. Each backend validates the token independently and resolves
-the identity locally.
-
-### hk-labs (Upload Pipeline)
-
-**Role:** Lab report upload, LLM extraction, LOINC matching, commit to ctomop.
-
-**Current model:**
-```python
-class User(AbstractBaseUser, PermissionsMixin):
-    email: EmailField
-    firebase_uid: str
-    identity_level: str
-    mfa_enabled: bool
-    ctomop_person_id: int          # manual link to ctomop Person
-```
-
-**Proposed:**
-```python
-# AUTH_USER_MODEL = "accounts.Identity"
-# Identity table: (issuer, sub) only
-
-class IdentityProfile(models.Model):
-    """hk-labs-specific fields. Not shared."""
-    identity = models.OneToOneField(Identity, on_delete=models.CASCADE,
-                                    related_name="labs_profile")
-    identity_level = models.CharField(max_length=16, default="unverified")
-```
-
-- `email` → **removed** from model. Read from `request.auth.email` (federated)
-  or `request.user.email` (standalone local identity).
-- `firebase_uid` → replaced by `Identity.sub` (same value, generalized).
-- `mfa_enabled` → read from Firebase custom claims or token's
-  `firebase.sign_in_second_factor` claim. In standalone mode, tracked in
-  `IdentityProfile` or not applicable.
-- `ctomop_person_id` → **removed**. On commit, hk-labs sends
-  `(issuer, sub)` to ctomop. ctomop resolves to Person internally.
-
-**Standalone mode:** All users are local (`iss="urn:local"`). Users
-register and sign in with email + password. hk-labs provides its own
-signup/login views backed by `LocalIdentityBackend`. When connected to
-ctomop, the `(urn:local, sub)` identity is sent on commit just like any
-other provider. When ctomop is not connected, hk-labs falls back to
-local lab result storage (pre-migration behavior).
-- `UploadJob.user` → renamed to `UploadJob.actor`, FK → Identity.
-
-### ctomop (OMOP CDM + Lab Results)
-
-**Role:** Clinical data storage (OMOP), lab results display, patient portal.
-
-**Current models:**
-```python
-# Django default User (username, email, password, ...)
-# + PatientUser(user → User, person → Person)
-# + PatientInfo(person → Person, email, demographics...)
-```
-
-**Proposed:**
-```python
-# AUTH_USER_MODEL = "patient_portal.Identity"
-# Identity table: (issuer, sub) only
-
-class PatientUser(models.Model):
-    """Links an OIDC identity to an OMOP Person.
-    OneToOne on identity (one identity = one person).
-    ForeignKey on person (one person can have multiple identities via linking).
-    """
-    identity = models.OneToOneField(Identity, on_delete=models.CASCADE,
-                                    related_name="patient_user")
-    person = models.ForeignKey("omop_core.Person", on_delete=models.CASCADE,
-                               related_name="portal_users")
-    is_active = models.BooleanField(default=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-```
-
-- `PatientUser.user` → `PatientUser.identity` (FK to Identity, not User).
-- `PatientInfo.email` → **kept** as clinical contact info (part of patient
-  demographics, not auth). Populated from claims on first login, updatable
-  by patient. May diverge from auth email — that's OK (married name, etc.).
-- `_ensure_person()` → creates `Person` + `PatientInfo` + `PatientUser` on
-  first login. Uses `claims.email` for initial PatientInfo.email.
-- Person ID resolution: `Identity → PatientUser → Person`.
-
-**Standalone mode:** All users (patients, clinicians, admins) are local
-identities. ctomop provides its own registration/login views. On signup,
-`_ensure_person()` creates Person + PatientInfo + PatientUser linked to the
-new local identity. The patient portal is fully self-contained — no
-Firebase, no ht-phr host, no hk-labs dependency. hk-labs can push to
-ctomop in standalone mode too (both services share the `urn:local` issuer
-and resolve identities by sub).
-
----
-
-## Cross-Service Flows
-
-### Self-Service Upload (Patient Uploads Own Labs)
-
-```
-ht-phr frontend
-  │ Firebase token: iss=".../healthtree-test", sub="abc123"
-  │
-  ├─► hk-labs backend (via labs_remote apiClient)
-  │     Identity.get_or_create(iss, sub) → identity_id=7
-  │     UploadJob.actor = identity_id=7
-  │     ... extraction, review ...
-  │
-  ├─► hk-labs commit → POST to ctomop /api/lab-results/sync/
-  │     Body: { "actor_iss": "...", "actor_sub": "abc123",
-  │             "measurements": [...] }
-  │     (no person_id — actor is uploading for self)
-  │
-  └─► ctomop sync endpoint:
-        Identity.get_or_create(iss, sub) → identity_id=12
-        _ensure_person(identity, claims) → Person + PatientInfo + PatientUser
-        PatientUser.objects.get(identity_id=12) → person_id=1042
-        Create Measurements for person_id=1042
-```
-
-The sync endpoint calls `_ensure_person()` to auto-provision the
-Person/PatientInfo/PatientUser chain if it doesn't exist yet. This
-handles the self-service case where a patient's first interaction with
-ctomop is via hk-labs upload (they may never have visited ctomop directly).
-
-hk-labs never stores `ctomop_person_id`. ctomop resolves the identity
-to a Person on its side.
-
-### On-Behalf-Of Upload (Navigator Uploads for Patient)
-
-```
-ht-phr frontend
-  │ Firebase token: iss=".../healthtree-test", sub="nav789" (navigator)
-  │ Target patient: person_id=1042 (from ctomop patient list)
-  │
-  ├─► hk-labs backend
-  │     Identity.get_or_create(iss, sub="nav789") → identity_id=15
-  │     UploadJob.actor = identity_id=15
-  │     ... extraction, review ...
-  │
-  ├─► hk-labs commit → POST to ctomop /api/lab-results/sync/
-  │     Body: { "actor_iss": "...", "actor_sub": "nav789",
-  │             "person_id": 1042,
-  │             "measurements": [...] }
-  │
-  └─► ctomop sync endpoint:
-        Validate: actor (nav789) has write access to person_id=1042
-        Create Measurements for person_id=1042
-        Record provenance: actor_sub="nav789"
-```
-
-The navigator's Identity exists in hk-labs (for UploadJob.actor) and
-optionally in ctomop (for audit). The target patient is identified by
-`person_id` — the navigator doesn't need a User record for the patient.
-
-### Direct ctomop Read (Lab Results Display)
-
-```
-ht-phr frontend
-  │ Firebase token: iss=".../healthtree-test", sub="abc123"
-  │
-  └─► ctomop backend (via labs_results_remote apiClient)
-        Identity.get_or_create(iss, sub) → identity_id=12
-        PatientUser.objects.get(identity_id=12) → person_id=1042
-        Return lab results for person_id=1042
-```
-
-No ht-phr backend involvement. The frontend talks to ctomop directly
-with the same Firebase token.
-
-### Direct ctomop Edit/Delete
-
-```
-ht-phr frontend
-  │ Firebase token: sub="abc123"
-  │
-  └─► ctomop backend
-        Identity(iss, sub) → person_id=1042
-        PATCH /api/lab-results/measurements/{id}/
-          Validate: measurement belongs to person_id=1042
-          Update measurement
-```
-
-### Standalone Mode (No ht-phr, No Firebase)
-
-When hk-labs and/or ctomop run standalone, all flows use local identities:
-
-```
-hk-labs standalone frontend
-  │ Session cookie (email + password login, iss="urn:local", sub="a1b2c3…")
-  │
-  ├─► hk-labs backend
-  │     request.user = Identity(iss="urn:local", sub="a1b2c3…")
-  │     UploadJob.actor = identity_id=7
-  │     ... extraction, review ...
-  │
-  ├─► hk-labs commit → POST to ctomop /api/lab-results/sync/
-  │     Body: { "actor_iss": "urn:local", "actor_sub": "a1b2c3…",
-  │             "measurements": [...] }
-  │
-  └─► ctomop sync endpoint:
-        Identity.get_or_create(iss="urn:local", sub="a1b2c3…")
-        PatientUser → person_id=1042
-        Create Measurements
-```
-
-```
-ctomop standalone frontend
-  │ Session cookie (email + password login, iss="urn:local", sub="d4e5f6…")
-  │
-  └─► ctomop backend
-        request.user = Identity(iss="urn:local", sub="d4e5f6…")
-        PatientUser → person_id=1042
-        Return lab results / edit / delete
-```
-
-The `urn:local` issuer works the same as any external issuer in the
-Identity model. The only difference is that auth is session/password-based
-instead of token-based. When hk-labs pushes to ctomop, both services
-must agree on the `(urn:local, sub)` mapping — either by sharing the
-same database (single-DB deployment) or by ctomop accepting the sub value
-from hk-labs and auto-provisioning a local identity on its side.
-
----
-
-## Identity Records Across Services
-
-### Federated Mode (Production)
-
-Same Firebase user, three databases — but no data divergence:
-
-```
-Firebase Auth (Source of Truth)
-  UID: "abc123"
-  Email: "jane@example.com"
-  Name: "Jane Doe"
-  Custom Claims: { ADMIN: false, MEDICAL_RECORDS: true }
-  iss: "https://securetoken.google.com/healthtree-test"
-                         │
-      ┌──────────────────┼──────────────────┐
-      │                  │                  │
-  ht-phr DB          hk-labs DB         ctomop DB
-  ┌────────────┐    ┌────────────┐    ┌────────────┐
-  │ Identity   │    │ Identity   │    │ Identity   │
-  │  id: 3     │    │  id: 7     │    │  id: 12    │
-  │  iss: fb…  │    │  iss: fb…  │    │  iss: fb…  │
-  │  sub: abc… │    │  sub: abc… │    │  sub: abc… │
-  │  email: "" │    │  email: "" │    │  email: "" │
-  └─────┬──────┘    └─────┬──────┘    └─────┬──────┘
-        │                 │                 │
-  ┌─────┴──────┐    ┌─────┴──────┐    ┌─────┴──────┐
-  │ Identity   │    │ UploadJob  │    │PatientUser │
-  │ Profile    │    │  actor ────┘    │ identity───┘
-  │  ial: ial1 │    │  status    │    │ person ────┐
-  └────────────┘    │  ...       │    └────────────┘
-                    └────────────┘           │
-                                      ┌─────┴──────┐
-                                      │ Person     │
-                                      │  id: 1042  │
-                                      │  (OMOP)    │
-                                      └────────────┘
-```
-
-External Identity rows store only `(issuer, sub)` — same values in all
-three databases, nothing that can drift. The internal `id` differs per
-database (auto-increment), but that's fine — it's only used for local FK
-references.
-
-### Standalone Mode (Single Service)
-
-All users are local. No external IdP.
-
-```
-Local PostgreSQL (Source of Truth)
-                         │
-  hk-labs DB (standalone)          ctomop DB (standalone)
-  ┌──────────────────┐             ┌──────────────────┐
-  │ Identity         │             │ Identity         │
-  │  id: 1           │             │  id: 1           │
-  │  iss: urn:local  │             │  iss: urn:local  │
-  │  sub: "a1b2c3…"  │             │  sub: "a1b2c3…"  │
-  │  email: jane@…   │             │  email: jane@…   │
-  │  name: Jane Doe  │             │  name: Jane Doe  │
-  │  password: ••••  │             │  password: ••••  │
-  └─────┬────────────┘             └─────┬────────────┘
-        │                                │
-  ┌─────┴──────┐                   ┌─────┴──────┐
-  │ UploadJob  │                   │PatientUser │
-  │  actor ────┘                   │ identity───┘
-  │  status    │                   │ person ────┐
-  └────────────┘                   └────────────┘
-                                         │
-                                   ┌─────┴──────┐
-                                   │ Person     │
-                                   │  id: 1042  │
-                                   └────────────┘
-```
-
-Local identities store email + name + password directly. Each service
-operates independently. When both run together, hk-labs sends
-`(urn:local, sub)` to ctomop on commit — ctomop auto-provisions a
-matching local identity if it doesn't exist yet.
-
----
-
-## Adding a New Auth Provider
-
-Adding corporate SAML (e.g., a hospital system) requires:
-
-1. **New TokenProvider subclass** — implements `can_handle()`, `verify()`:
-   ```python
-   class HospitalSAMLProvider(TokenProvider):
-       ISSUER = "https://login.hospital.example.com"
-
-       def can_handle(self, token, unverified):
-           return (unverified or {}).get("iss") == self.ISSUER
-
-       def verify(self, token):
-           # SAML assertion verification
-           claims = verify_saml_token(token)
-           return TokenClaims(
-               issuer=self.ISSUER,
-               sub=claims["sub"],
-               email=claims.get("email"),
-               name=claims.get("name"),
-               raw=claims,
-           )
-   ```
-
-2. **Add to `PARTNER_AUTH_PROVIDERS` setting** in whichever service(s)
-   should accept this provider.
-
-3. **Nothing else.** The Identity model, `_get_or_create`, and all
-   downstream code work unchanged. A new `Identity` row is created with
-   `issuer="https://login.hospital.example.com"`, `sub="hosp-user-42"`.
-
-### Local Provider (Admin / Service Users)
-
-Admin users authenticate via standard Django password auth against the
-Identity model. No token provider is involved — Django's
-`ModelBackend` handles `authenticate(email=..., password=...)`.
-
-```python
-class LocalIdentityBackend(ModelBackend):
-    """Django admin login for local (urn:local) identities."""
-
-    def authenticate(self, request, email=None, password=None, **kwargs):
-        try:
-            identity = Identity.objects.get(issuer="urn:local", email=email)
-        except Identity.DoesNotExist:
-            return None
-        if identity.check_password(password) and identity.is_active:
-            return identity
-        return None
-```
-
-Creating an admin user:
-
-```python
-import uuid
-
-identity = Identity.objects.create(
-    issuer="urn:local",
-    sub=str(uuid.uuid4()),
-    email="admin@example.com",
-    name="Admin User",
-    is_staff=True,
-    is_superuser=True,
-)
-identity.set_password("secure-password")
-identity.save(update_fields=["password"])
-```
-
-A management command (`createsuperuser`) would automate this.
-
-### Multi-Provider Identity Linking
-
-One human may authenticate via multiple providers (personal Firebase account
-+ corporate SAML). These create separate Identity rows. Firebase handles
-multi-provider linking internally (Google + email + phone all share one UID),
-so for Firebase-only deployments, no explicit linking is needed.
-
-If a second external IdP is introduced later, linking can be solved at the
-`PatientUser` level: point two Identity rows at the same Person via admin
-action. No recursive resolution or separate linking table needed — just a
-second `PatientUser` row pointing to the same `Person`.
-
-```python
-# Admin links a second identity to an existing person
-PatientUser.objects.create(identity=second_identity, person=existing_person)
-```
-
-This is intentionally deferred. Build the linking UI only when a concrete
-second-provider deployment appears.
-
----
-
-## What Stays App-Specific
-
-The Identity model is deliberately thin. App-specific data lives in
-separate tables:
-
-| App | Local Data | Where |
-|---|---|---|
-| ht-phr | `identity_level` (IAL1/IAL2) | `IdentityProfile` |
-| ht-phr | `is_admin`, `has_medical_records` | JWT custom claims (not stored) |
-| hk-labs | `identity_level`, `mfa_enabled` | `IdentityProfile` (or JWT claims) |
-| hk-labs | Upload history | `UploadJob.actor → Identity` |
-| ctomop | Person link | `PatientUser.identity → Identity` |
-| ctomop | Patient demographics | `PatientInfo` (clinical, not auth) |
-| ctomop | Consent, messages | `PatientConsent`, `PatientMessage` via `PatientUser` |
-| ctomop | Org membership | Via OAuth2 Application scoping (existing) |
-
----
-
-## Migration Sequence
-
-### Phase A: Add Identity Table (Non-Breaking)
-
-Each service adds the `identity` table alongside the existing User model.
-Existing auth continues to work.
-
-1. Add `Identity` model and migration to each repo.
-2. Add `PartnerAuthentication` variant that creates Identity records
-   in parallel with existing User creation.
-3. Backfill: for each existing User with `firebase_uid`, create a
-   corresponding Identity row with
-   `issuer="https://securetoken.google.com/<project>"`, `sub=firebase_uid`.
-
-### Phase B: Dual-Reference FK Migration
-
-Add Identity FK alongside existing User FK on key models. Both populated
-during the transition.
-
-**hk-labs:**
-- `UploadJob`: add `actor = FK(Identity, null=True)`, keep `user` FK.
-- Backfill `actor` from `user.firebase_uid` → Identity lookup.
-
-**ctomop:**
-- `PatientUser`: add `identity = FK(Identity, null=True)`, keep `user` FK.
-- Backfill `identity` from User → firebase_uid → Identity lookup.
-
-**ht-phr:**
-- `IdentityProfile`: create, linked to Identity.
-- Backfill `identity_level` from existing User.
-
-### Phase C: Switch AUTH_USER_MODEL
-
-Django warns against changing `AUTH_USER_MODEL` mid-project because the
-default migrations reference the initial user model via FK. Strategy:
-
-1. **Fake-migrate auth tables.** Write a data migration that:
-   - Drops Django's default FK constraints from `auth_permission`,
-     `admin_log`, `auth_group` pointing at old User.
-   - Re-creates them pointing at `Identity`.
-   - Or: use `--fake` after manually updating the `auth_user` table to
-     actually be the `identity` table (rename + add columns).
-2. **Update `AUTH_USER_MODEL`** to `"accounts.Identity"` (hk-labs, ht-phr)
-   or `"patient_portal.Identity"` (ctomop).
-3. **Squash migrations** for each app's `accounts` (or `patient_portal`)
-   app so new installs get a clean migration history without the swap.
-4. Update `PartnerAuthentication` to return Identity, not User.
-5. Update all views: `request.user` is now Identity, user data comes
-   from `request.auth` (TokenClaims).
-6. Session migration: existing sessions reference old User PKs. Deploy
-   with a session flush (acceptable since tokens are the primary auth
-   mechanism, sessions are only used for Django admin).
-
-### Phase D: Drop Legacy User
-
-1. Remove old User FK columns (`UploadJob.user`, `PatientUser.user`).
-2. Remove old User model (hk-labs) or stop using it (ht-phr, ctomop).
-3. Remove `ctomop_person_id` from hk-labs.
-4. Remove `phr_person_id` from ht-phr.
-5. Clean up: drop legacy `auth_user` / `accounts_user` tables.
-
-### Phase E: Update this document with current state 
-1. Remove all comparisons with old implementation
-2. It should just describe current implementation 
-
----
-
-## Request Auth Normalization
-
-`request.auth` (TokenClaims) is always populated, regardless of auth method.
-Views never need to check whether the user authenticated via token or session.
+`request.auth` (TokenClaims) is always populated, regardless of auth method:
 
 | Auth Method | `request.user` | `request.auth` |
 |---|---|---|
 | Firebase token | Identity (external) | TokenClaims from JWT |
 | SAML token | Identity (external) | TokenClaims from assertion |
 | Session (local) | Identity (local) | TokenClaims synthesized from model fields |
-| Service token | Identity (service) | TokenClaims with service issuer |
+| Service token | Identity (service) | `"service-token"` string |
 
-For session-based auth (Django admin, standalone mode login), the
-authentication backend synthesizes TokenClaims from the Identity model:
-
-```python
-class LocalIdentityBackend(ModelBackend):
-    def authenticate(self, request, email=None, password=None, **kwargs):
-        try:
-            identity = Identity.objects.get(issuer="urn:local", email=email)
-        except Identity.DoesNotExist:
-            return None
-        if identity.check_password(password) and identity.is_active:
-            return identity
-        return None
-
-    def get_token_claims(self, identity):
-        return TokenClaims(
-            issuer="urn:local",
-            sub=identity.sub,
-            email=identity.email,
-            name=identity.name,
-            raw={},
-        )
-```
-
-A middleware ensures `request.auth` is set after session auth:
+For session-based auth (Django admin, standalone mode login), a middleware
+synthesizes TokenClaims from the Identity model:
 
 ```python
 class TokenClaimsMiddleware:
@@ -795,59 +223,407 @@ class TokenClaimsMiddleware:
 
 ---
 
+## Authentication Flow
+
+```
+Client sends: Authorization: Bearer <JWT>
+  |
+  +- decode_jwt_unverified(token) -> extract iss, sub
+  |
+  +- Route to provider based on iss:
+  |    "https://securetoken.google.com/*" -> FirebaseTokenProvider
+  |    "https://login.corp.example.com"   -> CorporateSAMLProvider (future)
+  |
+  +- Provider.verify(token) -> TokenClaims(issuer, sub, email, name, raw)
+  |
+  +- Identity.objects.get_or_create(issuer=claims.issuer, sub=claims.sub)
+  |
+  +- return (identity, claims)
+```
+
+No email-based lookup. No provider-specific fields on the model.
+
+### Token Provider Interface
+
+```python
+class TokenProvider(abc.ABC):
+
+    @abc.abstractmethod
+    def can_handle(self, token, unverified_payload) -> bool:
+        """Lightweight routing check. No secrets, no external calls."""
+
+    @abc.abstractmethod
+    def verify(self, token) -> TokenClaims | None:
+        """Full verification. Returns claims or None."""
+```
+
+Providers are listed in `PARTNER_AUTH_PROVIDERS` setting. The auth backend
+iterates them in order; the first that recognises the token wins.
+
+---
+
+## Deployment Configuration
+
+### Standalone
+
+```python
+PARTNER_AUTH_PROVIDERS = []          # no external IdP
+CTOMOP_SYNC_URL = ""                 # no cross-service sync (hk-labs)
+```
+
+All users are local (`iss="urn:local"`). Service handles its own
+registration, login, and data. Works offline, works on-prem, works
+in development.
+
+### Integrated
+
+```python
+PARTNER_AUTH_PROVIDERS = [
+    "apps.accounts.providers.firebase.FirebaseTokenProvider",
+]
+CTOMOP_SYNC_URL = "https://ctomop.example.com/api/lab-results/sync/"  # hk-labs
+CTOMOP_SERVICE_TOKEN = "..."         # for service-to-service calls
+```
+
+External users authenticate via Firebase. Local identities remain for
+admins and service accounts. Cross-service calls use `(issuer, sub)` or
+service tokens.
+
+---
+
+## Per-Service Details
+
+Each HealthKey service owns its Identity table and links it to
+service-specific models. The pattern is the same everywhere ... only
+the linked models differ.
+
+### hk-labs (Upload Pipeline)
+
+Lab report upload, LLM extraction, LOINC matching, commit to ctomop.
+
+```python
+AUTH_USER_MODEL = "accounts.Identity"
+
+# UploadJob.user -> FK(Identity) via settings.AUTH_USER_MODEL
+```
+
+- On commit, sends `actor_iss` + `actor_sub` to ctomop. ctomop resolves to Person
+- No local person_id storage. ctomop is the source of truth for person linkage
+- SimpleJWT for local email/password login (standalone mode)
+
+### ctomop (OMOP CDM + Lab Results)
+
+Clinical data storage (OMOP), lab results, patient portal.
+
+```python
+AUTH_USER_MODEL = "patient_portal.Identity"
+
+class PatientUser(models.Model):
+    identity = models.OneToOneField(Identity, on_delete=models.CASCADE,
+                                    related_name="patient_user")
+    person = models.OneToOneField("omop_core.Person", on_delete=models.CASCADE,
+                                  related_name="portal_user")
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+```
+
+- Person resolution: `Identity -> PatientUser -> Person`
+- `PatientInfo.email` kept as clinical contact info (demographics, not auth)
+- `_ensure_person()` auto-provisions Person + PatientInfo + PatientUser on first login
+- Sync endpoint resolves `(actor_iss, actor_sub)` to person_id, auto-provisioning if needed
+
+### Template for New Services
+
+Any new service follows this pattern:
+
+```python
+# settings.py
+AUTH_USER_MODEL = "<app>.Identity"
+PARTNER_AUTH_PROVIDERS = [
+    "<app>.providers.firebase.FirebaseTokenProvider",
+]
+
+# models.py — copy Identity + IdentityManager from any existing service
+
+# Optional: service-specific profile
+class ServiceProfile(models.Model):
+    identity = models.OneToOneField(Identity, on_delete=models.CASCADE)
+    # ... service-specific fields
+```
+
+Cross-service calls pass `(issuer, sub)` in the request body. The receiving
+service does `Identity.objects.get_or_create(issuer=..., sub=...)` to resolve
+or auto-provision the identity locally.
+
+---
+
+## Cross-Service Flows
+
+These examples use ht-phr as the host app, but the pattern applies to any
+host that forwards its IdP token to HealthKey backends.
+
+### Self-Service Upload (Patient Uploads Own Labs)
+
+```
+Host frontend (e.g. ht-phr)
+  | IdP token: iss=".../healthtree-test", sub="abc123"
+  |
+  +-> hk-labs backend
+  |     Identity.get_or_create(iss, sub) -> identity_id=7
+  |     UploadJob.user = identity_id=7
+  |     ... extraction, review ...
+  |
+  +-> hk-labs commit -> POST to ctomop /api/lab-results/sync/
+  |     Body: { "actor_iss": "...", "actor_sub": "abc123",
+  |             "measurements": [...] }
+  |
+  +-> ctomop sync endpoint:
+        Identity.get_or_create(iss, sub) -> identity_id=12
+        _ensure_person(identity) -> Person + PatientInfo + PatientUser
+        PatientUser.objects.get(identity_id=12) -> person_id=1042
+        Create Measurements for person_id=1042
+```
+
+hk-labs never stores a person_id. ctomop resolves identity to Person on its side.
+
+### On-Behalf-Of Upload (Navigator Uploads for Patient)
+
+```
+Host frontend
+  | IdP token: sub="nav789" (navigator)
+  | Target patient: person_id=1042
+  |
+  +-> hk-labs commit -> POST to ctomop /api/lab-results/sync/
+  |     Body: { "actor_iss": "...", "actor_sub": "nav789",
+  |             "person_id": 1042,
+  |             "measurements": [...] }
+  |
+  +-> ctomop sync endpoint:
+        Validate: actor has write access to person_id=1042
+        Create Measurements for person_id=1042
+```
+
+### Direct ctomop Read (Lab Results Display)
+
+```
+Host frontend
+  | IdP token: sub="abc123"
+  |
+  +-> ctomop backend (via labs_results_remote federation module)
+        Identity.get_or_create(iss, sub) -> identity_id=12
+        PatientUser.objects.get(identity_id=12) -> person_id=1042
+        Return lab results for person_id=1042
+```
+
+### Standalone Mode
+
+Each service operates independently with local identities (`iss="urn:local"`).
+No host app, no external IdP.
+
+When `CTOMOP_SYNC_URL` is empty, hk-labs stores upload metadata locally
+and does not push to ctomop. Lab results stay in hk-labs only.
+
+When a standalone hk-labs is configured to point at a standalone ctomop,
+it sends `(urn:local, sub)` on commit. ctomop auto-provisions a matching
+local identity and Person if needed.
+
+---
+
+## Identity Records
+
+### Integrated Mode
+
+Same user, multiple databases, no data divergence. The host app (ht-phr)
+and HealthKey services each resolve the same `(issuer, sub)` independently.
+
+```
+Host IdP (Source of Truth, e.g. Firebase)
+  UID: "abc123", Email: "jane@example.com"
+  iss: "https://securetoken.google.com/healthtree-test"
+                         |
+      +------------------+------------------+
+      |                  |                  |
+  Host DB (ht-phr)   hk-labs DB         ctomop DB
+  +------------+    +------------+    +------------+
+  | Identity   |    | Identity   |    | Identity   |
+  |  id: 3     |    |  id: 7     |    |  id: 12    |
+  |  iss: fb.. |    |  iss: fb.. |    |  iss: fb.. |
+  |  sub: abc..|    |  sub: abc..|    |  sub: abc..|
+  |  email: "" |    |  email: "" |    |  email: "" |
+  +-----+------+    +-----+------+    +-----+------+
+        |                 |                 |
+  (host-specific)   +-----+------+    +-----+------+
+                    | UploadJob  |    |PatientUser |
+                    |  user -----+    | identity---+
+                    +------------+    | person ----+
+                                      +------------+
+                                             |
+                                      +------+-----+
+                                      | Person     |
+                                      |  id: 1042  |
+                                      +------------+
+```
+
+External Identity rows store only `(issuer, sub)`. The internal `id` differs
+per database (auto-increment), used only for local FK references.
+
+### Standalone Mode
+
+```
+  hk-labs (standalone)             ctomop (standalone)
+  +------------------+             +------------------+
+  | Identity         |             | Identity         |
+  |  iss: urn:local  |             |  iss: urn:local  |
+  |  sub: "a1b2c3.." |             |  sub: "d4e5f6.." |
+  |  email: jane@..  |             |  email: jane@..  |
+  |  password: ****  |             |  password: ****  |
+  +-----+------------+             +-----+------------+
+        |                                |
+  +-----+------+                   +-----+------+
+  | UploadJob  |                   |PatientUser |
+  |  user -----+                   | identity---+
+  +------------+                   | person ----+
+                                   +------------+
+  No sync to ctomop.                     |
+  Results stay local.              +-----+------+
+                                   | Person     |
+                                   |  id: 1042  |
+                                   +------------+
+```
+
+Each service has its own users, its own data. They can optionally be
+connected by configuring `CTOMOP_SYNC_URL`, at which point hk-labs pushes
+to ctomop using the `(urn:local, sub)` identity anchor.
+
+---
+
+## Adding a New Auth Provider
+
+1. New `TokenProvider` subclass with `can_handle()` and `verify()`:
+
+```python
+class HospitalSAMLProvider(TokenProvider):
+    ISSUER = "https://login.hospital.example.com"
+
+    def can_handle(self, token, unverified):
+        return (unverified or {}).get("iss") == self.ISSUER
+
+    def verify(self, token):
+        claims = verify_saml_token(token)
+        return TokenClaims(
+            issuer=self.ISSUER,
+            sub=claims["sub"],
+            email=claims.get("email"),
+            name=claims.get("name"),
+            raw=claims,
+        )
+```
+
+2. Add to `PARTNER_AUTH_PROVIDERS` in whichever service(s) should accept it.
+
+3. Nothing else. The Identity model, `get_or_create`, and all downstream code
+   work unchanged.
+
+### Multi-Provider Identity Linking
+
+One human may authenticate via multiple providers. These create separate
+Identity rows. Linking is solved at the `PatientUser` level: point two
+Identity rows at the same Person.
+
+```python
+PatientUser.objects.create(identity=second_identity, person=existing_person)
+```
+
+Build the linking UI when a concrete second-provider deployment appears.
+
+---
+
+## App-Specific Data
+
+The Identity model is deliberately thin. App-specific data lives in
+separate tables:
+
+| App | Local Data | Where |
+|---|---|---|
+| ht-phr (host) | `identity_level` (IAL1/IAL2) | `IdentityProfile` |
+| ht-phr (host) | `is_admin`, `has_medical_records` | JWT custom claims (not stored) |
+| hk-labs | Upload history | `UploadJob.user -> Identity` |
+| ctomop | Person link | `PatientUser.identity -> Identity` |
+| ctomop | Patient demographics | `PatientInfo` (clinical, not auth) |
+| ctomop | Consent, messages | `PatientConsent`, `PatientMessage` via `PatientUser` |
+| ctomop | Org membership | Via OAuth2 Application scoping |
+
+Host apps store their own app-specific data in their own tables. The
+platform doesn't prescribe what hosts keep locally.
+
+---
+
 ## GDPR Erasure (Right to Deletion)
 
-When a user requests account deletion, the cascade must span all services
-that hold their identity. The erasure flow:
+The customer owns the patient data, so the customer's host app initiates
+deletion and fans out to HealthKey services to erase their copies:
 
 ```
-User requests deletion (via ht-phr UI or admin action)
-  │
-  ├─► ht-phr:
-  │     Delete Identity + IdentityProfile
-  │     Revoke Firebase account (admin SDK)
-  │
-  ├─► hk-labs:
-  │     UploadJob.actor → SET NULL (preserve audit trail, anonymize actor)
-  │     Delete Identity + IdentityProfile
-  │
-  └─► ctomop:
-        PatientUser → soft-delete (is_active=False) or hard delete
-        Person → anonymize (zero out demographics, keep measurements
+Patient requests deletion (via host app UI or admin action)
+  |
+  +-> Customer's host (e.g. ht-phr):
+  |     Delete its own Identity + profile data
+  |     Revoke IdP account (e.g. Firebase admin SDK)
+  |
+  +-> hk-labs:
+  |     UploadJob.user -> SET NULL (preserve audit trail, anonymize actor)
+  |     Delete Identity
+  |
+  +-> ctomop:
+        PatientUser -> soft-delete (is_active=False) or hard delete
+        Person -> anonymize (zero out demographics, keep measurements
                  for aggregate research if consented, else delete)
-        PatientInfo → delete (contains PII: email, phone, address)
-        Identity → delete
+        PatientInfo -> delete (contains PII)
+        Identity -> delete
 ```
 
-### Implementation Notes
+- Host calls each HealthKey service via service-to-service API with
+  `(issuer, sub)` of the identity to delete. Each service erases its
+  local copy of the patient's data.
+- 30-day grace period before hard deletion (Identity.is_active=False blocks login)
+- In standalone mode, the customer runs the service directly, so it
+  handles the full cascade locally
 
-- **Cascade trigger:** ht-phr initiates deletion. It calls hk-labs and
-  ctomop via service-to-service API with `(issuer, sub)` of the identity
-  to delete. Each service handles its own cleanup.
-- **UploadJob preservation:** Lab upload records are kept for audit/quality
-  but `actor` is nulled out. The measurements themselves belong to the
-  Person, not the Identity — their fate is governed by the Person deletion
-  policy.
-- **Timing:** 30-day grace period before hard deletion (allows undo).
-  During grace period, Identity.is_active=False blocks login.
-- **Standalone mode:** In standalone, the single service handles the full
-  cascade locally. No cross-service calls needed.
+---
+
+## Cross-Service Communication
+
+Services communicate via REST APIs. The caller identifies itself and/or the
+target user using the `(issuer, sub)` tuple:
+
+| Pattern | Payload Fields | Example |
+|---|---|---|
+| Self-service (user acts on own data) | `actor_iss`, `actor_sub` | Patient uploads own labs |
+| On-behalf-of (actor writes for another) | `actor_iss`, `actor_sub`, `person_id` | Navigator uploads for patient |
+| Service-to-service (no user context) | `Authorization: Bearer <service-token>` | Scheduled sync job |
+
+The receiving service always resolves identity locally. No shared database,
+no token exchange, no identity service dependency.
 
 ---
 
 ## Decisions
 
-1. **Shared package timing** — Duplicate the Identity model, TokenProvider
-   base, and PartnerAuthentication across all three repos for now. Extract
-   to a shared package once the interface is stable and a third-party
-   consumer appears. Premature extraction adds packaging/versioning overhead
-   while the API is still being shaped.
+1. **Shared library** ... A `healthkey-identity` package will provide
+   Identity, IdentityManager, TokenProvider, PartnerAuthentication, and
+   built-in providers (Firebase, local). Currently duplicated across repos.
+   The interface is stable, extraction is next.
 
 ## Open Questions
 
-1. **ServiceTokenAuthentication** — ctomop's service-to-service auth uses a
-   pre-shared Bearer token mapped to a superuser. Options:
+1. **ServiceTokenAuthentication** ... service-to-service auth uses a pre-shared
+   Bearer token mapped to a superuser. Options:
    - Keep as-is (service tokens are not user identities)
-   - Create a service Identity with `iss="urn:service:hk-labs"`,
-     `sub="lab-sync"`, `is_staff=True`
+   - Create a service Identity with `iss="urn:service:<name>"`, `sub="<role>"`
    - Use OAuth2 client_credentials flow (existing in ctomop)
+
+2. **Shared library scope** ... What goes in `healthkey-identity` vs stays
+   per-service? Candidates: Identity model, IdentityManager, TokenProvider
+   base, PartnerAuthentication, FirebaseTokenProvider, TokenClaims,
+   decode_jwt_unverified, provider registry. App-specific profile models
+   and service-specific providers stay per-service.

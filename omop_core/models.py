@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.db import models
 from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
@@ -64,6 +65,134 @@ class ApplicationOrganization(models.Model):
 
     def __str__(self):
         return f"{self.application.name} → {self.organization.name}"
+
+
+class PatientGroup(models.Model):
+    """A group of patients for access control purposes."""
+    organization = models.ForeignKey(
+        Organization, on_delete=models.CASCADE, related_name='patient_groups',
+    )
+    name = models.CharField(max_length=200)
+    slug = models.SlugField(max_length=60)
+    description = models.TextField(blank=True, default='')
+    rule_managed = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+
+    class Meta:
+        db_table = 'patient_group'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['organization', 'slug'],
+                name='uq_patient_group_org_slug',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.organization.slug}/{self.name}"
+
+
+class PatientGroupMembership(models.Model):
+    """Links a patient (by person_id) to a group. No FK to Person — different DB."""
+    SOURCE_CHOICES = [
+        ('manual', 'Manual assignment'),
+        ('rule', 'Rule-based auto-assignment'),
+    ]
+    group = models.ForeignKey(
+        PatientGroup, on_delete=models.CASCADE, related_name='memberships',
+    )
+    person_id = models.BigIntegerField()
+    source = models.CharField(max_length=10, choices=SOURCE_CHOICES, default='manual')
+    added_at = models.DateTimeField(auto_now_add=True)
+    added_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+
+    class Meta:
+        db_table = 'patient_group_membership'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['group', 'person_id'],
+                name='uq_group_person',
+            ),
+        ]
+
+    def __str__(self):
+        return f"Person {self.person_id} in {self.group.name}"
+
+
+class ProfessionalGroupAccess(models.Model):
+    """Grants a professional (Identity) access to a patient group."""
+    ROLE_CHOICES = [
+        ('admin', 'Admin'),
+        ('navigator', 'Navigator'),
+        ('doctor', 'Doctor'),
+    ]
+    identity = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+        related_name='group_access_grants',
+    )
+    group = models.ForeignKey(
+        PatientGroup, on_delete=models.CASCADE, related_name='access_grants',
+    )
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES)
+    granted_at = models.DateTimeField(auto_now_add=True)
+    granted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+
+    class Meta:
+        db_table = 'professional_group_access'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['identity', 'group'],
+                name='uq_identity_group',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.identity} → {self.group.name} ({self.role})"
+
+
+class PersonalRepresentative(models.Model):
+    """Links an Identity to a person they represent (child, parent, spouse, etc.).
+    No FK to Person — different DB."""
+    RELATIONSHIP_CHOICES = [
+        ('parent', 'Parent'),
+        ('child', 'Child'),
+        ('spouse', 'Spouse'),
+        ('guardian', 'Guardian'),
+        ('caregiver', 'Caregiver'),
+        ('other', 'Other'),
+    ]
+    representative = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+        related_name='represented_persons',
+    )
+    person_id = models.BigIntegerField()
+    relationship = models.CharField(max_length=20, choices=RELATIONSHIP_CHOICES)
+    granted_at = models.DateTimeField(auto_now_add=True)
+    granted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+
+    class Meta:
+        db_table = 'personal_representative'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['representative', 'person_id'],
+                name='uq_representative_person',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.representative} represents Person {self.person_id} ({self.relationship})"
 
 
 class Vocabulary(models.Model):

@@ -16,16 +16,21 @@ import re
 import unicodedata
 from datetime import date
 
+import logging
+
 from django.contrib.contenttypes.models import ContentType
 from django.db import transaction
 from rest_framework import serializers, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from omop_core.authorization import can_access_patient, get_actor_role
 from omop_core.models import (
-    CareSite, Concept, Measurement, Person, VisitOccurrence,
+    CareSite, Concept, Measurement, Person, ProvenanceRecord, VisitOccurrence,
 )
 from patient_portal.api.permissions import ScopedTokenPermission, get_request_org
+
+logger = logging.getLogger(__name__)
 
 HK_LABS_VOCAB_ID = 'HK-Labs'
 HK_LABS_CONCEPT_ID_START = 2000000000
@@ -107,12 +112,13 @@ class SyncView(APIView):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
 
+        actor_iss = data.get('actor_iss', '')
+        actor_sub = data.get('actor_sub', '')
         person_id = data.get('person_id')
+        is_on_behalf_of = bool(person_id)
+
         if not person_id:
-            person_id = self._resolve_person_from_identity(
-                data.get('actor_iss', ''),
-                data.get('actor_sub', ''),
-            )
+            person_id = self._resolve_person_from_identity(actor_iss, actor_sub)
             if person_id is None:
                 return Response(
                     {'detail': 'Cannot resolve person from actor identity.'},
@@ -125,6 +131,16 @@ class SyncView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
+        # Authorization: resolve actor and check access
+        actor_identity = self._resolve_actor_identity(actor_iss, actor_sub, request.user)
+        if actor_identity and is_on_behalf_of:
+            if not can_access_patient(actor_identity, person_id):
+                return Response(
+                    {'detail': 'Actor does not have access to this patient.'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+        # Legacy org-scoped check (OAuth2 service clients)
         org = get_request_org(request)
         if org is not None:
             from omop_core.models import PatientInfo
@@ -160,11 +176,64 @@ class SyncView(APIView):
             )
             measurement_ids.append(m_id)
 
+        # Provenance
+        self._record_provenance(
+            actor_identity=actor_identity,
+            actor_iss=actor_iss,
+            actor_sub=actor_sub,
+            target_person_id=person_id,
+            is_on_behalf_of=is_on_behalf_of,
+            visit=visit,
+            measurement_ids=measurement_ids,
+            org=org,
+        )
+
         return Response({
             'visit_occurrence_id': visit.visit_occurrence_id,
             'measurement_ids': measurement_ids,
             'count': len(measurement_ids),
         }, status=status.HTTP_201_CREATED)
+
+    def _resolve_actor_identity(self, actor_iss, actor_sub, request_user):
+        """Resolve the actor Identity for authorization checks."""
+        if actor_iss and actor_sub:
+            from patient_portal.models import Identity
+            try:
+                return Identity.objects.get(issuer=actor_iss, sub=actor_sub)
+            except Identity.DoesNotExist:
+                return None
+        if request_user and request_user.is_authenticated:
+            return request_user
+        return None
+
+    def _record_provenance(self, *, actor_identity, actor_iss, actor_sub,
+                           target_person_id, is_on_behalf_of, visit,
+                           measurement_ids, org):
+        """Record provenance for all measurements created in this sync."""
+        if is_on_behalf_of:
+            source = 'ADMIN_CORRECTION'
+        else:
+            source = 'DOCUMENT_EXTRACTION'
+
+        source_user_id = ''
+        if actor_iss and actor_sub:
+            source_user_id = f"{actor_iss}|{actor_sub}"
+        elif actor_identity:
+            source_user_id = f"{actor_identity.issuer}|{actor_identity.sub}"
+
+        ct = ContentType.objects.get_for_model(Measurement)
+        records = [
+            ProvenanceRecord(
+                source=source,
+                source_user_id=source_user_id,
+                target_patient_id=str(target_person_id),
+                organization=org,
+                content_type=ct,
+                object_id=m_id,
+            )
+            for m_id in measurement_ids
+        ]
+        ProvenanceRecord.objects.bulk_create(records)
 
     def _resolve_person_from_identity(self, actor_iss, actor_sub):
         """Resolve (issuer, sub) → person_id, auto-provisioning if needed."""

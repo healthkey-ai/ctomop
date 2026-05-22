@@ -72,7 +72,9 @@ class MeasurementItemSerializer(serializers.Serializer):
 
 
 class SyncRequestSerializer(serializers.Serializer):
-    person_id = serializers.IntegerField()
+    person_id = serializers.IntegerField(required=False, allow_null=True)
+    actor_iss = serializers.CharField(required=False, allow_blank=True, default="")
+    actor_sub = serializers.CharField(required=False, allow_blank=True, default="")
     measurements = MeasurementItemSerializer(many=True)
     lab_name = serializers.CharField(required=False, allow_null=True, allow_blank=True)
     lab_date = serializers.DateField(required=False, allow_null=True)
@@ -105,7 +107,18 @@ class SyncView(APIView):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
 
-        person_id = data['person_id']
+        person_id = data.get('person_id')
+        if not person_id:
+            person_id = self._resolve_person_from_identity(
+                data.get('actor_iss', ''),
+                data.get('actor_sub', ''),
+            )
+            if person_id is None:
+                return Response(
+                    {'detail': 'Cannot resolve person from actor identity.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
         if not Person.objects.filter(person_id=person_id).exists():
             return Response(
                 {'detail': f'Person {person_id} does not exist.'},
@@ -152,6 +165,41 @@ class SyncView(APIView):
             'measurement_ids': measurement_ids,
             'count': len(measurement_ids),
         }, status=status.HTTP_201_CREATED)
+
+    def _resolve_person_from_identity(self, actor_iss, actor_sub):
+        """Resolve (issuer, sub) → person_id, auto-provisioning if needed."""
+        if not actor_iss or not actor_sub:
+            return None
+
+        from patient_portal.models import Identity, PatientUser
+        from omop_core.models import PatientInfo
+
+        identity, _ = Identity.objects.get_or_create(
+            issuer=actor_iss, sub=actor_sub,
+        )
+
+        try:
+            return PatientUser.objects.get(identity=identity).person_id
+        except PatientUser.DoesNotExist:
+            pass
+
+        if identity.email:
+            pi = PatientInfo.objects.filter(email=identity.email).first()
+            if pi:
+                PatientUser.objects.create(identity=identity, person=pi.person)
+                return pi.person_id
+
+        last = Person.objects.order_by("-person_id").first()
+        new_id = (last.person_id + 1) if last else 1000
+        person = Person.objects.create(
+            person_id=new_id,
+            year_of_birth=1900,
+            gender_source_value="unknown",
+            race_source_value="unknown",
+            ethnicity_source_value="unknown",
+        )
+        PatientUser.objects.create(identity=identity, person=person)
+        return person.person_id
 
     def _get_or_create_care_site(self, lab_name):
         if not lab_name:

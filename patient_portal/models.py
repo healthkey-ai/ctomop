@@ -18,10 +18,10 @@ class IdentityManager(BaseUserManager):
         if not email:
             raise ValueError("Email is required")
         email = self.normalize_email(email)
-        sub = str(uuid.uuid4())
+        extra_fields.pop("sub", None)
         identity = self.model(
             issuer="urn:local",
-            sub=sub,
+            sub=str(uuid.uuid4()),
             email=email,
             **extra_fields,
         )

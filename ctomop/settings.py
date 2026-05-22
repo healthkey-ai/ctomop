@@ -121,6 +121,8 @@ else:
         }
     }
 
+AUTH_USER_MODEL = "patient_portal.Identity"
+
 # Password validation
 AUTH_PASSWORD_VALIDATORS = [
     {

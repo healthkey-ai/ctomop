@@ -3,7 +3,7 @@ from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from oauth2_provider.contrib.rest_framework import OAuth2Authentication
-from django.contrib.auth.models import User
+from patient_portal.models import Identity
 from django.contrib.auth import logout, login, authenticate
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
@@ -199,12 +199,13 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
         if org is not None and patient_info.organization != org:
             return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        # Get the User associated with this person (not the logged-in user)
+        # Get the Identity associated with this person (not the logged-in user)
+        from patient_portal.models import PatientUser
         try:
-            patient_user = User.objects.get(id=person.person_id)
-            user_serializer = UserSerializer(patient_user)
+            patient_user = PatientUser.objects.get(person=person)
+            user_serializer = UserSerializer(patient_user.identity)
             user_data = user_serializer.data
-        except User.DoesNotExist:
+        except PatientUser.DoesNotExist:
             user_data = None
 
         patient_serializer = PatientInfoSerializer(patient_info)
@@ -550,12 +551,12 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                             family_name=family_name,
                         )
                         person_is_new = True
-                        User.objects.get_or_create(
-                            username=f'patient{person.person_id}',
+                        full_name = f"{given_name} {family_name}".strip()
+                        identity, _ = Identity.objects.get_or_create(
+                            sub=f'patient{person.person_id}',
                             defaults={
-                                'id': person.person_id,
-                                'first_name': given_name,
-                                'last_name': family_name,
+                                'issuer': 'urn:local',
+                                'name': full_name,
                             },
                         )
                     
@@ -1665,10 +1666,12 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
                     person = Person.objects.get(person_id=person_id)
                     # Delete PatientInfo
                     PatientInfo.objects.filter(person=person).delete()
-                    # Delete associated User if exists
+                    # Delete associated Identity if exists (via PatientUser)
+                    from patient_portal.models import PatientUser as PU
                     try:
-                        User.objects.filter(id=person_id).delete()
-                    except User.DoesNotExist:
+                        pu = PU.objects.get(person=person)
+                        pu.identity.delete()
+                    except PU.DoesNotExist:
                         pass
                     # Delete Person
                     person.delete()

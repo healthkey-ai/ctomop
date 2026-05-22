@@ -1,8 +1,11 @@
+import uuid
+
+from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.db import models
-from django.contrib.auth.models import User
 
 
-class IdentityManager(models.Manager):
+class IdentityManager(BaseUserManager):
+    use_in_migrations = True
 
     def get_or_create_from_claims(self, claims):
         """Get or create an Identity from TokenClaims."""
@@ -11,18 +14,52 @@ class IdentityManager(models.Manager):
             sub=claims.sub,
         )
 
+    def _create_user(self, email, password, **extra_fields):
+        if not email:
+            raise ValueError("Email is required")
+        email = self.normalize_email(email)
+        sub = str(uuid.uuid4())
+        identity = self.model(
+            issuer="urn:local",
+            sub=sub,
+            email=email,
+            **extra_fields,
+        )
+        identity.set_password(password)
+        identity.save(using=self._db)
+        return identity
 
-class Identity(models.Model):
-    """OIDC-based identity record: (issuer, sub) tuple.
+    def create_user(self, email, password=None, **extra_fields):
+        extra_fields.setdefault("is_staff", False)
+        extra_fields.setdefault("is_superuser", False)
+        return self._create_user(email, password, **extra_fields)
 
-    Added in Phase A alongside existing User model. Will become
-    AUTH_USER_MODEL in Phase C.
-    """
+    def create_superuser(self, email, password=None, **extra_fields):
+        extra_fields.setdefault("is_staff", True)
+        extra_fields.setdefault("is_superuser", True)
+        if extra_fields.get("is_staff") is not True:
+            raise ValueError("Superuser must have is_staff=True.")
+        if extra_fields.get("is_superuser") is not True:
+            raise ValueError("Superuser must have is_superuser=True.")
+        return self._create_user(email, password, **extra_fields)
+
+
+class Identity(AbstractBaseUser, PermissionsMixin):
+    """OIDC-based identity model: (issuer, sub) tuple."""
     issuer = models.CharField(max_length=255)
-    sub = models.CharField(max_length=255)
+    sub = models.CharField(max_length=255, unique=True)
+
+    email = models.EmailField(blank=True, default="")
+    name = models.CharField(max_length=255, blank=True, default="")
+
+    is_active = models.BooleanField(default=True)
+    is_staff = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
     objects = IdentityManager()
+
+    USERNAME_FIELD = "sub"
+    REQUIRED_FIELDS = ["email"]
 
     class Meta:
         db_table = "identity"
@@ -34,18 +71,30 @@ class Identity(models.Model):
             ),
         ]
 
+    @property
+    def is_local(self) -> bool:
+        return self.issuer == "urn:local"
+
+    @property
+    def username(self):
+        return self.email or self.sub
+
     def __str__(self):
+        if self.email:
+            return self.email
         return f"{self.issuer}|{self.sub}"
 
 
 class PatientUser(models.Model):
-    """Links Django User to OMOP Person for patient portal access"""
-    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='patient_profile')
+    """Links an OIDC identity to an OMOP Person for patient portal access."""
     identity = models.OneToOneField(
-        Identity, on_delete=models.SET_NULL,
-        null=True, blank=True, related_name='patient_user',
+        Identity, on_delete=models.CASCADE,
+        related_name='patient_user',
     )
-    person = models.OneToOneField('omop_core.Person', on_delete=models.CASCADE, related_name='portal_user')
+    person = models.OneToOneField(
+        'omop_core.Person', on_delete=models.CASCADE,
+        related_name='portal_user',
+    )
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     last_login = models.DateTimeField(null=True, blank=True)
@@ -54,7 +103,8 @@ class PatientUser(models.Model):
         db_table = 'patient_user'
 
     def __str__(self):
-        return f"{self.user.username} - Person {self.person.person_id}"
+        return f"{self.identity} - Person {self.person.person_id}"
+
 
 class PatientConsent(models.Model):
     """Track patient consent for data sharing and clinical trials"""
@@ -67,13 +117,14 @@ class PatientConsent(models.Model):
     consent_granted = models.BooleanField(default=False)
     consent_date = models.DateTimeField(auto_now_add=True)
     consent_document = models.TextField(blank=True, null=True)
-    
+
     class Meta:
         db_table = 'patient_consent'
         unique_together = ['patient_user', 'consent_type']
-    
+
     def __str__(self):
-        return f"{self.patient_user.user.username} - {self.consent_type}"
+        return f"{self.patient_user} - {self.consent_type}"
+
 
 class PatientMessage(models.Model):
     """Messages between patients and healthcare providers"""
@@ -83,10 +134,10 @@ class PatientMessage(models.Model):
     sender_is_patient = models.BooleanField(default=True)
     is_read = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
-    
+
     class Meta:
         db_table = 'patient_message'
         ordering = ['-created_at']
-    
+
     def __str__(self):
         return f"{self.subject} - {self.created_at}"

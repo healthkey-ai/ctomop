@@ -19,7 +19,7 @@ MAX_VALUES_PER_CONCEPT = 10
 
 
 def _resolve_person_id(request):
-    """Return (person_id, error_response) from query param or authenticated user's email."""
+    """Return (person_id, error_response) from query param or authenticated user."""
     person_id = request.query_params.get('person_id')
     if person_id:
         return int(person_id), None
@@ -30,6 +30,14 @@ def _resolve_person_id(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+    from patient_portal.models import PatientUser
+    try:
+        pu = PatientUser.objects.get(identity=request.user)
+        return pu.person_id, None
+    except PatientUser.DoesNotExist:
+        pass
+
+    # Fallback: resolve by email on PatientInfo
     pi = PatientInfo.objects.filter(email=request.user.email).first()
     if pi is None:
         return None, Response(

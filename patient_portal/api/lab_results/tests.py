@@ -4,7 +4,7 @@ Tests for the lab results API (ResultsSummary + Sync endpoints).
 from datetime import date
 from decimal import Decimal
 
-from django.contrib.auth.models import User
+from patient_portal.models import Identity
 from django.test import TestCase
 from rest_framework import status
 from rest_framework.test import APIClient
@@ -94,7 +94,7 @@ def _setup_vocab():
 class SyncViewTest(TestCase):
     def setUp(self):
         _setup_vocab()
-        self.user = User.objects.create_user(username='labsync', password='test')
+        self.user = Identity.objects.create_user(email='labsync@test.com', password='test')
         self.person = Person.objects.create(person_id=1001)
         PatientInfo.objects.create(person=self.person)
         self.client = APIClient()
@@ -173,7 +173,7 @@ class SyncViewTest(TestCase):
 class ResultsSummaryViewTest(TestCase):
     def setUp(self):
         _setup_vocab()
-        self.user = User.objects.create_user(username='reader', password='test')
+        self.user = Identity.objects.create_user(email='reader@test.com', password='test')
         self.person = Person.objects.create(person_id=2001)
         PatientInfo.objects.create(person=self.person)
         self.client = APIClient()
@@ -238,9 +238,9 @@ class ResultsSummaryViewTest(TestCase):
         self.assertEqual(v2['status'], 'below')
 
     def test_summary_resolves_person_from_email(self):
-        self.user.email = 'reader@example.com'
+        self.user.email = 'reader_resolve@example.com'
         self.user.save()
-        PatientInfo.objects.filter(person=self.person).update(email='reader@example.com')
+        PatientInfo.objects.filter(person=self.person).update(email='reader_resolve@example.com')
         resp = self.client.get('/api/lab-results/summary/')
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(len(resp.data['results']), 1)
@@ -258,7 +258,7 @@ class ResultsSummaryViewTest(TestCase):
 class ValuesViewTest(TestCase):
     def setUp(self):
         _setup_vocab()
-        self.user = User.objects.create_user(username='valreader', password='test')
+        self.user = Identity.objects.create_user(email='valreader@test.com', password='test')
         self.person = Person.objects.create(person_id=3001)
         PatientInfo.objects.create(person=self.person)
         self.client = APIClient()
@@ -303,9 +303,9 @@ class ValuesViewTest(TestCase):
         self.assertEqual(resp.data['category'], 'Hematology')
 
     def test_values_resolves_person_from_email(self):
-        self.user.email = 'valreader@example.com'
+        self.user.email = 'valreader_resolve@example.com'
         self.user.save()
-        PatientInfo.objects.filter(person=self.person).update(email='valreader@example.com')
+        PatientInfo.objects.filter(person=self.person).update(email='valreader_resolve@example.com')
         resp = self.client.get('/api/lab-results/values/', {'concept_code': '718-7'})
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data['count'], 3)
@@ -329,7 +329,7 @@ class ValuesViewTest(TestCase):
 class MeasurementDetailViewTest(TestCase):
     def setUp(self):
         _setup_vocab()
-        self.user = User.objects.create_user(username='measuser', password='test')
+        self.user = Identity.objects.create_user(email='measuser@test.com', password='test')
         self.person = Person.objects.create(person_id=4001)
         PatientInfo.objects.create(person=self.person)
         self.client = APIClient()
@@ -418,8 +418,7 @@ class AutoProvisionTest(TestCase):
     def test_new_user_gets_person_and_patient_info(self):
         from patient_portal.api.authentication import _ensure_person
 
-        user = User.objects.create_user(
-            username='newpatient@example.com',
+        user = Identity.objects.create_user(
             email='newpatient@example.com',
         )
         _ensure_person(user)
@@ -434,8 +433,7 @@ class AutoProvisionTest(TestCase):
         person = Person.objects.create(person_id=9001)
         PatientInfo.objects.create(person=person, email='existing@example.com')
 
-        user = User.objects.create_user(
-            username='existing@example.com',
+        user = Identity.objects.create_user(
             email='existing@example.com',
         )
         _ensure_person(user)
@@ -445,8 +443,7 @@ class AutoProvisionTest(TestCase):
     def test_autoprovisioned_user_can_access_summary(self):
         from patient_portal.api.authentication import _ensure_person
 
-        user = User.objects.create_user(
-            username='autouser@example.com',
+        user = Identity.objects.create_user(
             email='autouser@example.com',
         )
         _ensure_person(user)
@@ -461,7 +458,7 @@ class AutoProvisionTest(TestCase):
 class VisitDeleteViewTest(TestCase):
     def setUp(self):
         _setup_vocab()
-        self.user = User.objects.create_user(username='visitdel', password='test')
+        self.user = Identity.objects.create_user(email='visitdel@test.com', password='test')
         self.person = Person.objects.create(person_id=5001)
         PatientInfo.objects.create(person=self.person)
         self.client = APIClient()

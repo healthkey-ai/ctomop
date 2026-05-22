@@ -2,15 +2,34 @@
 
 ## Overview
 
-HealthKey uses a role-based access control (RBAC) system with patient groups
-as the unit of authorization. Professionals (admin, navigator, doctor) are
-granted access to patient groups. Patients control their own data and can
-grant professionals access by accepting invitations or inviting them directly.
+This document defines how HealthKey services authorize access to patient
+data. It builds on the [Identity Architecture](identity-architecture.md),
+which covers authentication (who you are). This document covers
+authorization (what you can do).
 
-This model applies in both operating modes:
-- **Integrated**: roles stored in the shared database (ctomop), resolved
-  from the Identity record
-- **Standalone**: roles stored in the service's local database, same schema
+The customer owns all patient data and the database it lives in. HealthKey
+services are software the customer deploys to manage that data on the
+customer's behalf. Authorization tables live in the same customer-owned
+database as the clinical data.
+
+### Two Operating Modes
+
+Authorization works the same way in both modes defined in the identity
+architecture:
+
+| Mode | Database | Identity Source | Authorization Tables |
+|---|---|---|---|
+| **Standalone** | Service-local database, owned by the customer | Local identities (`iss="urn:local"`) | In the service's own database |
+| **Integrated** | Customer's shared database, all services connected | Customer's IdP (e.g. Firebase) | In the customer's shared database, queryable by all services |
+
+In integrated mode, the customer provides a single database that all
+HealthKey services connect to. Authorization tables (groups, memberships,
+access grants) live alongside the clinical data. Any service can run
+`can_access_patient()` directly against the shared database — no
+cross-service API calls needed for access checks.
+
+Switching between modes is a settings change (same as identity). The
+authorization schema is identical in both modes.
 
 ---
 
@@ -78,69 +97,28 @@ person-to-person.
 
 ### How It Works
 
-When a user authenticates:
-- Their Identity resolves to their own Person (via PatientUser) — optional,
-  they may not have their own PHR
-- PersonalRepresentative records give them access to additional Person records
+When a user authenticates, their Identity resolves via `(issuer, sub)` as
+described in the identity architecture. Their effective patient set is:
 
-The effective patient set for a patient-role user is:
 ```
-own Person (if exists) + all Person records where they are representative
+own Person (via PatientUser, if exists)
+  + all Person records where they are a PersonalRepresentative
 ```
+
+A user may have no own PHR and still represent others. A single user can
+represent multiple people (e.g. parent with two children) and also manage
+their own PHR.
 
 ### Joining to Represent Someone Else
 
 ```
-1. User authenticates → Identity created
+1. User authenticates via IdP → Identity resolved (get_or_create by issuer, sub)
 2. User indicates they are joining to manage someone else's records
 3. System creates a new Person for the represented individual
 4. PersonalRepresentative record links Identity → new Person
 5. User can now upload/modify PHR for that Person
-6. Optionally: user also creates their own Person record (own PHR)
+6. Optionally: user also has their own Person record (via PatientUser)
 ```
-
-A single user can represent multiple people (e.g. parent with two children)
-and also manage their own PHR.
-
-### Authorization Check (Updated)
-
-```python
-def can_access_patient(actor_identity: Identity, target_person_id: int) -> bool:
-    """Check if actor has access to target patient."""
-    # Self-access
-    try:
-        if actor_identity.patient_user.person_id == target_person_id:
-            return True
-    except PatientUser.DoesNotExist:
-        pass
-
-    # Personal representative
-    if PersonalRepresentative.objects.filter(
-        representative=actor_identity,
-        person_id=target_person_id,
-    ).exists():
-        return True
-
-    # Professional group access
-    actor_groups = ProfessionalGroupAccess.objects.filter(
-        identity=actor_identity,
-    ).values_list('group_id', flat=True)
-
-    return PatientGroupMembership.objects.filter(
-        group_id__in=actor_groups,
-        person_id=target_person_id,
-    ).exists()
-```
-
-### Provenance for Representative Actions
-
-When a representative uploads/modifies PHR:
-- `source` = `PATIENT_SELF` (they are acting with patient-level authority)
-- `source_user_id` = representative's `issuer|sub`
-- `target_patient_id` = represented person's person_id
-
-This distinguishes from professional on-behalf-of actions
-(`source=ADMIN_CORRECTION`) in the audit trail.
 
 ---
 
@@ -166,7 +144,7 @@ Group membership can be managed two ways:
 explicitly. This is the default for ad-hoc groupings (care teams, clinic
 rosters).
 
-**Rule-based auto-assignment** — the host app defines rules that
+**Rule-based auto-assignment** — the customer's host app defines rules that
 automatically assign patients to groups based on clinical or demographic
 criteria. Examples:
 
@@ -180,8 +158,9 @@ Rules are defined and executed by the host app, not by HealthKey services.
 HealthKey provides the group membership API. The host app calls it when
 its rules trigger (on patient creation, diagnosis change, lab result, etc.).
 
-This keeps HealthKey services domain-agnostic. The host app owns the business
-logic for what constitutes a group and when patients move between groups.
+This keeps HealthKey services domain-agnostic — the same way the identity
+architecture keeps them IdP-agnostic. The host app owns the business logic
+for what constitutes a group and when patients move between groups.
 HealthKey services only see the resulting memberships.
 
 ### Group Model
@@ -232,20 +211,31 @@ groups they have access to.
 
 ## Authorization Logic
 
-### Self-Upload (Patient)
+Three access paths, checked in order:
+
+### 1. Self-Access (Patient)
 
 ```
-actor authenticates → resolve Identity
+actor authenticates → resolve Identity (issuer, sub)
 Identity → PatientUser → Person
 actor.person_id == target_person_id → ALLOW
 ```
 
-No group check needed. Patients always have full access to their own PHR.
+Patients always have full access to their own PHR. No group check needed.
 
-### On-Behalf-Of (Professional)
+### 2. Personal Representative
 
 ```
-actor authenticates → resolve Identity
+actor authenticates → resolve Identity (issuer, sub)
+PersonalRepresentative.objects.filter(representative=actor, person=target) → ALLOW
+```
+
+Same rights as self-access. Used for family members, minors, etc.
+
+### 3. Professional Group Access
+
+```
+actor authenticates → resolve Identity (issuer, sub)
 actor Identity → ProfessionalGroupAccess → list of group IDs
 target_person_id → PatientGroupMembership → list of group IDs
 INTERSECT → if non-empty → ALLOW
@@ -256,31 +246,114 @@ patient. The role on ProfessionalGroupAccess determines what they can do
 (currently all professional roles have the same permissions, but the model
 supports future differentiation).
 
-### Request Flow
+### Authorization Check
+
+```python
+def can_access_patient(actor_identity: Identity, target_person_id: int) -> bool:
+    """Check if actor has access to target patient's data."""
+    # 1. Self-access
+    try:
+        if actor_identity.patient_user.person_id == target_person_id:
+            return True
+    except PatientUser.DoesNotExist:
+        pass
+
+    # 2. Personal representative
+    if PersonalRepresentative.objects.filter(
+        representative=actor_identity,
+        person_id=target_person_id,
+    ).exists():
+        return True
+
+    # 3. Professional group access
+    actor_groups = ProfessionalGroupAccess.objects.filter(
+        identity=actor_identity,
+    ).values_list('group_id', flat=True)
+
+    return PatientGroupMembership.objects.filter(
+        group_id__in=actor_groups,
+        person_id=target_person_id,
+    ).exists()
+```
+
+In integrated mode, every service queries this directly against the
+customer's shared database. In standalone mode, each service has the same
+tables locally.
+
+---
+
+## Cross-Service Request Flows
+
+These extend the three cross-service communication patterns from the
+identity architecture: self-service, on-behalf-of, and service-to-service.
+
+### Self-Service Upload (Patient or Representative)
+
+Follows the identity architecture's self-service pattern. The actor's
+`(issuer, sub)` resolves to a Person via `Identity → PatientUser` or
+`Identity → PersonalRepresentative`.
 
 ```
-POST /api/v1/labs/uploads/{id}/commit/
-  Authorization: Bearer <firebase-token>
-  X-On-Behalf-Of: <person_id>        ← optional, for on-behalf-of
-
-hk-labs:
-  1. Authenticate actor (Firebase token → Identity)
-  2. If X-On-Behalf-Of present:
-       target_person_id = header value
-       Pass (actor_iss, actor_sub, person_id) to ctomop
-     Else:
-       Pass (actor_iss, actor_sub) to ctomop (self-upload)
-
-ctomop sync endpoint:
-  1. Resolve actor identity
-  2. If person_id provided (on-behalf-of):
-       Validate actor has group access to target person
-       Record provenance: actor=identity, target=person_id, source=ADMIN_CORRECTION
-     Else:
-       Resolve person from actor identity (self-upload)
-       Record provenance: actor=identity, target=self, source=PATIENT_SELF
-  3. Create measurements
+Host frontend
+  | IdP token: iss="...", sub="abc123"
+  |
+  +-> hk-labs commit → POST to ctomop /api/lab-results/sync/
+  |     Body: { "actor_iss": "...", "actor_sub": "abc123",
+  |             "measurements": [...] }
+  |
+  +-> ctomop sync endpoint:
+        Identity.get_or_create(iss, sub)
+        Resolve person from identity (PatientUser or PersonalRepresentative)
+        can_access_patient(identity, person_id) → ALLOW (self or representative)
+        Record provenance: source=PATIENT_SELF
+        Create measurements
 ```
+
+### On-Behalf-Of Upload (Professional)
+
+Follows the identity architecture's on-behalf-of pattern. The actor's
+`(issuer, sub)` identifies the professional, and `person_id` identifies
+the target patient.
+
+```
+Host frontend
+  | IdP token: sub="nav789" (navigator)
+  | Target patient: person_id=1042
+  |
+  +-> hk-labs:
+  |     Authenticate actor (Firebase → Identity)
+  |     can_access_patient(actor, 1042) → check group intersection
+  |     Pass (actor_iss, actor_sub, person_id=1042) to ctomop
+  |
+  +-> ctomop sync endpoint:
+        can_access_patient(actor, 1042) → validate (defense in depth)
+        Record provenance: source=ADMIN_CORRECTION, actor=nav789, target=1042
+        Create measurements for person_id=1042
+```
+
+In integrated mode, both hk-labs and ctomop validate against the same
+authorization tables in the customer's shared database. The double-check
+is defense in depth, not coordination.
+
+### Rule-Based Group Sync (Host App)
+
+Follows the identity architecture's service-to-service pattern. The host
+app manages group membership based on its own business rules.
+
+```
+Host app (e.g. ht-phr)
+  |
+  +- Patient created or diagnosis updated
+  +- Host evaluates rules: "ICD-10 C90.0 → group 'multiple-myeloma'"
+  |
+  +-> POST /api/groups/{id}/members/sync/
+        Authorization: Bearer <service-token>
+        Body: { "person_ids": [updated list] }
+```
+
+HealthKey services are domain-agnostic. The host app owns all business
+rules for patient classification. Different host apps can define completely
+different grouping criteria.
 
 ---
 
@@ -303,7 +376,7 @@ that group.
 ### Patient Joins Independently
 
 ```
-1. Patient authenticates via IdP → Identity created
+1. Patient authenticates via IdP → Identity resolved (get_or_create by issuer, sub)
 2. Person auto-provisioned (or matched by email to existing record)
 3. PatientUser links Identity → Person
 4. Patient uploads/manages own PHR
@@ -333,12 +406,13 @@ authorization model uniform — all access goes through groups.
 
 ## Provenance Recording
 
-Every write records who performed the action:
+Every write records who performed the action. This uses the existing
+`ProvenanceRecord` model in ctomop:
 
 ```
 ProvenanceRecord
   source              — PATIENT_SELF | ADMIN_CORRECTION | DOCUMENT_EXTRACTION | ...
-  source_user_id      — actor Identity (issuer|sub)
+  source_user_id      — actor's issuer|sub (consistent with identity architecture)
   target_patient_id   — person_id of the patient whose data changed
   modification_reason — optional text
   organization        — FK → Organization
@@ -347,46 +421,20 @@ ProvenanceRecord
   created_at
 ```
 
-For on-behalf-of writes:
-- `source` = `ADMIN_CORRECTION` (professional acting on behalf)
-- `source_user_id` = professional's `issuer|sub`
-- `target_patient_id` = patient's person_id
+| Actor | source | source_user_id |
+|---|---|---|
+| Patient (self-upload) | `PATIENT_SELF` or `DOCUMENT_EXTRACTION` | patient's `issuer\|sub` |
+| Personal representative | `PATIENT_SELF` | representative's `issuer\|sub` |
+| Navigator/doctor | `ADMIN_CORRECTION` | professional's `issuer\|sub` |
+| Host app (rule sync) | `EHR_SYNC` | service token identifier |
 
-For self-uploads:
-- `source` = `PATIENT_SELF` or `DOCUMENT_EXTRACTION`
-- `source_user_id` = patient's `issuer|sub`
-- `target_patient_id` = same person_id
-
----
-
-## Storage
-
-### Integrated Mode (Shared Database)
-
-All role/group/access tables live in the shared ctomop database:
-- `PatientGroup`
-- `PatientGroupMembership`
-- `ProfessionalGroupAccess`
-
-Both hk-labs and ctomop query these tables for authorization. hk-labs calls
-ctomop's authorization endpoint (or queries directly if sharing the DB).
-
-### Standalone Mode (Local Database)
-
-Same schema, same tables, local to each service. In standalone mode the
-service manages its own users and groups independently.
+`source_user_id` always uses the `issuer|sub` format from the identity
+architecture, making it traceable back to the Identity record in any
+service's database.
 
 ---
 
-## Implementation Notes
-
-### Database Tables
-
-All new tables belong to the `omop_core` Django app in ctomop (since they
-reference Person and Organization). In standalone mode for hk-labs, equivalent
-tables would live in the `accounts` app.
-
-### API Endpoints (ctomop)
+## API Endpoints
 
 ```
 # Groups
@@ -396,67 +444,60 @@ GET    /api/groups/{id}/                    — group detail + members
 POST   /api/groups/{id}/members/            — add patient to group (manual)
 DELETE /api/groups/{id}/members/{person_id}/ — remove patient from group
 
-# Rule-managed membership (called by host app)
+# Rule-managed membership (called by host app via service token)
 POST   /api/groups/{id}/members/sync/       — bulk sync members for rule-managed group
   Body: { "person_ids": [1, 2, 3] }
   Adds missing members (source=rule), removes members no longer in the list.
   Only allowed on groups with rule_managed=True.
-  Authenticated via service token (host app → ctomop).
 
 # Access grants
 GET    /api/groups/{id}/access/             — list professionals with access
 POST   /api/groups/{id}/access/             — grant professional access
 DELETE /api/groups/{id}/access/{identity_id}/ — revoke access
 
+# Personal representatives
+GET    /api/representatives/                — list person records the actor represents
+POST   /api/representatives/                — add a represented person
+DELETE /api/representatives/{person_id}/    — remove representation
+
 # Invitations
 POST   /api/invitations/                    — create invitation (patient or professional)
 POST   /api/invitations/{token}/accept/     — accept invitation
 ```
 
-### Host App Integration (Rule-Based Groups)
+---
 
-The host app defines rules for automatic group membership. HealthKey services
-provide the group and membership APIs but do not evaluate rules themselves.
+## Implementation Notes
 
-```
-Host app (e.g. ht-phr)
-  │
-  ├─ Patient created or diagnosis updated
-  ├─ Host app evaluates its rules:
-  │    "ICD-10 C90.0 → group 'multiple-myeloma'"
-  │    "zip 94xxx → group 'bay-area'"
-  │
-  └─ Calls ctomop:
-       POST /api/groups/{id}/members/sync/
-       Authorization: Bearer <service-token>
-       Body: { "person_ids": [updated list] }
-```
+### Database Tables
 
-This separation means:
-- HealthKey services are domain-agnostic (no disease or geography logic)
-- The host app owns all business rules for patient classification
-- Different host apps can define completely different grouping criteria
-- Rules can trigger on any event the host app knows about: diagnosis,
-  lab results, enrollment, location change, etc.
+All authorization tables live in the customer's database alongside the
+clinical data:
 
-### Authorization Check Helper
+| Table | References | Django App |
+|---|---|---|
+| `PatientGroup` | Organization | `omop_core` |
+| `PatientGroupMembership` | PatientGroup, Person | `omop_core` |
+| `ProfessionalGroupAccess` | Identity, PatientGroup | `omop_core` |
+| `PersonalRepresentative` | Identity, Person | `omop_core` |
 
-See `can_access_patient()` in the "Personal Representatives" section above.
-It checks all three access paths: self, personal representative, and
-professional group access.
+These tables reference both `Identity` (from the auth layer) and `Person`
+/ `Organization` (from the clinical layer). They belong to `omop_core`
+because that's where Person and Organization are defined.
 
-### hk-labs Integration
+In standalone mode for hk-labs (when not connected to ctomop), equivalent
+tables would live in the `accounts` app with simplified models.
 
-hk-labs does NOT store roles or groups locally in integrated mode. It passes
-the on-behalf-of person_id to ctomop and ctomop validates access. The flow:
+### Relationship to Identity Architecture
 
-1. hk-labs receives upload/commit with `X-On-Behalf-Of: <person_id>`
-2. hk-labs passes `person_id` + `actor_iss` + `actor_sub` to ctomop sync
-3. ctomop runs `can_access_patient()` before creating measurements
-4. ctomop returns 403 if access denied
-
-In standalone mode, hk-labs runs its own copy of the authorization tables
-and validates locally.
+| Identity Architecture Concept | Role Model Usage |
+|---|---|
+| `Identity (issuer, sub)` | FK on all authorization tables (who has access) |
+| `PatientUser (Identity → Person)` | Self-access check in `can_access_patient()` |
+| `TokenClaims` | Read at request time for `source_user_id` in provenance |
+| `PartnerAuthentication` | Resolves actor Identity before authorization check |
+| Service tokens | Host app uses service token for rule-based group sync |
+| Cross-service `(issuer, sub)` | Actor identity passed in sync payloads |
 
 ---
 
@@ -477,3 +518,7 @@ and validates locally.
 
 - **FHIR Consent**: Map patient access grants to FHIR Consent resources
   for interoperability with external EHR systems.
+
+- **healthkey-identity library**: When the shared identity library ships
+  (see identity architecture), authorization helpers (`can_access_patient`,
+  group management) should be included or packaged alongside it.

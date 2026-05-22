@@ -61,7 +61,7 @@ authentication. These use a synthetic issuer:
 | Claim | Value |
 |---|---|
 | `iss` | `urn:local` |
-| `sub` | `<identity.pk>` (string of the local auto-increment ID) |
+| `sub` | UUID v4 (generated at creation time, immutable) |
 
 This means the Identity table is the single auth model for both external
 (Firebase, SAML) and local (password-based) users. Django admin login
@@ -132,7 +132,7 @@ class Identity(AbstractBaseUser, PermissionsMixin):
     issuer = models.CharField(max_length=255)
         # "https://securetoken.google.com/<project>" or "urn:local"
     sub = models.CharField(max_length=255)
-        # Firebase UID, SAML subject, or str(pk) for local
+        # Firebase UID, SAML subject, or UUID for local
 
     # Only populated for local (iss="urn:local") identities
     email = models.EmailField(blank=True, default="")
@@ -142,7 +142,7 @@ class Identity(AbstractBaseUser, PermissionsMixin):
     is_staff = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
-    USERNAME_FIELD = "email"
+    USERNAME_FIELD = "sub"
     REQUIRED_FIELDS = []
 
     objects = IdentityManager()
@@ -324,11 +324,14 @@ local lab result storage (pre-migration behavior).
 # Identity table: (issuer, sub) only
 
 class PatientUser(models.Model):
-    """Links an OIDC identity to an OMOP Person."""
+    """Links an OIDC identity to an OMOP Person.
+    OneToOne on identity (one identity = one person).
+    ForeignKey on person (one person can have multiple identities via linking).
+    """
     identity = models.OneToOneField(Identity, on_delete=models.CASCADE,
                                     related_name="patient_user")
-    person = models.OneToOneField("omop_core.Person", on_delete=models.CASCADE,
-                                  related_name="portal_user")
+    person = models.ForeignKey("omop_core.Person", on_delete=models.CASCADE,
+                               related_name="portal_users")
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
 ```
@@ -371,9 +374,15 @@ ht-phr frontend
   │
   └─► ctomop sync endpoint:
         Identity.get_or_create(iss, sub) → identity_id=12
+        _ensure_person(identity, claims) → Person + PatientInfo + PatientUser
         PatientUser.objects.get(identity_id=12) → person_id=1042
         Create Measurements for person_id=1042
 ```
+
+The sync endpoint calls `_ensure_person()` to auto-provision the
+Person/PatientInfo/PatientUser chain if it doesn't exist yet. This
+handles the self-service case where a patient's first interaction with
+ctomop is via hk-labs upload (they may never have visited ctomop directly).
 
 hk-labs never stores `ctomop_person_id`. ctomop resolves the identity
 to a Person on its side.
@@ -439,29 +448,29 @@ When hk-labs and/or ctomop run standalone, all flows use local identities:
 
 ```
 hk-labs standalone frontend
-  │ Session cookie (email + password login, iss="urn:local", sub="7")
+  │ Session cookie (email + password login, iss="urn:local", sub="a1b2c3…")
   │
   ├─► hk-labs backend
-  │     request.user = Identity(iss="urn:local", sub="7")
+  │     request.user = Identity(iss="urn:local", sub="a1b2c3…")
   │     UploadJob.actor = identity_id=7
   │     ... extraction, review ...
   │
   ├─► hk-labs commit → POST to ctomop /api/lab-results/sync/
-  │     Body: { "actor_iss": "urn:local", "actor_sub": "7",
+  │     Body: { "actor_iss": "urn:local", "actor_sub": "a1b2c3…",
   │             "measurements": [...] }
   │
   └─► ctomop sync endpoint:
-        Identity.get_or_create(iss="urn:local", sub="7")
+        Identity.get_or_create(iss="urn:local", sub="a1b2c3…")
         PatientUser → person_id=1042
         Create Measurements
 ```
 
 ```
 ctomop standalone frontend
-  │ Session cookie (email + password login, iss="urn:local", sub="12")
+  │ Session cookie (email + password login, iss="urn:local", sub="d4e5f6…")
   │
   └─► ctomop backend
-        request.user = Identity(iss="urn:local", sub="12")
+        request.user = Identity(iss="urn:local", sub="d4e5f6…")
         PatientUser → person_id=1042
         Return lab results / edit / delete
 ```
@@ -530,7 +539,7 @@ Local PostgreSQL (Source of Truth)
   │ Identity         │             │ Identity         │
   │  id: 1           │             │  id: 1           │
   │  iss: urn:local  │             │  iss: urn:local  │
-  │  sub: "1"        │             │  sub: "1"        │
+  │  sub: "a1b2c3…"  │             │  sub: "a1b2c3…"  │
   │  email: jane@…   │             │  email: jane@…   │
   │  name: Jane Doe  │             │  name: Jane Doe  │
   │  password: ••••  │             │  password: ••••  │
@@ -609,17 +618,18 @@ class LocalIdentityBackend(ModelBackend):
 Creating an admin user:
 
 ```python
+import uuid
+
 identity = Identity.objects.create(
     issuer="urn:local",
-    sub="",          # will be set to str(pk) after save
+    sub=str(uuid.uuid4()),
     email="admin@example.com",
     name="Admin User",
     is_staff=True,
     is_superuser=True,
 )
 identity.set_password("secure-password")
-identity.sub = str(identity.pk)
-identity.save(update_fields=["password", "sub"])
+identity.save(update_fields=["password"])
 ```
 
 A management command (`createsuperuser`) would automate this.
@@ -627,36 +637,22 @@ A management command (`createsuperuser`) would automate this.
 ### Multi-Provider Identity Linking
 
 One human may authenticate via multiple providers (personal Firebase account
-+ corporate SAML). These create separate Identity rows. To link them:
-
-```python
-class IdentityLink(models.Model):
-    """Links multiple Identity records belonging to the same human."""
-    primary = models.ForeignKey(Identity, on_delete=models.CASCADE,
-                                related_name="linked_from")
-    linked = models.OneToOneField(Identity, on_delete=models.CASCADE,
-                                  related_name="linked_to")
-    linked_at = models.DateTimeField(auto_now_add=True)
-    linked_by = models.CharField(max_length=64)  # "admin", "self-service"
-```
-
-When resolving person_id, the system checks for linked identities:
-
-```python
-def resolve_person(identity):
-    pu = PatientUser.objects.filter(identity=identity).first()
-    if pu:
-        return pu.person
-    # Check linked identities
-    link = IdentityLink.objects.filter(linked=identity).first()
-    if link:
-        return resolve_person(link.primary)
-    return None
-```
-
-This is only needed when a second provider is introduced. Firebase handles
++ corporate SAML). These create separate Identity rows. Firebase handles
 multi-provider linking internally (Google + email + phone all share one UID),
-so for Firebase-only deployments, `IdentityLink` is not needed.
+so for Firebase-only deployments, no explicit linking is needed.
+
+If a second external IdP is introduced later, linking can be solved at the
+`PatientUser` level: point two Identity rows at the same Person via admin
+action. No recursive resolution or separate linking table needed — just a
+second `PatientUser` row pointing to the same `Person`.
+
+```python
+# Admin links a second identity to an existing person
+PatientUser.objects.create(identity=second_identity, person=existing_person)
+```
+
+This is intentionally deferred. Build the linking UI only when a concrete
+second-provider deployment appears.
 
 ---
 
@@ -711,10 +707,25 @@ during the transition.
 
 ### Phase C: Switch AUTH_USER_MODEL
 
-1. Update `AUTH_USER_MODEL = "accounts.Identity"` (or equivalent).
-2. Update `PartnerAuthentication` to return Identity, not User.
-3. Update all views: `request.user` is now Identity, user data comes
+Django warns against changing `AUTH_USER_MODEL` mid-project because the
+default migrations reference the initial user model via FK. Strategy:
+
+1. **Fake-migrate auth tables.** Write a data migration that:
+   - Drops Django's default FK constraints from `auth_permission`,
+     `admin_log`, `auth_group` pointing at old User.
+   - Re-creates them pointing at `Identity`.
+   - Or: use `--fake` after manually updating the `auth_user` table to
+     actually be the `identity` table (rename + add columns).
+2. **Update `AUTH_USER_MODEL`** to `"accounts.Identity"` (hk-labs, ht-phr)
+   or `"patient_portal.Identity"` (ctomop).
+3. **Squash migrations** for each app's `accounts` (or `patient_portal`)
+   app so new installs get a clean migration history without the swap.
+4. Update `PartnerAuthentication` to return Identity, not User.
+5. Update all views: `request.user` is now Identity, user data comes
    from `request.auth` (TokenClaims).
+6. Session migration: existing sessions reference old User PKs. Deploy
+   with a session flush (acceptable since tokens are the primary auth
+   mechanism, sessions are only used for Django admin).
 
 ### Phase D: Drop Legacy User
 
@@ -727,6 +738,100 @@ during the transition.
 ### Phase E: Update this document with current state 
 1. Remove all comparisons with old implementation
 2. It should just describe current implementation 
+
+---
+
+## Request Auth Normalization
+
+`request.auth` (TokenClaims) is always populated, regardless of auth method.
+Views never need to check whether the user authenticated via token or session.
+
+| Auth Method | `request.user` | `request.auth` |
+|---|---|---|
+| Firebase token | Identity (external) | TokenClaims from JWT |
+| SAML token | Identity (external) | TokenClaims from assertion |
+| Session (local) | Identity (local) | TokenClaims synthesized from model fields |
+| Service token | Identity (service) | TokenClaims with service issuer |
+
+For session-based auth (Django admin, standalone mode login), the
+authentication backend synthesizes TokenClaims from the Identity model:
+
+```python
+class LocalIdentityBackend(ModelBackend):
+    def authenticate(self, request, email=None, password=None, **kwargs):
+        try:
+            identity = Identity.objects.get(issuer="urn:local", email=email)
+        except Identity.DoesNotExist:
+            return None
+        if identity.check_password(password) and identity.is_active:
+            return identity
+        return None
+
+    def get_token_claims(self, identity):
+        return TokenClaims(
+            issuer="urn:local",
+            sub=identity.sub,
+            email=identity.email,
+            name=identity.name,
+            raw={},
+        )
+```
+
+A middleware ensures `request.auth` is set after session auth:
+
+```python
+class TokenClaimsMiddleware:
+    def __call__(self, request):
+        if request.user.is_authenticated and request.auth is None:
+            request.auth = TokenClaims(
+                issuer=request.user.issuer,
+                sub=request.user.sub,
+                email=request.user.email or None,
+                name=request.user.name or None,
+                raw={},
+            )
+        return self.get_response(request)
+```
+
+---
+
+## GDPR Erasure (Right to Deletion)
+
+When a user requests account deletion, the cascade must span all services
+that hold their identity. The erasure flow:
+
+```
+User requests deletion (via ht-phr UI or admin action)
+  │
+  ├─► ht-phr:
+  │     Delete Identity + IdentityProfile
+  │     Revoke Firebase account (admin SDK)
+  │
+  ├─► hk-labs:
+  │     UploadJob.actor → SET NULL (preserve audit trail, anonymize actor)
+  │     Delete Identity + IdentityProfile
+  │
+  └─► ctomop:
+        PatientUser → soft-delete (is_active=False) or hard delete
+        Person → anonymize (zero out demographics, keep measurements
+                 for aggregate research if consented, else delete)
+        PatientInfo → delete (contains PII: email, phone, address)
+        Identity → delete
+```
+
+### Implementation Notes
+
+- **Cascade trigger:** ht-phr initiates deletion. It calls hk-labs and
+  ctomop via service-to-service API with `(issuer, sub)` of the identity
+  to delete. Each service handles its own cleanup.
+- **UploadJob preservation:** Lab upload records are kept for audit/quality
+  but `actor` is nulled out. The measurements themselves belong to the
+  Person, not the Identity — their fate is governed by the Person deletion
+  policy.
+- **Timing:** 30-day grace period before hard deletion (allows undo).
+  During grace period, Identity.is_active=False blocks login.
+- **Standalone mode:** In standalone, the single service handles the full
+  cascade locally. No cross-service calls needed.
 
 ---
 

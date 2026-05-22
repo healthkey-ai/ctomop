@@ -14,6 +14,8 @@ from django.contrib.auth import get_user_model
 from django.db import IntegrityError
 from rest_framework.authentication import BaseAuthentication, SessionAuthentication
 
+from patient_portal.models import Identity
+
 from .providers import get_providers
 from .providers.base import decode_jwt_unverified
 
@@ -64,6 +66,13 @@ class PartnerAuthentication(BaseAuthentication):
 
     @staticmethod
     def _get_or_create(provider, claims, field, value):
+        identity, id_created = Identity.objects.get_or_create_from_claims(claims)
+        if id_created:
+            logger.info(
+                "partner_auth: created identity %d (%s|%s)",
+                identity.pk, claims.issuer, claims.sub,
+            )
+
         created = False
         try:
             user = User.objects.get(**{field: value})
@@ -82,17 +91,23 @@ class PartnerAuthentication(BaseAuthentication):
             except IntegrityError:
                 user = User.objects.get(**{field: value})
 
-        _ensure_person(user)
+        _ensure_person(user, identity)
         if created:
             logger.info("partner_auth: provisioned user %d (%s)", user.pk, user.email)
         return user
 
 
-def _ensure_person(user):
-    """Auto-provision an OMOP Person + PatientInfo for a newly created user."""
+def _ensure_person(user, identity=None):
+    """Auto-provision an OMOP Person + PatientInfo + PatientUser for a user."""
     from omop_core.models import PatientInfo, Person
+    from patient_portal.models import PatientUser
+
+    if identity and PatientUser.objects.filter(identity=identity).exists():
+        return
 
     if PatientInfo.objects.filter(email=user.email).exists():
+        if identity:
+            PatientUser.objects.filter(user=user).update(identity=identity)
         return
 
     last = Person.objects.order_by("-person_id").first()
@@ -106,6 +121,15 @@ def _ensure_person(user):
         ethnicity_source_value="unknown",
     )
     PatientInfo.objects.create(person=person, email=user.email)
+
+    patient_user, _ = PatientUser.objects.get_or_create(
+        user=user,
+        defaults={"person": person, "identity": identity},
+    )
+    if identity and not patient_user.identity:
+        patient_user.identity = identity
+        patient_user.save(update_fields=["identity"])
+
     logger.info(
         "partner_auth: auto-provisioned Person %d + PatientInfo for %s",
         new_id, user.email,

@@ -33,8 +33,11 @@ def decode_jwt_unverified(token: str) -> dict[str, Any] | None:
 class TokenClaims:
     """Normalized result of a successful token verification."""
 
+    issuer: str
+    sub: str
     uid: str
     email: str
+    name: str | None
     raw: dict[str, Any]
 
 

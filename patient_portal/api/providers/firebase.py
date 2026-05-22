@@ -42,8 +42,11 @@ class FirebaseTokenProvider(TokenProvider):
             return None
 
         return TokenClaims(
+            issuer=decoded.get("iss", ""),
+            sub=decoded["uid"],
             uid=decoded["uid"],
             email=decoded.get("email", ""),
+            name=decoded.get("name"),
             raw=decoded,
         )
 

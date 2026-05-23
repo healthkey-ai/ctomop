@@ -76,12 +76,7 @@ class PartnerAuthentication(BaseAuthentication):
 
 def _ensure_person(identity, claims=None):
     """Auto-provision an OMOP Person + PatientInfo + PatientUser."""
-    from django.db import transaction
-    from omop_core.models import PatientInfo, Person
-    from patient_portal.models import PatientUser
-
-    if PatientUser.objects.filter(identity=identity).exists():
-        return
+    from patient_portal.services import resolve_or_create_person
 
     email = ""
     if claims:
@@ -89,34 +84,7 @@ def _ensure_person(identity, claims=None):
     elif identity.email:
         email = identity.email
 
-    if email:
-        pi = PatientInfo.objects.filter(email=email).first()
-        if pi:
-            PatientUser.objects.get_or_create(identity=identity, defaults={'person': pi.person})
-            return
-
-    with transaction.atomic():
-        last = Person.objects.select_for_update().order_by("-person_id").first()
-        new_id = (last.person_id + 1) if last else 1000
-
-        person = Person.objects.create(
-            person_id=new_id,
-            year_of_birth=1900,
-            gender_source_value="unknown",
-            race_source_value="unknown",
-            ethnicity_source_value="unknown",
-        )
-        if email:
-            PatientInfo.objects.create(person=person, email=email)
-
-        PatientUser.objects.create(
-            identity=identity,
-            person=person,
-        )
-    logger.info(
-        "partner_auth: auto-provisioned Person %d for identity pk=%d",
-        new_id, identity.pk,
-    )
+    resolve_or_create_person(identity, email=email)
 
 
 class ServiceTokenAuthentication(BaseAuthentication):

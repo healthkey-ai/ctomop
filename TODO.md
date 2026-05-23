@@ -7,11 +7,8 @@ Issues identified during code review that require architectural decisions, profi
 ### ✅ Test coverage gaps for authorization edge cases
 - **Fixed:** Added 6 test classes (17 tests) covering: on-behalf-of actor flow, org-scoped sync rejection, pipe character validation, PATCH with invalid date, PersonalRepresentative verification_status enforcement, ProfessionalGroupAccess expires_at enforcement.
 
-### Extract shared person auto-provisioning logic (DRY)
-- **Severity:** medium / design
-- `patient_portal/api/lab_results/sync.py:_resolve_person_from_identity` and `patient_portal/api/authentication.py:_ensure_person`
-- Nearly identical logic in two places: check PatientUser, check email match, create Person with max(person_id)+1, create PatientUser. The sync copy previously had a bug the auth copy didn't (missing `transaction.atomic`), now fixed. Keeping two copies will cause drift again.
-- **Action:** Extract into a shared `resolve_or_create_person(identity, email=None)` function in `patient_portal/services.py` and call from both places.
+### ✅ Extract shared person auto-provisioning logic (DRY)
+- **Fixed:** Extracted `resolve_or_create_person(identity, email=None)` into `patient_portal/services.py`. Both `_ensure_person` (authentication.py) and `_resolve_person_from_identity` (sync.py) now delegate to it.
 
 ### _next_pk holds row locks for entire sync transaction
 - **Severity:** medium / performance

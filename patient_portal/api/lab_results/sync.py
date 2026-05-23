@@ -311,8 +311,8 @@ class SyncView(APIView):
         if not actor_iss or not actor_sub:
             return None
 
-        from patient_portal.models import Identity, PatientUser
-        from omop_core.models import PatientInfo
+        from patient_portal.models import Identity
+        from patient_portal.services import resolve_or_create_person
 
         identity, created = Identity.objects.get_or_create(
             issuer=actor_iss, sub=actor_sub,
@@ -321,28 +321,7 @@ class SyncView(APIView):
             identity.set_unusable_password()
             identity.save(update_fields=['password'])
 
-        try:
-            return PatientUser.objects.get(identity=identity).person_id
-        except PatientUser.DoesNotExist:
-            pass
-
-        if identity.email:
-            pi = PatientInfo.objects.filter(email=identity.email).first()
-            if pi:
-                PatientUser.objects.get_or_create(identity=identity, defaults={'person': pi.person})
-                return pi.person_id
-
-        with transaction.atomic():
-            last = Person.objects.select_for_update().order_by("-person_id").first()
-            new_id = (last.person_id + 1) if last else 1000
-            person = Person.objects.create(
-                person_id=new_id,
-                year_of_birth=1900,
-                gender_source_value="unknown",
-                race_source_value="unknown",
-                ethnicity_source_value="unknown",
-            )
-            PatientUser.objects.create(identity=identity, person=person)
+        person = resolve_or_create_person(identity)
         return person.person_id
 
     def _get_or_create_care_site(self, lab_name):

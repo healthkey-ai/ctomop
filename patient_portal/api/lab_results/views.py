@@ -2,6 +2,7 @@ from collections import defaultdict
 from decimal import Decimal, InvalidOperation
 
 from django.contrib.contenttypes.models import ContentType
+from django.db import connection
 from django.db.models import Q as models_Q
 from rest_framework import status
 from rest_framework.pagination import PageNumberPagination
@@ -148,6 +149,51 @@ def _build_category_cache():
     return result
 
 
+_CONCEPT_SUMMARY_SQL = """
+WITH eff AS (
+    SELECT
+        CASE
+            WHEN measurement_concept_id = 0
+                 AND measurement_source_concept_id IS NOT NULL
+            THEN measurement_source_concept_id
+            ELSE measurement_concept_id
+        END AS eff_id,
+        measurement_date
+    FROM measurement
+    WHERE person_id = %s
+)
+SELECT
+    eff.eff_id              AS effective_concept_id,
+    MAX(eff.measurement_date) AS latest_date,
+    c.concept_code,
+    c.concept_name,
+    c.vocabulary_id,
+    COALESCE(
+        lc.display_name,
+        CASE WHEN c.vocabulary_id IN ('LOINC', 'HK-Labs')
+             THEN 'Uncategorized'
+             ELSE 'Other'
+        END
+    ) AS category
+FROM eff
+JOIN concept c ON c.concept_id = eff.eff_id
+LEFT JOIN loinc_code_class lcc
+       ON lcc.loinc_num = c.concept_code
+      AND c.vocabulary_id = 'LOINC'
+LEFT JOIN loinc_class lc
+       ON lc.code = lcc.loinc_class_code
+GROUP BY eff.eff_id, c.concept_code, c.concept_name, c.vocabulary_id,
+         COALESCE(
+             lc.display_name,
+             CASE WHEN c.vocabulary_id IN ('LOINC', 'HK-Labs')
+                  THEN 'Uncategorized'
+                  ELSE 'Other'
+             END
+         )
+ORDER BY category, latest_date DESC
+"""
+
+
 class ResultsSummaryView(APIView):
     """
     GET /api/lab-results/summary/?page=1&page_size=50[&person_id=X]
@@ -169,60 +215,66 @@ class ResultsSummaryView(APIView):
                     status=status.HTTP_404_NOT_FOUND,
                 )
 
-        cards = self._build_cards(person_id)
+        summaries = self._get_concept_summaries(person_id)
 
         paginator = LabResultsPagination()
-        page = paginator.paginate_queryset(cards, request)
-        serializer = LabResultCardSerializer(page, many=True)
+        page = paginator.paginate_queryset(summaries, request)
+
+        cards = self._hydrate_page(person_id, page)
+        serializer = LabResultCardSerializer(cards, many=True)
         return paginator.get_paginated_response(serializer.data)
 
-    def _build_cards(self, person_id):
+    @staticmethod
+    def _get_concept_summaries(person_id):
+        with connection.cursor() as cursor:
+            cursor.execute(_CONCEPT_SUMMARY_SQL, [person_id])
+            columns = [col[0] for col in cursor.description]
+            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+    @staticmethod
+    def _hydrate_page(person_id, page_summaries):
+        if not page_summaries:
+            return []
+
+        concept_ids = [s['effective_concept_id'] for s in page_summaries]
+        concept_id_set = set(concept_ids)
+
         measurements = (
             Measurement.objects
             .filter(person_id=person_id)
-            .select_related(
-                'measurement_concept', 'measurement_source_concept',
-                'measurement_type_concept', 'unit_concept',
+            .filter(
+                models_Q(measurement_concept_id__in=concept_ids)
+                | models_Q(
+                    measurement_concept_id=0,
+                    measurement_source_concept_id__in=concept_ids,
+                )
             )
+            .select_related('measurement_type_concept', 'unit_concept')
             .order_by('-measurement_date', '-measurement_id')
         )
 
-        concept_groups = defaultdict(list)
+        groups = defaultdict(list)
         for m in measurements:
             eff_id = m.measurement_concept_id
             if eff_id == 0 and m.measurement_source_concept_id:
                 eff_id = m.measurement_source_concept_id
-            if len(concept_groups[eff_id]) < MAX_VALUES_PER_CONCEPT:
-                concept_groups[eff_id].append(m)
+            if eff_id in concept_id_set and len(groups[eff_id]) < MAX_VALUES_PER_CONCEPT:
+                groups[eff_id].append(m)
 
-        if not concept_groups:
-            return []
-
-        concepts = {
-            c.concept_id: c
-            for c in Concept.objects.filter(concept_id__in=concept_groups.keys())
-        }
-
-        provenance = self._load_provenance(concept_groups)
-        category_cache = _build_category_cache()
+        visit_ids = set()
+        for meas_list in groups.values():
+            for m in meas_list:
+                if m.visit_occurrence_id:
+                    visit_ids.add(m.visit_occurrence_id)
+        provenance = _load_visit_provenance(visit_ids)
 
         cards = []
-        for concept_id, meas_list in concept_groups.items():
-            concept = concepts.get(concept_id)
-            if not concept:
-                continue
-
-            if concept.vocabulary_id == 'LOINC':
-                category = category_cache.get(concept.concept_code, 'Uncategorized')
-            elif concept.vocabulary_id == 'HK-Labs':
-                category = 'Uncategorized'
-            else:
-                category = 'Other'
+        for summary in page_summaries:
+            cid = summary['effective_concept_id']
+            meas_list = groups.get(cid, [])
 
             values = []
             for m in meas_list:
-                s = _compute_status(m.value_as_number, m.range_low, m.range_high)
-
                 unit_str = m.unit_source_value
                 if not unit_str and m.unit_concept:
                     unit_str = m.unit_concept.concept_code
@@ -248,7 +300,7 @@ class ResultsSummaryView(APIView):
                     'value': m.value_as_number,
                     'value_string': m.value_as_string,
                     'unit': unit_str,
-                    'status': s,
+                    'status': _compute_status(m.value_as_number, m.range_low, m.range_high),
                     'measured_at': m.measurement_date,
                     'range_low': m.range_low,
                     'range_high': m.range_high,
@@ -258,27 +310,15 @@ class ResultsSummaryView(APIView):
                 })
 
             cards.append({
-                'concept_id': concept_id,
-                'concept_code': concept.concept_code,
-                'concept_name': concept.concept_name,
-                'vocabulary_id': concept.vocabulary_id,
-                'category': category,
+                'concept_id': cid,
+                'concept_code': summary['concept_code'],
+                'concept_name': summary['concept_name'],
+                'vocabulary_id': summary['vocabulary_id'],
+                'category': summary['category'],
                 'values': values,
             })
 
-        cards.sort(key=lambda c: (
-            c['category'],
-            -(c['values'][0]['measured_at'].toordinal() if c['values'] else 0),
-        ))
         return cards
-
-    def _load_provenance(self, concept_groups):
-        visit_ids = set()
-        for meas_list in concept_groups.values():
-            for m in meas_list:
-                if m.visit_occurrence_id:
-                    visit_ids.add(m.visit_occurrence_id)
-        return _load_visit_provenance(visit_ids)
 
 
 class ValuesView(APIView):

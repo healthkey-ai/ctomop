@@ -4,12 +4,6 @@
 
 Issues identified during code review that require architectural decisions, profiling, or broader scope changes before fixing. Items marked ✅ were fixed in the review pass.
 
-### _build_cards loads all measurements into memory
-- **Severity:** high / performance
-- `patient_portal/api/lab_results/views.py` — `ResultsSummaryView._build_cards`
-- Fetches ALL measurements for a person, groups in Python, then discards most (MAX_VALUES_PER_CONCEPT=10). A patient with thousands of measurements (common in oncology — CBC panels generate 10+ per draw) loads them all before pagination. The pagination only covers the cards (concepts), not the underlying query.
-- **Action:** Restructure to first query distinct concept IDs for the person (paginated), then fetch only measurements for concepts on the current page with a per-concept LIMIT using a window function or separate queries.
-
 ### _next_pk holds row locks for entire sync transaction
 - **Severity:** medium / performance
 - `patient_portal/api/lab_results/sync.py:49-56`

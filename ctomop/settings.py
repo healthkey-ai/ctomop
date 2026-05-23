@@ -32,7 +32,7 @@ if DEBUG:
 else:
     ALLOWED_HOSTS = [
         h.strip()
-        for h in os.environ.get('ALLOWED_HOSTS', '').split(',')
+        for h in os.environ.get('ALLOWED_HOSTS', 'ctomop.onrender.com').split(',')
         if h.strip()
     ]
 
@@ -300,8 +300,13 @@ def _init_firebase_admin():
 
     try:
         firebase_admin.initialize_app(cred, options)
-    except (ValueError, Exception):
-        pass
+    except ValueError:
+        pass  # Already initialized
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Firebase Admin SDK initialization failed", exc_info=True,
+        )
 
 
 _init_firebase_admin()

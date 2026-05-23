@@ -48,8 +48,9 @@ class Command(BaseCommand):
         for pu in unlinked.select_related("user"):
             email = pu.user.email
             identity = Identity.objects.filter(
+                email=email,
                 patient_user__isnull=True,
-            ).first()
+            ).first() if email else None
 
             if not identity:
                 unfixable += 1

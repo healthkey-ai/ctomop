@@ -140,6 +140,7 @@ class ProfessionalGroupAccess(models.Model):
         PatientGroup, on_delete=models.CASCADE, related_name='access_grants',
     )
     role = models.CharField(max_length=20, choices=ROLE_CHOICES)
+    expires_at = models.DateTimeField(null=True, blank=True)
     granted_at = models.DateTimeField(auto_now_add=True)
     granted_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
@@ -170,12 +171,20 @@ class PersonalRepresentative(models.Model):
         ('caregiver', 'Caregiver'),
         ('other', 'Other'),
     ]
+    VERIFICATION_CHOICES = [
+        ('PENDING', 'Pending'),
+        ('VERIFIED', 'Verified'),
+        ('REJECTED', 'Rejected'),
+    ]
     representative = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
         related_name='represented_persons',
     )
     person_id = models.BigIntegerField()
     relationship = models.CharField(max_length=20, choices=RELATIONSHIP_CHOICES)
+    verification_status = models.CharField(
+        max_length=20, choices=VERIFICATION_CHOICES, default='PENDING',
+    )
     granted_at = models.DateTimeField(auto_now_add=True)
     granted_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,

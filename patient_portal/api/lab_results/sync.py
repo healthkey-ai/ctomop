@@ -254,6 +254,7 @@ class SyncView(APIView):
             visit=visit,
             measurement_ids=measurement_ids,
             org=org,
+            source_type=source_type,
         )
 
         return Response({
@@ -276,10 +277,12 @@ class SyncView(APIView):
 
     def _record_provenance(self, *, actor_identity, actor_iss, actor_sub,
                            target_person_id, is_on_behalf_of, visit,
-                           measurement_ids, org):
+                           measurement_ids, org, source_type):
         """Record provenance for all measurements created in this sync."""
         if is_on_behalf_of:
             source = 'ADMIN_CORRECTION'
+        elif source_type == 'patient_self_report':
+            source = 'PATIENT_SELF'
         else:
             source = 'DOCUMENT_EXTRACTION'
 
@@ -311,9 +314,12 @@ class SyncView(APIView):
         from patient_portal.models import Identity, PatientUser
         from omop_core.models import PatientInfo
 
-        identity, _ = Identity.objects.get_or_create(
+        identity, created = Identity.objects.get_or_create(
             issuer=actor_iss, sub=actor_sub,
         )
+        if created:
+            identity.set_unusable_password()
+            identity.save(update_fields=['password'])
 
         try:
             return PatientUser.objects.get(identity=identity).person_id
@@ -323,19 +329,20 @@ class SyncView(APIView):
         if identity.email:
             pi = PatientInfo.objects.filter(email=identity.email).first()
             if pi:
-                PatientUser.objects.create(identity=identity, person=pi.person)
+                PatientUser.objects.get_or_create(identity=identity, defaults={'person': pi.person})
                 return pi.person_id
 
-        last = Person.objects.select_for_update().order_by("-person_id").first()
-        new_id = (last.person_id + 1) if last else 1000
-        person = Person.objects.create(
-            person_id=new_id,
-            year_of_birth=1900,
-            gender_source_value="unknown",
-            race_source_value="unknown",
-            ethnicity_source_value="unknown",
-        )
-        PatientUser.objects.create(identity=identity, person=person)
+        with transaction.atomic():
+            last = Person.objects.select_for_update().order_by("-person_id").first()
+            new_id = (last.person_id + 1) if last else 1000
+            person = Person.objects.create(
+                person_id=new_id,
+                year_of_birth=1900,
+                gender_source_value="unknown",
+                race_source_value="unknown",
+                ethnicity_source_value="unknown",
+            )
+            PatientUser.objects.create(identity=identity, person=person)
         return person.person_id
 
     def _get_or_create_care_site(self, lab_name):
@@ -345,11 +352,14 @@ class SyncView(APIView):
         if care_site:
             return care_site
         cs_id = _next_pk(CareSite, 'care_site_id')
-        return CareSite.objects.create(
-            care_site_id=cs_id,
-            care_site_name=lab_name,
-            care_site_source_value=lab_name[:50],
-        )
+        try:
+            return CareSite.objects.create(
+                care_site_id=cs_id,
+                care_site_name=lab_name,
+                care_site_source_value=lab_name[:50],
+            )
+        except Exception:
+            return CareSite.objects.filter(care_site_name=lab_name).first()
 
     def _create_visit_occurrence(self, person_id, care_site, lab_date, report_filename, visit_concept, type_concept):
         visit_id = _next_pk(VisitOccurrence, 'visit_occurrence_id')

@@ -11,6 +11,9 @@ export default defineConfig(({ mode }) => {
   const apiProxyTarget = env.VITE_API_PROXY_TARGET || "http://localhost:9200";
 
   return {
+    build: {
+      outDir: "build",
+    },
     plugins: [
       react(),
       tailwindcss(),

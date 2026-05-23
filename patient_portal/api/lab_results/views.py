@@ -128,18 +128,24 @@ MEASUREMENT_TYPE_LABELS = {
 }
 
 
-from functools import lru_cache
+from django.core.cache import cache as django_cache
 
-@lru_cache(maxsize=1)
+
 def _build_category_cache():
     """Build LOINC concept_code → category display name cache."""
+    key = 'loinc_category_cache'
+    result = django_cache.get(key)
+    if result is not None:
+        return result
     class_names = dict(LoincClass.objects.values_list('code', 'display_name'))
     code_to_class = dict(LoincCodeClass.objects.values_list('loinc_num', 'loinc_class_id'))
-    return {
+    result = {
         loinc_num: class_names[class_code]
         for loinc_num, class_code in code_to_class.items()
         if class_code in class_names
     }
+    django_cache.set(key, result, timeout=3600)
+    return result
 
 
 class ResultsSummaryView(APIView):
@@ -523,8 +529,9 @@ class MeasurementDetailView(APIView):
 
         if updated:
             m.save()
+            source = self._provenance_source(request, m.person_id)
             ProvenanceRecord.objects.create(
-                source='ADMIN_CORRECTION',
+                source=source,
                 source_user_id=f"{getattr(request.user, 'issuer', '')}|{getattr(request.user, 'sub', '')}",
                 target_patient_id=str(m.person_id),
                 modification_reason='measurement_update',
@@ -534,6 +541,17 @@ class MeasurementDetailView(APIView):
 
         return Response({'detail': 'Updated.'}, status=status.HTTP_200_OK)
 
+    @staticmethod
+    def _provenance_source(request, person_id):
+        from patient_portal.models import PatientUser
+        try:
+            own_pid = PatientUser.objects.get(identity=request.user).person_id
+            if own_pid == person_id:
+                return 'PATIENT_SELF'
+        except (PatientUser.DoesNotExist, AttributeError):
+            pass
+        return 'ADMIN_CORRECTION'
+
     def delete(self, request, measurement_id):
         m = self.get_object(measurement_id, request)
         if not m:
@@ -542,8 +560,9 @@ class MeasurementDetailView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
         person_id = m.person_id
+        source = self._provenance_source(request, person_id)
         ProvenanceRecord.objects.create(
-            source='ADMIN_CORRECTION',
+            source=source,
             source_user_id=f"{getattr(request.user, 'issuer', '')}|{getattr(request.user, 'sub', '')}",
             target_patient_id=str(person_id),
             modification_reason='measurement_delete',

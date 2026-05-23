@@ -9,21 +9,21 @@ import {
 } from "./api";
 
 export function useLabResultsSummary(params?: LabSummaryParams) {
-  const { apiClient } = useLabsContext();
-  return _useLabResultsSummary(params, apiClient);
+  const { apiClient, apiBasePath } = useLabsContext();
+  return _useLabResultsSummary(params, apiClient, apiBasePath);
 }
 
 export function useLabValues(params: LabValuesParams) {
-  const { apiClient } = useLabsContext();
-  return _useLabValues(params, apiClient);
+  const { apiClient, apiBasePath } = useLabsContext();
+  return _useLabValues(params, apiClient, apiBasePath);
 }
 
 export function useUpdateMeasurement() {
-  const { apiClient } = useLabsContext();
-  return _useUpdateMeasurement(apiClient);
+  const { apiClient, apiBasePath } = useLabsContext();
+  return _useUpdateMeasurement(apiClient, apiBasePath);
 }
 
 export function useDeleteMeasurement() {
-  const { apiClient } = useLabsContext();
-  return _useDeleteMeasurement(apiClient);
+  const { apiClient, apiBasePath } = useLabsContext();
+  return _useDeleteMeasurement(apiClient, apiBasePath);
 }

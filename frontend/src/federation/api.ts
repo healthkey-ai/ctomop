@@ -16,12 +16,13 @@ export interface LabSummaryParams {
 export function useLabResultsSummary(
   params?: LabSummaryParams,
   apiClient?: AxiosInstance,
+  apiBasePath = "/api",
 ) {
   return useQuery({
     queryKey: KEYS.summary({ page: params?.page, pageSize: params?.pageSize }),
     queryFn: async () => {
       const resp = await apiClient!.get<PaginatedResponse<LabResultCard>>(
-        "/lab-results/summary/",
+        `${apiBasePath}/lab-results/summary/`,
         {
           params: {
             page: params?.page ?? 1,
@@ -44,12 +45,13 @@ export interface LabValuesParams {
 export function useLabValues(
   params: LabValuesParams,
   apiClient?: AxiosInstance,
+  apiBasePath = "/api",
 ) {
   return useQuery({
     queryKey: KEYS.values(params.conceptCode, { page: params.page, pageSize: params.pageSize }),
     queryFn: async () => {
       const resp = await apiClient!.get<LabValuesResponse>(
-        "/lab-results/values/",
+        `${apiBasePath}/lab-results/values/`,
         {
           params: {
             concept_code: params.conceptCode,
@@ -73,11 +75,11 @@ export interface UpdateMeasurementInput {
   range_high?: number | null;
 }
 
-export function useUpdateMeasurement(apiClient?: AxiosInstance) {
+export function useUpdateMeasurement(apiClient?: AxiosInstance, apiBasePath = "/api") {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async ({ measurementId, ...data }: UpdateMeasurementInput) => {
-      await apiClient!.patch(`/lab-results/measurements/${measurementId}/`, data);
+      await apiClient!.patch(`${apiBasePath}/lab-results/measurements/${measurementId}/`, data);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["labs"] });
@@ -85,11 +87,11 @@ export function useUpdateMeasurement(apiClient?: AxiosInstance) {
   });
 }
 
-export function useDeleteMeasurement(apiClient?: AxiosInstance) {
+export function useDeleteMeasurement(apiClient?: AxiosInstance, apiBasePath = "/api") {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (measurementId: number) => {
-      await apiClient!.delete(`/lab-results/measurements/${measurementId}/`);
+      await apiClient!.delete(`${apiBasePath}/lab-results/measurements/${measurementId}/`);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["labs"] });

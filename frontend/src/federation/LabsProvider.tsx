@@ -19,11 +19,11 @@ interface LabsProviderProps {
 }
 
 const defaultTheme: LabsThemeTokens = {
-  colorPrimary: "#6366f1",
-  colorSuccess: "#22c55e",
-  colorWarning: "#f59e0b",
-  colorDanger: "#ef4444",
-  colorMuted: "#6b7280",
+  colorPrimary: "212 87% 33%",
+  colorSuccess: "152 91% 29%",
+  colorWarning: "25 95% 37%",
+  colorDanger: "5 79% 40%",
+  colorMuted: "218 8% 46%",
   fontFamily: "'Manrope', sans-serif",
   borderRadius: "0.5rem",
 };
@@ -31,13 +31,13 @@ const defaultTheme: LabsThemeTokens = {
 function themeToVars(theme: Partial<LabsThemeTokens>): Record<string, string> {
   const merged = { ...defaultTheme, ...theme };
   return {
-    "--hk-color-primary": merged.colorPrimary,
-    "--hk-color-success": merged.colorSuccess,
-    "--hk-color-warning": merged.colorWarning,
-    "--hk-color-danger": merged.colorDanger,
-    "--hk-color-muted": merged.colorMuted,
-    "--hk-font-family": merged.fontFamily,
-    "--hk-border-radius": merged.borderRadius,
+    "--hk-labs-brand-700": merged.colorPrimary,
+    "--hk-labs-text-brand": merged.colorPrimary,
+    "--hk-labs-success-700": merged.colorSuccess,
+    "--hk-labs-warning-700": merged.colorWarning,
+    "--hk-labs-error-700": merged.colorDanger,
+    "--hk-labs-text-tertiary": merged.colorMuted,
+    "--hk-labs-radius": merged.borderRadius,
   };
 }
 

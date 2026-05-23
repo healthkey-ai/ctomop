@@ -1722,7 +1722,6 @@ def login_view(request):
         logger.error('Login error: %s\n%s', str(e), traceback.format_exc())
         return Response({
             'error': 'Login failed',
-            'detail': str(e)
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 @csrf_exempt
@@ -1756,7 +1755,9 @@ def health_check(request):
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def auth_test(request):
-    """Test auth endpoint to diagnose login 500"""
+    """Test auth endpoint — DEBUG only."""
+    if not settings.DEBUG:
+        return Response({'detail': 'Not available'}, status=status.HTTP_404_NOT_FOUND)
     import traceback as tb
     try:
         step = 'start'

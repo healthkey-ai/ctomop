@@ -12,6 +12,7 @@ class IdentityManager(BaseUserManager):
         return self.get_or_create(
             issuer=claims.issuer,
             sub=claims.sub,
+            defaults={"uid": f"{claims.issuer}:{claims.sub}"},
         )
 
     def _create_user(self, email, password, **extra_fields):
@@ -47,7 +48,8 @@ class IdentityManager(BaseUserManager):
 class Identity(AbstractBaseUser, PermissionsMixin):
     """OIDC-based identity model: (issuer, sub) tuple."""
     issuer = models.CharField(max_length=255)
-    sub = models.CharField(max_length=255, unique=True)
+    sub = models.CharField(max_length=255)
+    uid = models.CharField(max_length=512, unique=True, editable=False)
 
     email = models.EmailField(blank=True, default="")
     name = models.CharField(max_length=255, blank=True, default="")
@@ -58,7 +60,7 @@ class Identity(AbstractBaseUser, PermissionsMixin):
 
     objects = IdentityManager()
 
-    USERNAME_FIELD = "sub"
+    USERNAME_FIELD = "uid"
     REQUIRED_FIELDS = ["email"]
 
     class Meta:
@@ -70,6 +72,10 @@ class Identity(AbstractBaseUser, PermissionsMixin):
                 name="uq_identity_issuer_sub",
             ),
         ]
+
+    def save(self, *args, **kwargs):
+        self.uid = f"{self.issuer}:{self.sub}"
+        super().save(*args, **kwargs)
 
     @property
     def is_local(self) -> bool:

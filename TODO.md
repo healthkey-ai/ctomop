@@ -10,12 +10,6 @@ Issues identified during code review that require architectural decisions, profi
 - Every `_next_pk` call acquires a row lock via `select_for_update()` held until the entire `@transaction.atomic` POST completes. 500 measurements = 500+ lock acquisitions serializing all concurrent syncs. Empty table race: if no rows exist, `select_for_update` locks nothing and two concurrent transactions can both create pk=1.
 - **Action:** Migrate OMOP tables (Measurement, VisitOccurrence, CareSite, Concept) from manual IntegerField PKs to PostgreSQL sequences via Django's BigAutoField.
 
-### Identity.sub unique=True conflicts with multi-issuer OIDC
-- **Severity:** medium / design (architectural blocker)
-- `patient_portal/models.py:50`
-- `sub` is the Django `USERNAME_FIELD` (requires `unique=True`), but OIDC `sub` is only unique within an issuer. Two issuers with the same `sub` value will collide. The composite `UniqueConstraint` on `(issuer, sub)` is correct but `unique=True` on `sub` alone is more restrictive. Not a problem with a single Firebase provider, but blocks adding a second OIDC provider.
-- **Action:** Introduce a synthetic unique field (e.g. `uid = f"{issuer}:{sub}"`) as `USERNAME_FIELD` and remove `unique=True` from `sub`. Requires a careful migration.
-
 ### Frontend test coverage missing
 - **Severity:** medium / design
 - `frontend/src/App.test.tsx` (deleted), no replacements added

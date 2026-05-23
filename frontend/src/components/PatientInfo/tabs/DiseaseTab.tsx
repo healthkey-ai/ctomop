@@ -216,6 +216,7 @@ function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChan
           <Field label="R-ISS Stage" name="r_iss_stage" type="select" value={formData?.r_iss_stage} options={ISS_STAGE_OPTIONS} onChange={onChange} />
           <Field label="Durie-Salmon Stage" name="durie_salmon_stage" type="text" value={formData?.durie_salmon_stage} onChange={onChange} />
           <Field label="Progression Status" name="progression" type="select" value={formData?.progression} options={MM_PROGRESSION_OPTIONS} onChange={onChange} vocabSource={progressionSource} />
+          <Field label="Measurable Disease (IMWG)" name="measurable_disease_imwg" type="boolean" value={formData?.measurable_disease_imwg} onChange={onChange} />
           <div className="sm:col-span-2">
             <Field label="Stem Cell Transplant History" name="stem_cell_transplant_history" type="multiselect" value={formData?.stem_cell_transplant_history} options={STEM_CELL_TRANSPLANT_OPTIONS} onChange={onChange} />
           </div>

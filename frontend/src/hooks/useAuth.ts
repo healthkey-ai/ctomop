@@ -3,10 +3,9 @@ import api from "@/api/axios";
 
 interface User {
   id: number;
-  username: string;
+  sub: string;
   email: string;
-  first_name: string;
-  last_name: string;
+  name: string;
 }
 
 export const useAuth = () => {

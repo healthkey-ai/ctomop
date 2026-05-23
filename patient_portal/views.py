@@ -35,7 +35,7 @@ def dashboard(request):
         unread_messages = PatientMessage.objects.filter(
             patient_user=patient_user,
             sender_is_patient=False,
-            read_at__isnull=True
+            is_read=False
         ).count()
         
         context = {

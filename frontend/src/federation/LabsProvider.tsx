@@ -43,7 +43,7 @@ function themeToVars(theme: Partial<LabsThemeTokens>): Record<string, string> {
 
 export function LabsProvider({
   apiClient,
-  apiBasePath = "/api",
+  apiBasePath = "",
   queryClient: externalQC,
   theme,
   className,

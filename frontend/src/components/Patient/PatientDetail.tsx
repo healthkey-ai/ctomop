@@ -144,7 +144,7 @@ export default function PatientDetail() {
 
         const user = res.data.user;
         const name = user
-          ? (`${user.first_name} ${user.last_name}`.trim() || user.username || `Patient ${personId}`)
+          ? (user.name || user.email || `Patient ${personId}`)
           : `Patient ${personId}`;
         setPatientName(name);
         setEditedName(name);

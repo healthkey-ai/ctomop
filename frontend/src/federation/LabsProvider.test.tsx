@@ -18,7 +18,7 @@ describe("LabsProvider", () => {
         <ContextProbe />
       </LabsProvider>,
     );
-    expect(screen.getByTestId("basepath").textContent).toBe("/api");
+    expect(screen.getByTestId("basepath").textContent).toBe("");
   });
 
   it("provides custom apiBasePath", () => {

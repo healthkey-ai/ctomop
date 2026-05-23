@@ -20,6 +20,9 @@ def can_access_patient(actor_identity, target_person_id: int) -> bool:
     """Check if actor has access to target patient's data."""
     from patient_portal.models import PatientUser
 
+    if getattr(actor_identity, 'is_superuser', False):
+        return True
+
     # 1. Self-access
     try:
         if actor_identity.patient_user.person_id == target_person_id:

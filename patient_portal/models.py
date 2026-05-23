@@ -75,6 +75,8 @@ class Identity(AbstractBaseUser, PermissionsMixin):
 
     def save(self, *args, **kwargs):
         self.uid = f"{self.issuer}:{self.sub}"
+        if kwargs.get("update_fields") is not None and "uid" not in kwargs["update_fields"]:
+            kwargs["update_fields"] = list(kwargs["update_fields"]) + ["uid"]
         super().save(*args, **kwargs)
 
     @property

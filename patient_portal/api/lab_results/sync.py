@@ -47,13 +47,34 @@ def _normalize_slug(name):
 
 
 def _next_pk(model, pk_field):
+    from django.db import connection
+    table = model._meta.db_table
+    with connection.cursor() as cur:
+        cur.execute(f'LOCK TABLE "{table}" IN EXCLUSIVE MODE')
     last = (
-        model.objects.select_for_update()
+        model.objects
         .order_by(f'-{pk_field}')
         .values_list(pk_field, flat=True)
         .first()
     )
     return (last + 1) if last else 1
+
+
+def _ensure_hk_deps(domain_id, concept_class_id):
+    """Ensure the HK-Labs vocabulary, the given Domain, and ConceptClass exist."""
+    from omop_core.models import Domain, ConceptClass, Vocabulary
+    Vocabulary.objects.get_or_create(
+        vocabulary_id=HK_LABS_VOCAB_ID,
+        defaults={'vocabulary_name': 'HealthKey Labs', 'vocabulary_concept_id': 0},
+    )
+    Domain.objects.get_or_create(
+        domain_id=domain_id,
+        defaults={'domain_name': domain_id, 'domain_concept_id': 0},
+    )
+    ConceptClass.objects.get_or_create(
+        concept_class_id=concept_class_id,
+        defaults={'concept_class_name': concept_class_id, 'concept_class_concept_id': 0},
+    )
 
 
 def _next_hk_concept_id():
@@ -65,6 +86,44 @@ def _next_hk_concept_id():
         .first()
     )
     return (last + 1) if last else HK_LABS_CONCEPT_ID_START
+
+
+_HK_FALLBACK_CONCEPTS = {
+    OUTPATIENT_VISIT_CONCEPT_ID: ('Outpatient Visit', 'Visit', 'Visit'),
+    PATIENT_SELF_REPORT_CONCEPT_ID: ('Patient self-report', 'Type Concept', 'Type Concept'),
+    DOCUMENT_EXTRACTION_CONCEPT_ID: ('Document extraction', 'Type Concept', 'Type Concept'),
+}
+
+
+def _ensure_concept(concept_id):
+    """Return a Concept by ID, auto-creating an HK-Labs fallback if Athena vocabularies are not loaded."""
+    concept = Concept.objects.filter(concept_id=concept_id).first()
+    if concept:
+        return concept
+
+    fallback = _HK_FALLBACK_CONCEPTS.get(concept_id)
+    if not fallback:
+        return None
+    name, domain_id, concept_class_id = fallback
+
+    _ensure_hk_deps(domain_id, concept_class_id)
+
+    logger.warning(
+        'OMOP concept %d (%s) missing — creating HK-Labs fallback. '
+        'Run load_athena_vocabularies for standard concepts.',
+        concept_id, name,
+    )
+    return Concept.objects.create(
+        concept_id=concept_id,
+        concept_name=name,
+        domain_id=domain_id,
+        vocabulary_id=HK_LABS_VOCAB_ID,
+        concept_class_id=concept_class_id,
+        standard_concept=None,
+        concept_code=f'hkl:fallback-{concept_id}',
+        valid_start_date=date(1970, 1, 1),
+        valid_end_date=date(2099, 12, 31),
+    )
 
 
 class MeasurementItemSerializer(serializers.Serializer):
@@ -192,19 +251,8 @@ class SyncView(APIView):
             else DOCUMENT_EXTRACTION_CONCEPT_ID
         )
 
-        # Pre-fetch required concepts to avoid N+1 queries
-        visit_concept = Concept.objects.filter(concept_id=OUTPATIENT_VISIT_CONCEPT_ID).first()
-        type_concept = Concept.objects.filter(concept_id=type_concept_id).first()
-        if not visit_concept:
-            return Response(
-                {'detail': f'Required OMOP concept {OUTPATIENT_VISIT_CONCEPT_ID} (Outpatient Visit) not found. Run vocabulary import.'},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
-        if not type_concept:
-            return Response(
-                {'detail': f'Required OMOP concept {type_concept_id} not found. Run vocabulary import.'},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
+        visit_concept = _ensure_concept(OUTPATIENT_VISIT_CONCEPT_ID)
+        type_concept = _ensure_concept(type_concept_id)
 
         items = data['measurements']
         loinc_codes = {item.get('loinc_code') for item in items if item.get('loinc_code')}
@@ -407,6 +455,7 @@ class SyncView(APIView):
         if existing:
             return existing.concept_id
 
+        _ensure_hk_deps('Measurement', 'Lab Test')
         concept_id = _next_hk_concept_id()
         Concept.objects.create(
             concept_id=concept_id,

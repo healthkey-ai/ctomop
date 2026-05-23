@@ -16,7 +16,7 @@ export interface LabSummaryParams {
 export function useLabResultsSummary(
   params?: LabSummaryParams,
   apiClient?: AxiosInstance,
-  apiBasePath = "/api",
+  apiBasePath = "",
 ) {
   return useQuery({
     queryKey: KEYS.summary({ page: params?.page, pageSize: params?.pageSize }),
@@ -45,7 +45,7 @@ export interface LabValuesParams {
 export function useLabValues(
   params: LabValuesParams,
   apiClient?: AxiosInstance,
-  apiBasePath = "/api",
+  apiBasePath = "",
 ) {
   return useQuery({
     queryKey: KEYS.values(params.conceptCode, { page: params.page, pageSize: params.pageSize }),
@@ -75,7 +75,7 @@ export interface UpdateMeasurementInput {
   range_high?: number | null;
 }
 
-export function useUpdateMeasurement(apiClient?: AxiosInstance, apiBasePath = "/api") {
+export function useUpdateMeasurement(apiClient?: AxiosInstance, apiBasePath = "") {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async ({ measurementId, ...data }: UpdateMeasurementInput) => {
@@ -87,7 +87,7 @@ export function useUpdateMeasurement(apiClient?: AxiosInstance, apiBasePath = "/
   });
 }
 
-export function useDeleteMeasurement(apiClient?: AxiosInstance, apiBasePath = "/api") {
+export function useDeleteMeasurement(apiClient?: AxiosInstance, apiBasePath = "") {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (measurementId: number) => {

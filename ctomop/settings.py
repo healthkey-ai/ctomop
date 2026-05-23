@@ -130,6 +130,10 @@ else:
 
 AUTH_USER_MODEL = "patient_portal.Identity"
 
+AUTHENTICATION_BACKENDS = [
+    "patient_portal.backends.EmailBackend",
+]
+
 # Password validation
 AUTH_PASSWORD_VALIDATORS = [
     {

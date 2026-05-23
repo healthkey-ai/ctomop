@@ -132,6 +132,38 @@ export default function GeneralTab({ formData, onChange, editedName, onNameChang
         </div>
       </Section>
 
+      <Section title="Medical History" description="Pre-existing conditions and clinical status.">
+        <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
+          <div className="sm:col-span-2">
+            <Field label="Pre-existing Conditions" name="preexisting_conditions" type="text"
+              value={formData?.preexisting_conditions} onChange={onChange} />
+          </div>
+          <Field label="Peripheral Neuropathy Grade" name="peripheral_neuropathy_grade" type="number"
+            value={formData?.peripheral_neuropathy_grade} onChange={onChange} />
+          <Field label="No Other Active Malignancies" name="no_other_active_malignancies" type="boolean"
+            value={formData?.no_other_active_malignancies} onChange={onChange} />
+          <Field label="No Active Infection" name="no_active_infection_status" type="boolean"
+            value={formData?.no_active_infection_status} onChange={onChange} />
+        </div>
+      </Section>
+
+      <Section title="Infection Status" description="Viral infection history.">
+        <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
+          <Field label="HIV Positive" name="hiv_status" type="boolean"
+            value={formData?.hiv_status} onChange={onChange} />
+          <Field label="No HIV" name="no_hiv_status" type="boolean"
+            value={formData?.no_hiv_status} onChange={onChange} />
+          <Field label="Hepatitis B Positive" name="hepatitis_b_status" type="boolean"
+            value={formData?.hepatitis_b_status} onChange={onChange} />
+          <Field label="No Hepatitis B" name="no_hepatitis_b_status" type="boolean"
+            value={formData?.no_hepatitis_b_status} onChange={onChange} />
+          <Field label="Hepatitis C Positive" name="hepatitis_c_status" type="boolean"
+            value={formData?.hepatitis_c_status} onChange={onChange} />
+          <Field label="No Hepatitis C" name="no_hepatitis_c_status" type="boolean"
+            value={formData?.no_hepatitis_c_status} onChange={onChange} />
+        </div>
+      </Section>
+
       <Section title="Physical Measurements" description="Body measurements and vital signs.">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <Field label="Weight (kg)" name="weight" type="number"

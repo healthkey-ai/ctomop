@@ -11,7 +11,10 @@ from omop_core.models import (
     Relationship, ConceptRelationship, ConceptAncestor,
 )
 
-VOCAB_SCOPE = frozenset({'HemOnc', 'RxNorm', 'RxNorm Extension', 'ATC', 'LOINC', 'UCUM'})
+VOCAB_SCOPE = frozenset({
+    'HemOnc', 'RxNorm', 'RxNorm Extension', 'ATC', 'LOINC', 'UCUM',
+    'Visit', 'Type Concept',
+})
 RXNORM_CLASS_SCOPE = frozenset({'Ingredient', 'Clinical Drug', 'Branded Drug', 'Clinical Drug Comp'})
 LOINC_DOMAIN_SCOPE = frozenset({'Measurement', 'Observation'})
 BATCH = 1000

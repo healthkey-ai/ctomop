@@ -629,28 +629,30 @@ class VisitDeleteView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        org = get_request_org(request)
-        if org is not None:
-            from omop_core.models import PatientInfo
-            if not PatientInfo.objects.filter(
-                person_id=visit.person_id, organization=org
-            ).exists():
-                return Response(
-                    {'detail': 'Visit not found.'},
-                    status=status.HTTP_404_NOT_FOUND,
-                )
-        elif request.user and request.user.is_authenticated:
-            from patient_portal.models import PatientUser
-            own_pid = None
-            try:
-                own_pid = PatientUser.objects.get(identity=request.user).person_id
-            except PatientUser.DoesNotExist:
-                pass
-            if visit.person_id != own_pid and not can_access_patient(request.user, visit.person_id):
-                return Response(
-                    {'detail': 'Visit not found.'},
-                    status=status.HTTP_404_NOT_FOUND,
-                )
+        is_service = getattr(request.user, 'issuer', '') == 'urn:service'
+        if not is_service:
+            org = get_request_org(request)
+            if org is not None:
+                from omop_core.models import PatientInfo
+                if not PatientInfo.objects.filter(
+                    person_id=visit.person_id, organization=org
+                ).exists():
+                    return Response(
+                        {'detail': 'Visit not found.'},
+                        status=status.HTTP_404_NOT_FOUND,
+                    )
+            elif request.user and request.user.is_authenticated:
+                from patient_portal.models import PatientUser
+                own_pid = None
+                try:
+                    own_pid = PatientUser.objects.get(identity=request.user).person_id
+                except PatientUser.DoesNotExist:
+                    pass
+                if visit.person_id != own_pid and not can_access_patient(request.user, visit.person_id):
+                    return Response(
+                        {'detail': 'Visit not found.'},
+                        status=status.HTTP_404_NOT_FOUND,
+                    )
 
         with transaction.atomic():
             ProvenanceRecord.objects.create(

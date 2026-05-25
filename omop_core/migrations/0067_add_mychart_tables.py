@@ -93,7 +93,7 @@ def unseed(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("omop_core", "0064_add_organization_fk_to_provenance_record"),
+        ("omop_core", "0066_fix_relationship_is_hierarchical_integer"),
         ("auth", "0012_alter_user_first_name_max_length"),
     ]
 

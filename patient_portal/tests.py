@@ -11,6 +11,8 @@ Test flow:
 
 import io
 import json
+import os
+import tempfile
 from datetime import date
 
 from django.contrib.auth.models import User
@@ -22,6 +24,7 @@ from omop_core.models import (
     Concept, ConceptClass, Domain, Vocabulary,
     Person, PatientInfo, ProvenanceRecord,
     ConditionOccurrence, DrugExposure, Measurement, ProcedureOccurrence,
+    Relationship, ConceptRelationship, ConceptAncestor,
 )
 from omop_oncology.models import Episode, EpisodeEvent
 
@@ -3233,3 +3236,676 @@ class MyChartFlowTest(TestCase):
         token = FhirToken.objects.get(user=self.user, endpoint=self.epic_org.endpoint)
         self.assertEqual(token.access_token, 'access-1')
         self.assertEqual(token.fhir_patient_id, 'ePatientNew')
+
+
+class VocabularyRelationshipModelTest(TestCase):
+    """Verify Relationship, ConceptRelationship, ConceptAncestor models exist and are queryable."""
+
+    def setUp(self):
+        _make_vocab_fixtures()
+        vocab = Vocabulary.objects.get(vocabulary_id='TEST')
+        domain = Domain.objects.get(domain_id='Drug')
+        cc = ConceptClass.objects.get(concept_class_id='Clinical Finding')
+        self.c1 = Concept.objects.create(
+            concept_id=9901001, concept_name='Drug A',
+            domain=domain, vocabulary=vocab, concept_class=cc,
+            concept_code='A1',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        self.c2 = Concept.objects.create(
+            concept_id=9901002, concept_name='Drug Class B',
+            domain=domain, vocabulary=vocab, concept_class=cc,
+            concept_code='B1',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+
+    def test_relationship_model(self):
+        Relationship.objects.create(
+            relationship_id='test-maps-to',
+            relationship_name='Test Maps To',
+            is_hierarchical=0,
+            defines_ancestry=0,
+            reverse_relationship_id='test-mapped-from',
+            relationship_concept_id=0,
+        )
+        self.assertEqual(
+            Relationship.objects.get(pk='test-maps-to').relationship_name,
+            'Test Maps To',
+        )
+
+    def test_concept_relationship_model(self):
+        r = Relationship.objects.create(
+            relationship_id='Maps to',
+            relationship_name='Maps to',
+            is_hierarchical=0,
+            defines_ancestry=0,
+            reverse_relationship_id='Mapped from',
+            relationship_concept_id=0,
+        )
+        ConceptRelationship.objects.create(
+            concept_1=self.c1,
+            concept_2=self.c2,
+            relationship=r,
+            valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31),
+        )
+        self.assertEqual(
+            ConceptRelationship.objects.filter(concept_1=self.c1).count(), 1
+        )
+
+    def test_concept_ancestor_model(self):
+        ConceptAncestor.objects.create(
+            ancestor_concept=self.c2,
+            descendant_concept=self.c1,
+            min_levels_of_separation=1,
+            max_levels_of_separation=1,
+        )
+        self.assertEqual(
+            ConceptAncestor.objects.filter(descendant_concept=self.c1).count(), 1
+        )
+
+    def test_unique_together_concept_relationship(self):
+        from django.db import IntegrityError
+        r = Relationship.objects.create(
+            relationship_id='Is a',
+            relationship_name='Is a',
+            is_hierarchical=1,
+            defines_ancestry=1,
+            reverse_relationship_id='Subsumes',
+            relationship_concept_id=0,
+        )
+        ConceptRelationship.objects.create(
+            concept_1=self.c1, concept_2=self.c2, relationship=r,
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        with self.assertRaises(IntegrityError):
+            ConceptRelationship.objects.create(
+                concept_1=self.c1, concept_2=self.c2, relationship=r,
+                valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+            )
+
+
+# ---------------------------------------------------------------------------
+# load_athena_vocabularies management command tests
+# ---------------------------------------------------------------------------
+
+class AthenaVocabularyLoadTest(TestCase):
+    """Test load_athena_vocabularies management command with minimal fixture TSV files."""
+
+    def _write_tsv(self, directory, filename, headers, rows):
+        path = os.path.join(directory, filename)
+        with open(path, 'w', newline='') as f:
+            f.write('\t'.join(headers) + '\n')
+            for row in rows:
+                f.write('\t'.join(str(v) for v in row) + '\n')
+
+    def _write_minimal_athena(self, directory):
+        """Write the minimal set of Athena TSV files needed for tests."""
+        self._write_tsv(directory, 'RELATIONSHIP.csv',
+            ['relationship_id', 'relationship_name', 'is_hierarchical',
+             'defines_ancestry', 'reverse_relationship_id', 'relationship_concept_id'],
+            [['Maps to', 'Maps to value', '0', '0', 'Mapped from', '44818965'],
+             ['Is a', 'Is a', '1', '1', 'Subsumes', '44818723']],
+        )
+        self._write_tsv(directory, 'VOCABULARY.csv',
+            ['vocabulary_id', 'vocabulary_name', 'vocabulary_reference',
+             'vocabulary_version', 'vocabulary_concept_id'],
+            [['HemOnc', 'HemOnc Oncology', '', 'v2024', '0'],
+             ['RxNorm', 'RxNorm', '', '2024AA', '0'],
+             ['SNOMED', 'SNOMED CT', '', '2024', '0']],  # should be skipped
+        )
+        self._write_tsv(directory, 'DOMAIN.csv',
+            ['domain_id', 'domain_name', 'domain_concept_id'],
+            [['Drug', 'Drug', '13']],
+        )
+        self._write_tsv(directory, 'CONCEPT_CLASS.csv',
+            ['concept_class_id', 'concept_class_name', 'concept_class_concept_id'],
+            [['HemOnc Class', 'HemOnc Class', '0'],
+             ['Ingredient', 'Ingredient', '0'],
+             ['Branded Drug', 'Branded Drug', '0'],
+             ['Clinical Finding', 'Clinical Finding', '0']],
+        )
+        self._write_tsv(directory, 'CONCEPT.csv',
+            ['concept_id', 'concept_name', 'domain_id', 'vocabulary_id',
+             'concept_class_id', 'standard_concept', 'concept_code',
+             'valid_start_date', 'valid_end_date', 'invalid_reason'],
+            # HemOnc concepts — should be loaded
+            [['5000001', 'Proteasome inhibitor', 'Drug', 'HemOnc', 'HemOnc Class', 'S', 'PI', '19700101', '20991231', ''],
+             ['5000002', 'bortezomib',           'Drug', 'HemOnc', 'HemOnc Class', 'S', 'HO-Bort', '19700101', '20991231', ''],
+             # RxNorm Ingredient — should be loaded
+             ['5000003', 'bortezomib',           'Drug', 'RxNorm', 'Ingredient', 'S', '1421', '19700101', '20991231', ''],
+             # RxNorm Branded — should be loaded
+             ['5000004', 'Velcade',              'Drug', 'RxNorm', 'Branded Drug', 'S', '213269', '19700101', '20991231', ''],
+             # SNOMED concept — should be SKIPPED (not in vocabulary scope)
+             ['5000099', 'Some SNOMED concept',  'Condition', 'SNOMED', 'Clinical Finding', 'S', '123456', '19700101', '20991231', '']],
+        )
+        self._write_tsv(directory, 'CONCEPT_RELATIONSHIP.csv',
+            ['concept_id_1', 'concept_id_2', 'relationship_id',
+             'valid_start_date', 'valid_end_date', 'invalid_reason'],
+            # RxNorm bortezomib → HemOnc bortezomib (both in scope)
+            [['5000003', '5000002', 'Maps to', '19700101', '20991231', ''],
+             # Edge to out-of-scope SNOMED concept — should be SKIPPED
+             ['5000003', '5000099', 'Maps to', '19700101', '20991231', '']],
+        )
+        self._write_tsv(directory, 'CONCEPT_ANCESTOR.csv',
+            ['ancestor_concept_id', 'descendant_concept_id',
+             'min_levels_of_separation', 'max_levels_of_separation'],
+            # HemOnc: PI class is ancestor of bortezomib HemOnc concept
+            [['5000001', '5000002', '1', '1'],
+             # Edge referencing out-of-scope concept — should be SKIPPED
+             ['5000001', '5000099', '2', '2']],
+        )
+
+    def test_load_creates_relationship_rows(self):
+        from omop_core.models import Relationship
+        from django.core.management import call_command
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_minimal_athena(tmpdir)
+            call_command('load_athena_vocabularies', path=tmpdir)
+        self.assertTrue(Relationship.objects.filter(relationship_id='Maps to').exists())
+        self.assertTrue(Relationship.objects.filter(relationship_id='Is a').exists())
+
+    def test_load_filters_concepts_to_scope(self):
+        from omop_core.models import Concept
+        from django.core.management import call_command
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_minimal_athena(tmpdir)
+            call_command('load_athena_vocabularies', path=tmpdir)
+        self.assertTrue(Concept.objects.filter(concept_id=5000001).exists())  # HemOnc
+        self.assertTrue(Concept.objects.filter(concept_id=5000003).exists())  # RxNorm Ingredient
+        self.assertTrue(Concept.objects.filter(concept_id=5000004).exists())  # RxNorm Branded
+        self.assertFalse(Concept.objects.filter(concept_id=5000099).exists())  # SNOMED — excluded
+
+    def test_load_filters_concept_relationships(self):
+        from omop_core.models import ConceptRelationship
+        from django.core.management import call_command
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_minimal_athena(tmpdir)
+            call_command('load_athena_vocabularies', path=tmpdir)
+        # Edge between two in-scope concepts should be loaded
+        self.assertTrue(ConceptRelationship.objects.filter(
+            concept_1_id=5000003, concept_2_id=5000002
+        ).exists())
+        # Edge to out-of-scope SNOMED concept should be skipped
+        self.assertFalse(ConceptRelationship.objects.filter(
+            concept_2_id=5000099
+        ).exists())
+
+    def test_load_concept_ancestors_hemonc_only(self):
+        from omop_core.models import ConceptAncestor
+        from django.core.management import call_command
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_minimal_athena(tmpdir)
+            call_command('load_athena_vocabularies', path=tmpdir)
+        self.assertTrue(ConceptAncestor.objects.filter(
+            ancestor_concept_id=5000001, descendant_concept_id=5000002
+        ).exists())
+        # Out-of-scope ancestor edge should be skipped
+        self.assertFalse(ConceptAncestor.objects.filter(
+            descendant_concept_id=5000099
+        ).exists())
+
+    def test_idempotent_reload(self):
+        from omop_core.models import Concept
+        from django.core.management import call_command
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_minimal_athena(tmpdir)
+            call_command('load_athena_vocabularies', path=tmpdir)
+            count_after_first = Concept.objects.filter(vocabulary_id='HemOnc').count()
+            call_command('load_athena_vocabularies', path=tmpdir)
+            count_after_second = Concept.objects.filter(vocabulary_id='HemOnc').count()
+        self.assertEqual(count_after_first, count_after_second)
+
+    def test_dry_run_writes_nothing(self):
+        from omop_core.models import Concept, Relationship
+        from django.core.management import call_command
+        before_concepts = Concept.objects.count()
+        before_rels = Relationship.objects.count()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_minimal_athena(tmpdir)
+            call_command('load_athena_vocabularies', path=tmpdir, dry_run=True)
+        self.assertEqual(Concept.objects.count(), before_concepts)
+        self.assertEqual(Relationship.objects.count(), before_rels)
+
+
+class RxNavServiceTest(TestCase):
+    """Test rxnav_service.resolve_drug() with mocked HTTP calls."""
+
+    def setUp(self):
+        _make_vocab_fixtures()
+        self.vocab_rxnorm, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='RxNorm',
+            defaults={'vocabulary_name': 'RxNorm', 'vocabulary_concept_id': 0},
+        )
+        self.domain_drug = Domain.objects.get(domain_id='Drug')
+        self.cc_ingredient, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Ingredient',
+            defaults={'concept_class_name': 'Ingredient', 'concept_class_concept_id': 0},
+        )
+
+    def _rxnav_response(self, rxcui, name):
+        import json
+        return json.dumps({
+            'drugGroup': {
+                'conceptGroup': [
+                    {'tty': 'IN', 'conceptProperties': [{'rxcui': rxcui, 'name': name}]}
+                ]
+            }
+        }).encode()
+
+    def _rxnav_empty(self):
+        import json
+        return json.dumps({'drugGroup': {'conceptGroup': []}}).encode()
+
+    def _mock_urlopen(self, payload):
+        from unittest.mock import MagicMock, patch
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = payload
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        return patch('urllib.request.urlopen', return_value=mock_resp)
+
+    def test_known_drug_returns_existing_concept_without_api_call(self):
+        """Drug already in local Concept table → returned without hitting RxNav."""
+        from omop_core.services.rxnav_service import resolve_drug
+        Concept.objects.create(
+            concept_id=9990001, concept_name='bortezomib',
+            domain=self.domain_drug, vocabulary=self.vocab_rxnorm,
+            concept_class=self.cc_ingredient,
+            concept_code='1421', standard_concept='S',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        with self._mock_urlopen(b'should not be called') as mock_open:
+            result = resolve_drug('bortezomib')
+            mock_open.assert_not_called()
+        self.assertEqual(result.concept_id, 9990001)
+
+    def test_unknown_drug_calls_rxnav_and_creates_concept(self):
+        """Drug not in local vocab → RxNav called → new Concept row created."""
+        from omop_core.services.rxnav_service import resolve_drug
+        with self._mock_urlopen(self._rxnav_response('1421', 'bortezomib')):
+            result = resolve_drug('Velcade')
+        self.assertIsNotNone(result)
+        self.assertEqual(result.concept_code, '1421')
+        self.assertEqual(result.vocabulary_id, 'RxNorm')
+        self.assertTrue(Concept.objects.filter(concept_code='1421', vocabulary_id='RxNorm').exists())
+
+    def test_rxnav_no_results_returns_none(self):
+        """RxNav returns no ingredient matches → resolve_drug returns None."""
+        from omop_core.services.rxnav_service import resolve_drug
+        with self._mock_urlopen(self._rxnav_empty()):
+            result = resolve_drug('unknowndrugxyz')
+        self.assertIsNone(result)
+
+    def test_rxnav_http_error_returns_none(self):
+        """RxNav HTTP error → resolve_drug returns None without raising."""
+        from omop_core.services.rxnav_service import resolve_drug
+        from unittest.mock import patch
+        with patch('urllib.request.urlopen', side_effect=Exception('network error')):
+            result = resolve_drug('anything')
+        self.assertIsNone(result)
+
+    def test_second_call_uses_cached_concept(self):
+        """After first call caches a Concept, second call returns it without API hit."""
+        from omop_core.services.rxnav_service import resolve_drug
+        with self._mock_urlopen(self._rxnav_response('9876', 'lenalidomide')) as mock_open:
+            resolve_drug('Revlimid')
+            call_count_after_first = mock_open.call_count
+        with self._mock_urlopen(b'should not be called') as mock_open2:
+            result = resolve_drug('lenalidomide')
+            mock_open2.assert_not_called()
+        self.assertIsNotNone(result)
+        self.assertEqual(result.concept_code, '9876')
+
+
+class LotInferenceTest(_SmartBase):
+    """Tests for omop_core.services.lot_inference_service (ARTEMIS-lite + HealthTree)."""
+
+    def _make_exposure(self, person, drug_name, start, end=None, pk=None):
+        from omop_core.models import DrugExposure, Concept, Domain, Vocabulary, ConceptClass
+        from datetime import date as _date
+        # Create (or reuse) a concept whose concept_name matches the drug name so
+        # that _drug_key() in lot_inference_service resolves to the correct string.
+        domain_drug = Domain.objects.filter(domain_id='Drug').first()
+        vocab = Vocabulary.objects.filter(vocabulary_id='TEST').first()
+        cc = ConceptClass.objects.filter(concept_class_id='Clinical Finding').first()
+        # Use a stable concept_id derived from a hash of the drug name to avoid collisions.
+        import hashlib
+        drug_cid = int(hashlib.md5(drug_name.lower().encode()).hexdigest()[:8], 16) % 900000 + 100000
+        drug_concept, _ = Concept.objects.get_or_create(
+            concept_id=drug_cid,
+            defaults={
+                'concept_name': drug_name,
+                'domain': domain_drug,
+                'vocabulary': vocab,
+                'concept_class': cc,
+                'concept_code': drug_name.lower(),
+                'valid_start_date': _date(1970, 1, 1),
+                'valid_end_date': _date(2099, 12, 31),
+            },
+        )
+        type_concept = Concept.objects.filter(concept_id=32817).first()
+        if pk is None:
+            last = DrugExposure.objects.order_by('-drug_exposure_id').first()
+            pk = (last.drug_exposure_id + 1) if last else 1
+        return DrugExposure.objects.create(
+            drug_exposure_id=pk,
+            person=person,
+            drug_concept=drug_concept,
+            drug_exposure_start_date=start,
+            drug_exposure_end_date=end,
+            drug_type_concept=type_concept,
+            drug_source_value=drug_name,
+        )
+
+    def _make_procedure(self, person, snomed_code, proc_date, pk=None):
+        from omop_core.models import ProcedureOccurrence, Concept, Domain, Vocabulary, ConceptClass
+        from datetime import date as _date
+        type_concept = Concept.objects.filter(concept_id=32817).first()
+        # Create (or reuse) a concept for the SNOMED procedure code so the NOT NULL
+        # constraint on procedure_concept_id is satisfied.
+        domain_proc, _ = Domain.objects.get_or_create(
+            domain_id='Procedure',
+            defaults={'domain_name': 'Procedure', 'domain_concept_id': 10},
+        )
+        vocab = Vocabulary.objects.filter(vocabulary_id='TEST').first()
+        cc = ConceptClass.objects.filter(concept_class_id='Clinical Finding').first()
+        import hashlib
+        proc_cid = int(hashlib.md5(f'proc-{snomed_code}'.encode()).hexdigest()[:8], 16) % 900000 + 100000
+        concept, _ = Concept.objects.get_or_create(
+            concept_id=proc_cid,
+            defaults={
+                'concept_name': f'Procedure {snomed_code}',
+                'domain': domain_proc,
+                'vocabulary': vocab,
+                'concept_class': cc,
+                'concept_code': snomed_code,
+                'valid_start_date': _date(1970, 1, 1),
+                'valid_end_date': _date(2099, 12, 31),
+            },
+        )
+        if pk is None:
+            from omop_core.models import ProcedureOccurrence as PO
+            last = PO.objects.order_by('-procedure_occurrence_id').first()
+            pk = (last.procedure_occurrence_id + 1) if last else 1
+        return ProcedureOccurrence.objects.create(
+            procedure_occurrence_id=pk,
+            person=person,
+            procedure_concept=concept,
+            procedure_date=proc_date,
+            procedure_type_concept=type_concept,
+            procedure_source_value=snomed_code,
+        )
+
+    # ── Core ARTEMIS-lite tests ────────────────────────────────────────────
+
+    def test_single_drug_creates_one_episode(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode
+        person = Person.objects.create(person_id=92001)
+        self._make_exposure(person, 'Ibrutinib', date(2023, 1, 1), date(2023, 6, 30), pk=9200101)
+        lots = infer_lot_for_person(person)
+        self.assertEqual(len(lots), 1)
+        self.assertEqual(Episode.objects.filter(person=person).count(), 1)
+        ep = Episode.objects.get(person=person)
+        self.assertEqual(ep.episode_number, 1)
+
+    def test_combination_window_groups_drugs(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode
+        person = Person.objects.create(person_id=92002)
+        self._make_exposure(person, 'bortezomib',   date(2023, 1, 1),  date(2023, 6, 30), pk=9200201)
+        self._make_exposure(person, 'lenalidomide', date(2023, 1, 10), date(2023, 6, 30), pk=9200202)
+        self._make_exposure(person, 'dexamethasone',date(2023, 1, 15), date(2023, 6, 30), pk=9200203)
+        infer_lot_for_person(person)
+        self.assertEqual(Episode.objects.filter(person=person).count(), 1)
+        ep = Episode.objects.get(person=person)
+        self.assertIn('VRD', ep.episode_source_value)
+
+    def test_gap_rule_creates_new_lot(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode
+        person = Person.objects.create(person_id=92003)
+        self._make_exposure(person, 'bortezomib', date(2023, 1, 1), date(2023, 6, 30), pk=9200301)
+        self._make_exposure(person, 'carfilzomib', date(2024, 1, 1), date(2024, 6, 30), pk=9200302)
+        infer_lot_for_person(person)
+        self.assertEqual(Episode.objects.filter(person=person).count(), 2)
+
+    def test_switch_rule_creates_new_lot(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode
+        person = Person.objects.create(person_id=92004)
+        self._make_exposure(person, 'bortezomib',   date(2023, 1, 1), date(2023, 3, 31), pk=9200401)
+        self._make_exposure(person, 'lenalidomide', date(2023, 1, 1), date(2023, 3, 31), pk=9200402)
+        self._make_exposure(person, 'pomalidomide', date(2023, 4, 30), date(2023, 9, 30), pk=9200403)
+        self._make_exposure(person, 'daratumumab',  date(2023, 4, 30), date(2023, 9, 30), pk=9200404)
+        infer_lot_for_person(person)
+        self.assertEqual(Episode.objects.filter(person=person).count(), 2)
+
+    def test_supportive_agent_not_counted_in_switch(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode
+        person = Person.objects.create(person_id=92005)
+        self._make_exposure(person, 'bortezomib',   date(2023, 1, 1),  date(2023, 3, 31), pk=9200501)
+        self._make_exposure(person, 'bortezomib',   date(2023, 4, 15), date(2023, 6, 30), pk=9200502)
+        self._make_exposure(person, 'dexamethasone',date(2023, 4, 15), date(2023, 6, 30), pk=9200503)
+        infer_lot_for_person(person)
+        self.assertEqual(Episode.objects.filter(person=person).count(), 1)
+
+    def test_regimen_lookup_names_vrd(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode
+        person = Person.objects.create(person_id=92006)
+        self._make_exposure(person, 'bortezomib',   date(2023, 1, 1), date(2023, 6, 30), pk=9200601)
+        self._make_exposure(person, 'lenalidomide', date(2023, 1, 5), date(2023, 6, 30), pk=9200602)
+        self._make_exposure(person, 'dexamethasone',date(2023, 1, 5), date(2023, 6, 30), pk=9200603)
+        infer_lot_for_person(person)
+        ep = Episode.objects.get(person=person)
+        self.assertIn('VRD', ep.episode_source_value)
+
+    def test_regimen_lookup_names_daravrd(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode
+        person = Person.objects.create(person_id=92007)
+        for drug, pk in [('daratumumab', 9200701), ('bortezomib', 9200702),
+                         ('lenalidomide', 9200703), ('dexamethasone', 9200704)]:
+            self._make_exposure(person, drug, date(2023, 1, 1), date(2023, 6, 30), pk=pk)
+        infer_lot_for_person(person)
+        ep = Episode.objects.get(person=person)
+        self.assertIn('DaraVRD', ep.episode_source_value)
+
+    def test_alphabetic_fallback_name(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode
+        person = Person.objects.create(person_id=92008)
+        self._make_exposure(person, 'AlphaDrug', date(2023, 1, 1), date(2023, 6, 30), pk=9200801)
+        self._make_exposure(person, 'BetaDrug',  date(2023, 1, 5), date(2023, 6, 30), pk=9200802)
+        infer_lot_for_person(person)
+        ep = Episode.objects.get(person=person)
+        # _drug_key lowercases names; the fallback regimen name joins lowercase drug keys.
+        self.assertIn('alphadrug', ep.episode_source_value)
+        self.assertIn('betadrug', ep.episode_source_value)
+
+    def test_episode_events_linked(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode, EpisodeEvent
+        person = Person.objects.create(person_id=92009)
+        de = self._make_exposure(person, 'Ibrutinib', date(2023, 1, 1), date(2023, 6, 30), pk=9200901)
+        infer_lot_for_person(person)
+        ep = Episode.objects.get(person=person)
+        self.assertTrue(EpisodeEvent.objects.filter(episode_id=ep.episode_id, event_id=de.drug_exposure_id).exists())
+
+    def test_no_duplicate_episodes(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode
+        person = Person.objects.create(person_id=92010)
+        self._make_exposure(person, 'Ibrutinib', date(2023, 1, 1), date(2023, 6, 30), pk=9201001)
+        infer_lot_for_person(person, force=True)
+        infer_lot_for_person(person, force=True)
+        self.assertEqual(Episode.objects.filter(person=person).count(), 1)
+
+    def test_no_duplicate_episode_events(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode, EpisodeEvent
+        person = Person.objects.create(person_id=92011)
+        de = self._make_exposure(person, 'Ibrutinib', date(2023, 1, 1), date(2023, 6, 30), pk=9201101)
+        infer_lot_for_person(person, force=True)
+        infer_lot_for_person(person, force=True)
+        ep = Episode.objects.get(person=person)
+        self.assertEqual(EpisodeEvent.objects.filter(episode_id=ep.episode_id, event_id=de.drug_exposure_id).count(), 1)
+
+    def test_patient_info_refreshed(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        person = Person.objects.create(person_id=92012)
+        self._make_exposure(person, 'bortezomib',   date(2023, 1, 1), date(2023, 6, 30), pk=9201201)
+        self._make_exposure(person, 'lenalidomide', date(2023, 1, 5), date(2023, 6, 30), pk=9201202)
+        self._make_exposure(person, 'dexamethasone',date(2023, 1, 5), date(2023, 6, 30), pk=9201203)
+        infer_lot_for_person(person)
+        pi = PatientInfo.objects.filter(person=person).first()
+        self.assertIsNotNone(pi)
+        self.assertIsNotNone(pi.first_line_therapy)
+
+    def test_existing_episodes_skipped(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode
+        from omop_core.models import Concept
+        person = Person.objects.create(person_id=92013)
+        self._make_exposure(person, 'Ibrutinib', date(2023, 1, 1), date(2023, 6, 30), pk=9201301)
+        ep_concept = Concept.objects.filter(concept_id=32531).first()
+        ehr_concept = Concept.objects.filter(concept_id=32817).first()
+        from omop_oncology.models import Episode as _Ep
+        last_ep = _Ep.objects.order_by('-episode_id').first()
+        manual_ep_id = (last_ep.episode_id + 1) if last_ep else 1
+        Episode.objects.create(
+            episode_id=manual_ep_id,
+            person=person, episode_concept=ep_concept, episode_object_concept=ehr_concept,
+            episode_type_concept=ehr_concept, episode_number=1,
+            episode_start_date=date(2023, 1, 1), episode_source_value='Manual',
+        )
+        infer_lot_for_person(person)
+        self.assertEqual(Episode.objects.filter(person=person).count(), 1)
+        self.assertEqual(Episode.objects.get(person=person).episode_source_value, 'Manual')
+
+    def test_dry_run_no_db_writes(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode
+        person = Person.objects.create(person_id=92014)
+        self._make_exposure(person, 'Ibrutinib', date(2023, 1, 1), date(2023, 6, 30), pk=9201401)
+        lots = infer_lot_for_person(person, dry_run=True)
+        self.assertEqual(len(lots), 1)
+        self.assertEqual(Episode.objects.filter(person=person).count(), 0)
+
+    def test_management_command_single_patient(self):
+        from datetime import date
+        from omop_oncology.models import Episode
+        from django.core.management import call_command
+        person = Person.objects.create(person_id=92015)
+        self._make_exposure(person, 'Ibrutinib', date(2023, 1, 1), date(2023, 6, 30), pk=9201501)
+        call_command('infer_lot', person_id=person.person_id, verbosity=0)
+        self.assertEqual(Episode.objects.filter(person=person).count(), 1)
+
+    # ── HealthTree phase/procedure tests ──────────────────────────────────
+
+    def test_induction_label_first_lot(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode
+        person = Person.objects.create(person_id=92016)
+        self._make_exposure(person, 'bortezomib',   date(2023, 1, 1), date(2023, 6, 30), pk=9201601)
+        self._make_exposure(person, 'lenalidomide', date(2023, 1, 5), date(2023, 6, 30), pk=9201602)
+        self._make_exposure(person, 'dexamethasone',date(2023, 1, 5), date(2023, 6, 30), pk=9201603)
+        infer_lot_for_person(person)
+        ep = Episode.objects.get(person=person)
+        self.assertIn('induction', ep.episode_source_value)
+
+    def test_steroid_only_window_no_new_lot(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode
+        person = Person.objects.create(person_id=92017)
+        self._make_exposure(person, 'bortezomib',   date(2023, 1, 1), date(2023, 3, 31), pk=9201701)
+        self._make_exposure(person, 'dexamethasone', date(2023, 4, 1), date(2023, 4, 30), pk=9201702)
+        self._make_exposure(person, 'bortezomib',   date(2023, 5, 1), date(2023, 8, 31), pk=9201703)
+        infer_lot_for_person(person)
+        self.assertEqual(Episode.objects.filter(person=person).count(), 1)
+
+    def test_transplant_procedure_creates_new_lot(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode
+        person = Person.objects.create(person_id=92018)
+        self._make_exposure(person, 'bortezomib',   date(2023, 1, 1), date(2023, 6, 30), pk=9201801)
+        self._make_exposure(person, 'lenalidomide', date(2023, 1, 5), date(2023, 6, 30), pk=9201802)
+        self._make_exposure(person, 'dexamethasone',date(2023, 1, 5), date(2023, 6, 30), pk=9201803)
+        self._make_procedure(person, '425983008', date(2023, 7, 15), pk=9201804)
+        lots = infer_lot_for_person(person)
+        self.assertGreaterEqual(len(lots), 2)
+        eps = Episode.objects.filter(person=person).order_by('episode_number')
+        self.assertIn('induction', eps[0].episode_source_value)
+
+    def test_tandem_transplant_same_lot(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode
+        person = Person.objects.create(person_id=92019)
+        self._make_exposure(person, 'bortezomib',   date(2023, 1, 1), date(2023, 6, 30), pk=9201901)
+        self._make_procedure(person, '425983008', date(2023, 7, 1), pk=9201902)
+        self._make_procedure(person, '425983008', date(2023, 11, 1), pk=9201903)
+        lots = infer_lot_for_person(person)
+        transplant_lots = [l for l in lots if 'transplant' in l.phase_label]
+        self.assertEqual(len(transplant_lots), 1)
+
+    def test_consolidation_phase_label(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode
+        person = Person.objects.create(person_id=92020)
+        self._make_exposure(person, 'bortezomib',   date(2023, 1, 1), date(2023, 6, 30), pk=9202001)
+        self._make_exposure(person, 'dexamethasone',date(2023, 1, 5), date(2023, 6, 30), pk=9202002)
+        self._make_procedure(person, '425983008', date(2023, 7, 15), pk=9202003)
+        self._make_exposure(person, 'lenalidomide', date(2023, 9, 1), date(2023, 12, 31), pk=9202004)
+        infer_lot_for_person(person)
+        eps = Episode.objects.filter(person=person).order_by('episode_number')
+        labels = [ep.episode_source_value for ep in eps]
+        self.assertTrue(any('consolidation' in l for l in labels))
+
+    def test_maintenance_phase_label(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode
+        person = Person.objects.create(person_id=92021)
+        self._make_exposure(person, 'bortezomib',   date(2023, 1, 1), date(2023, 6, 30), pk=9202101)
+        self._make_exposure(person, 'dexamethasone',date(2023, 1, 5), date(2023, 6, 30), pk=9202102)
+        self._make_procedure(person, '425983008', date(2023, 7, 15), pk=9202103)
+        self._make_exposure(person, 'lenalidomide', date(2023, 11, 1), date(2024, 6, 30), pk=9202104)
+        infer_lot_for_person(person)
+        eps = Episode.objects.filter(person=person).order_by('episode_number')
+        labels = [ep.episode_source_value for ep in eps]
+        self.assertTrue(any('maintenance' in l for l in labels))
+
+    def test_cart_procedure_creates_new_lot(self):
+        from datetime import date
+        from omop_core.services.lot_inference_service import infer_lot_for_person
+        from omop_oncology.models import Episode
+        person = Person.objects.create(person_id=92022)
+        self._make_exposure(person, 'pomalidomide', date(2023, 1, 1), date(2023, 6, 30), pk=9202201)
+        self._make_exposure(person, 'dexamethasone',date(2023, 1, 5), date(2023, 6, 30), pk=9202202)
+        self._make_procedure(person, '1156961008', date(2023, 8, 1), pk=9202203)
+        lots = infer_lot_for_person(person)
+        self.assertGreaterEqual(len(lots), 2)
+        cart_lots = [l for l in lots if 'CAR T-Cell' in l.phase_label]
+        self.assertEqual(len(cart_lots), 1)

@@ -32,6 +32,7 @@ from omop_core.services.patient_info_service import refresh_patient_info
 from omop_core.services.lot_inference_service import infer_lot_for_person
 from omop_core.services.omop_write_service import sync_to_omop
 from omop_core.services.mappings import get_gender_concept, LAB_FIELD_TO_LOINC
+from omop_core.services.pk import next_pk
 from datetime import datetime
 import csv
 import json
@@ -1775,12 +1776,6 @@ def auth_test(request):
 # OMOP clinical event ViewSets
 # =============================================================================
 
-def _next_pk(model, pk_field):
-    """Return max(pk_field) + 1, or 1 if the table is empty."""
-    last = model.objects.order_by(f'-{pk_field}').values_list(pk_field, flat=True).first()
-    return (last + 1) if last else 1
-
-
 _MODEL_PK_MAP = {
     'ConditionOccurrence': ('condition_occurrence_id', ConditionOccurrence),
     'DrugExposure':        ('drug_exposure_id',        DrugExposure),
@@ -1818,7 +1813,7 @@ class _ProvenanceMixin:
         if model_name in _MODEL_PK_MAP:
             pk_field, model_cls = _MODEL_PK_MAP[model_name]
             if pk_field not in serializer.validated_data:
-                serializer.validated_data[pk_field] = _next_pk(model_cls, pk_field)
+                serializer.validated_data[pk_field] = next_pk(model_cls, pk_field)
 
         # Org-scoping: reject cross-org writes
         org = get_request_org(self.request)

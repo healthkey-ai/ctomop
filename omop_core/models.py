@@ -104,7 +104,7 @@ class PatientGroupMembership(models.Model):
     group = models.ForeignKey(
         PatientGroup, on_delete=models.CASCADE, related_name='memberships',
     )
-    person_id = models.BigIntegerField()
+    person_id = models.BigIntegerField(db_index=True)
     source = models.CharField(max_length=10, choices=SOURCE_CHOICES, default='manual')
     added_at = models.DateTimeField(auto_now_add=True)
     added_by = models.ForeignKey(
@@ -180,7 +180,7 @@ class PersonalRepresentative(models.Model):
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
         related_name='represented_persons',
     )
-    person_id = models.BigIntegerField()
+    person_id = models.BigIntegerField(db_index=True)
     relationship = models.CharField(max_length=20, choices=RELATIONSHIP_CHOICES)
     verification_status = models.CharField(
         max_length=20, choices=VERIFICATION_CHOICES, default='PENDING',

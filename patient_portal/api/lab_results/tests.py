@@ -666,7 +666,7 @@ class PatchInvalidDateTest(TestCase):
             format='json',
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn('Invalid measured_at date', resp.data['detail'])
+        self.assertIn('measured_at', resp.data)
 
     def test_patch_empty_date_string(self):
         resp = self.client.patch(
@@ -872,3 +872,48 @@ class OrgScopedSyncRejectionTest(TestCase):
         resp = self.client.post('/api/lab-results/sync/', self._sync_payload(7002), format='json')
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
         self.assertIn('Person not in your organization', resp.data['detail'])
+
+
+class SyncNonSuperuserTest(TestCase):
+    """Test sync endpoint with a non-superuser identity using self-access (PatientUser link)."""
+
+    def setUp(self):
+        _setup_vocab()
+        self.user = Identity.objects.create_user(email='patient@test.com', password='test')
+        self.person = Person.objects.create(person_id=2001)
+        PatientInfo.objects.create(person=self.person)
+        PatientUser.objects.create(identity=self.user, person=self.person)
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+    def _payload(self, person_id=2001):
+        return {
+            'person_id': person_id,
+            'actor_iss': self.user.issuer,
+            'actor_sub': self.user.sub,
+            'measurements': [
+                {
+                    'loinc_code': '718-7',
+                    'test_name': 'Hemoglobin',
+                    'value': '14.0',
+                    'unit': 'g/dL',
+                    'measured_at': '2026-05-20',
+                },
+            ],
+            'source_type': 'patient_self_report',
+        }
+
+    def test_sync_own_data_succeeds(self):
+        resp = self.client.post('/api/lab-results/sync/', self._payload(), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data['count'], 1)
+
+    def test_sync_other_person_denied(self):
+        other = Person.objects.create(person_id=2002)
+        PatientInfo.objects.create(person=other)
+        resp = self.client.post('/api/lab-results/sync/', self._payload(person_id=2002), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_sync_nonexistent_person_denied(self):
+        resp = self.client.post('/api/lab-results/sync/', self._payload(person_id=9999), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)

@@ -1,44 +1,128 @@
 # TODO
 
-## Code-review: flagged issues (2026-05-23, branch feat/hk-labs-integration)
+## Backend review findings (2026-05-23)
 
-### ~~[CRITICAL] Login broken — USERNAME_FIELD='uid' vs email-based authenticate()~~ ✅ FIXED
-- Added `patient_portal/backends.py` with `EmailBackend` (looks up by `email__iexact` + `issuer="urn:local"`)
-- Registered in `AUTHENTICATION_BACKENDS` in `ctomop/settings.py`
+### Critical
 
-### ~~[CRITICAL] Superusers denied access to all lab result endpoints~~ ✅ FIXED
-- Added `if getattr(actor_identity, 'is_superuser', False): return True` at top of `can_access_patient()` in `omop_core/authorization.py`
+#### #1 ServiceTokenAuthentication falls back to arbitrary superuser
+- **Severity:** critical / security
+- `patient_portal/api/authentication.py:108-115`
+- When the dedicated service identity (`urn:service|hk-labs-sync`) doesn't exist, auth falls back to `Identity.objects.filter(is_superuser=True).first()`. Silently impersonates a real admin, bypasses all authorization, corrupts provenance audit trails — HIPAA accountability gap.
+- **Action:** Remove the superuser fallback. Fail closed (return None).
 
-### ~~[HIGH] PatientDetail displays "undefined undefined" for patient name~~ ✅ FIXED
-- Updated `PatientDetail.tsx` to use `user.name || user.email` matching `UserSerializer` shape
+#### #2 _resolve_person_id allows org-scoped tokens to bypass access check
+- **Severity:** critical / security
+- `patient_portal/api/lab_results/views.py:70-83`
+- When `can_access_patient()` fails but `get_request_org()` returns non-None, the function returns `(pid, None)` granting access. The org-person membership check happens later in each view but the logic is inverted.
+- **Action:** Move the org-person membership check into `_resolve_person_id` itself.
 
-### ~~[HIGH] ~16 clinical fields unreachable after tab refactor~~ ✅ FIXED
-- Added 10 model-backed fields to new tabs: GeneralTab (medical history + infection status), LabsTab (diagnostic tests), DiseaseTab MyelomaSection (measurable_disease_imwg)
-- Fixed 6 stale TS type names in `patient.ts` to match actual API field names (e.g. `active_malignancies` → `no_other_active_malignancies`)
-- Removed 6 phantom fields from TS types that never existed in the model (`m_protein_serum`, `m_protein_urine`, `num_lesions`, `clonal_plasma_percent`, `lvef_percent`, `toxicity_grade_maximum`)
+#### #3 No rate limiting on auth or write endpoints
+- **Severity:** critical / security
+- `ctomop/settings.py`
+- No `DEFAULT_THROTTLE_CLASSES` or per-view throttling. SERVICE_AUTH_TOKEN can be brute-forced. Sync endpoint accepts 500 measurements/request with no rate limit.
+- **Action:** Add `DEFAULT_THROTTLE_CLASSES` and `DEFAULT_THROTTLE_RATES` to REST_FRAMEWORK settings. Add stricter per-view throttles on sync/auth endpoints.
 
-### ~~[HIGH] Identity.save() uid not added to update_fields — latent desync~~ ✅ FIXED
-- `Identity.save()` now appends `"uid"` to `update_fields` when specified, ensuring uid stays in sync with issuer:sub
+### High
 
-### ~~[MEDIUM] useAuth User interface type mismatch~~ ✅ FIXED
-- Updated `User` interface in `useAuth.ts` to `{id, sub, email, name}` matching `UserSerializer`
+#### #6 EXCLUSIVE table locks per measurement in sync loop
+- **Severity:** high / performance
+- `patient_portal/api/lab_results/sync.py:49-60,428`
+- `_next_pk()` acquires EXCLUSIVE lock on the entire measurement table, called once per measurement (up to 500). Fully serializes all concurrent sync requests.
+- **Action:** Use PostgreSQL sequences (`nextval()`) instead of `LOCK TABLE + MAX(pk)`.
 
-### ~~[MEDIUM] _next_pk race condition on empty table~~ ✅ FIXED
-- Replaced `select_for_update()` with `LOCK TABLE ... IN EXCLUSIVE MODE` to guarantee serialization even on empty tables
+#### #7 Sequential INSERT per measurement instead of bulk_create
+- **Severity:** high / performance
+- `patient_portal/api/lab_results/sync.py:284-293`
+- 500 individual `Measurement.objects.create()` calls = 500 DB round trips per sync request.
+- **Action:** Pre-allocate IDs via sequence, build objects in a list, use `bulk_create()`.
 
-### ~~[LOW] (Pre-existing) Dashboard view uses nonexistent read_at field~~ ✅ FIXED
-- Changed `read_at__isnull=True` to `is_read=False` in `patient_portal/views.py`
+#### #11 MeasurementDetailView.patch is not atomic
+- **Severity:** high / HIPAA
+- `patient_portal/api/lab_results/views.py:570-581`
+- `m.save()` commits the measurement update, then `ProvenanceRecord.objects.create()` creates the audit record. If provenance fails, the measurement is modified without an audit trail.
+- **Action:** Wrap in `transaction.atomic()`.
 
-### ~~[LOW] (Pre-existing) Admin search_fields references nonexistent username~~ ✅ FIXED
-- Changed `patient_user__username` to `patient_user__identity__email` in `patient_portal/admin.py`
+#### #12 VisitDeleteView.delete is not atomic
+- **Severity:** high / HIPAA
+- `patient_portal/api/lab_results/views.py:659-676`
+- Provenance created, then measurements deleted, then visit deleted — not in a transaction. Partial failures leave inconsistent state.
+- **Action:** Wrap in `transaction.atomic()`.
+
+### Medium
+
+#### #4 Person ID leaked in error response
+- **Severity:** medium / security
+- `patient_portal/api/lab_results/sync.py:211`
+- `f'Person {person_id} does not exist.'` enables person_id enumeration.
+- **Action:** Replace with generic `'Person not found.'`.
+
+#### #5 ScopedTokenPermission bypasses scope enforcement for partner auth
+- **Severity:** medium / security
+- `patient_portal/api/permissions.py:47-52`
+- Firebase/session/service-token users get full read+write access with no scope checks. A patient can delete visits/measurements.
+- **Action:** Document as security debt. Add role-based checks for non-OAuth2 auth paths before production PHI.
+
+#### #8 _get_or_create_hk_concept runs per-measurement without caching
+- **Severity:** medium / orm
+- `patient_portal/api/lab_results/sync.py:448-471`
+- For LOINC-unmatched tests, each measurement does a DB query. Race condition between concurrent requests can create duplicate concept_codes.
+- **Action:** Pre-build an `hk_concept_cache` before the loop. Add unique constraint on `(vocabulary_id, concept_code)`.
+
+#### #9 Missing db_index on authorization lookup columns
+- **Severity:** medium / database
+- `omop_core/models.py:107,183`
+- `PatientGroupMembership.person_id` and `PersonalRepresentative.person_id` lack standalone indexes but are filtered in `can_access_patient()` on every request.
+- **Action:** Add `db_index=True` to both fields.
+
+#### #10 resolve_or_create_person race condition on concurrent first-login
+- **Severity:** medium / database
+- `patient_portal/services.py:37-49`
+- Two concurrent requests for a brand-new identity can both enter Person creation. Second `PatientUser.objects.create()` fails with IntegrityError (OneToOneField).
+- **Action:** Catch `IntegrityError` on `PatientUser.create` and retry lookup.
+
+#### #13 MeasurementDetailView.patch uses request.data without serializer
+- **Severity:** medium / drf
+- `patient_portal/api/lab_results/views.py:502-582`
+- Reads fields directly from `request.data` bypassing DRF validation.
+- **Action:** Create a `MeasurementUpdateSerializer` and use `serializer.is_valid(raise_exception=True)`.
+
+#### #14 _hydrate_page fetches ALL measurements then truncates in Python
+- **Severity:** medium / orm
+- `patient_portal/api/lab_results/views.py:235-270`
+- Queries all matching measurements with no LIMIT, discards all but 10 per concept in Python.
+- **Action:** Use a window function (`ROW_NUMBER() OVER (PARTITION BY concept_id)`) to limit at the DB level.
+
+#### #15 _ensure_concept returns None without clear error propagation
+- **Severity:** medium / python
+- `patient_portal/api/lab_results/sync.py:98-126,254-255`
+- If `_ensure_concept()` returns None for required concepts, the FK assignment causes an `IntegrityError` with a confusing traceback.
+- **Action:** Add explicit null checks and return 503 with a clear message.
+
+#### #17 Email fallback in _resolve_person_id can match wrong patient
+- **Severity:** medium / drf
+- `patient_portal/api/lab_results/views.py:97-104`
+- Falls back to `PatientInfo.objects.filter(email=...).first()`. Email is not unique — could match a patient from a different organization.
+- **Action:** Add `.filter(organization=get_request_org(request))` or add a unique constraint on email.
+
+#### #18 SyncViewTest uses superuser, masking authorization bugs
+- **Severity:** medium / testing
+- `patient_portal/api/lab_results/tests.py:96-99`
+- All core sync tests use a superuser, so `can_access_patient()` always returns True. Authorization path never exercised.
+- **Action:** Add sync tests with a non-superuser identity that has self-access (PatientUser link).
+
+### Low
+
+#### #16 Provider registry module-level cache without invalidation
+- **Severity:** low / python
+- `patient_portal/api/providers/registry.py:9-30`
+- `_providers` is set once and never cleared. Makes testing difficult.
+- **Action:** Add a `clear_providers()` function for tests.
 
 ---
 
-## Prior code-review: flagged issues (PR #72)
+## Previous findings
 
-### _next_pk holds row locks for entire sync transaction
-- **Severity:** medium / performance
+### _next_pk holds row locks for entire sync transaction (superseded by #6/#7 above)
 - `patient_portal/api/lab_results/sync.py:49-56`
-- Every `_next_pk` call acquires a row lock via `select_for_update()` held until the entire `@transaction.atomic` POST completes. 500 measurements = 500+ lock acquisitions serializing all concurrent syncs. Empty table race: if no rows exist, `select_for_update` locks nothing and two concurrent transactions can both create pk=1.
-- **Action:** Migrate OMOP tables (Measurement, VisitOccurrence, CareSite, Concept) from manual IntegerField PKs to PostgreSQL sequences via Django's BigAutoField.
+- Superseded by findings #6 and #7 in the backend review above.
 

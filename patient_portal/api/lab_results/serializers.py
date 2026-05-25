@@ -15,6 +15,22 @@ class LabValueSerializer(serializers.Serializer):
     report_filename = serializers.CharField(allow_null=True)
 
 
+class MeasurementUpdateSerializer(serializers.Serializer):
+    value = serializers.DecimalField(
+        max_digits=15, decimal_places=5, required=False, allow_null=True,
+    )
+    value_string = serializers.CharField(
+        max_length=60, required=False, allow_null=True, allow_blank=True,
+    )
+    measured_at = serializers.DateField(required=False)
+    range_low = serializers.DecimalField(
+        max_digits=15, decimal_places=5, required=False, allow_null=True,
+    )
+    range_high = serializers.DecimalField(
+        max_digits=15, decimal_places=5, required=False, allow_null=True,
+    )
+
+
 class LabResultCardSerializer(serializers.Serializer):
     concept_id = serializers.IntegerField()
     concept_code = serializers.CharField()

@@ -47,7 +47,8 @@ class ScopedTokenPermission(BasePermission):
     def has_permission(self, request, view):
         token = request.auth
 
-        # Partner auth, session auth, or service-token: no OAuth2 scopes to check
+        # Partner auth, session auth, or service-token: no OAuth2 scopes to check.
+        # TODO(security): these paths get full read+write with no scope enforcement.
         if token is None or token == "service-token" or isinstance(token, TokenClaims):
             return bool(request.user and request.user.is_authenticated)
 

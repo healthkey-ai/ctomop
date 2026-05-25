@@ -28,6 +28,7 @@ from omop_core.authorization import can_access_patient, get_actor_role
 from omop_core.models import (
     CareSite, Concept, Measurement, Person, ProvenanceRecord, VisitOccurrence,
 )
+from omop_core.services.pk import next_pk, next_pk_batch
 from patient_portal.api.permissions import ScopedTokenPermission, get_request_org
 
 logger = logging.getLogger(__name__)
@@ -46,20 +47,6 @@ def _normalize_slug(name):
     return f'hkl:{s}'
 
 
-def _next_pk(model, pk_field):
-    from django.db import connection
-    table = model._meta.db_table
-    with connection.cursor() as cur:
-        cur.execute(f'LOCK TABLE "{table}" IN EXCLUSIVE MODE')
-    last = (
-        model.objects
-        .order_by(f'-{pk_field}')
-        .values_list(pk_field, flat=True)
-        .first()
-    )
-    return (last + 1) if last else 1
-
-
 def _ensure_hk_deps(domain_id, concept_class_id):
     """Ensure the HK-Labs vocabulary, the given Domain, and ConceptClass exist."""
     from omop_core.models import Domain, ConceptClass, Vocabulary
@@ -75,17 +62,6 @@ def _ensure_hk_deps(domain_id, concept_class_id):
         concept_class_id=concept_class_id,
         defaults={'concept_class_name': concept_class_id, 'concept_class_concept_id': 0},
     )
-
-
-def _next_hk_concept_id():
-    last = (
-        Concept.objects.select_for_update()
-        .filter(vocabulary_id=HK_LABS_VOCAB_ID)
-        .order_by('-concept_id')
-        .values_list('concept_id', flat=True)
-        .first()
-    )
-    return (last + 1) if last else HK_LABS_CONCEPT_ID_START
 
 
 _HK_FALLBACK_CONCEPTS = {
@@ -186,6 +162,7 @@ class SyncView(APIView):
     }
     """
     permission_classes = [ScopedTokenPermission]
+    throttle_scope = 'sync'
 
     @transaction.atomic
     def post(self, request):
@@ -208,7 +185,7 @@ class SyncView(APIView):
 
         if not Person.objects.filter(person_id=person_id).exists():
             return Response(
-                {'detail': f'Person {person_id} does not exist.'},
+                {'detail': 'Person not found.'},
                 status=status.HTTP_404_NOT_FOUND,
             )
 
@@ -253,6 +230,11 @@ class SyncView(APIView):
 
         visit_concept = _ensure_concept(OUTPATIENT_VISIT_CONCEPT_ID)
         type_concept = _ensure_concept(type_concept_id)
+        if visit_concept is None or type_concept is None:
+            return Response(
+                {'detail': 'Required OMOP concepts not available. Run load_athena_vocabularies.'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
 
         items = data['measurements']
         loinc_codes = {item.get('loinc_code') for item in items if item.get('loinc_code')}
@@ -270,6 +252,8 @@ class SyncView(APIView):
                 for c in Concept.objects.filter(vocabulary_id='UCUM', concept_code__in=unit_codes)
             }
 
+        hk_concept_cache = self._preload_hk_concepts(items, loinc_cache)
+
         care_site = self._get_or_create_care_site(data.get('lab_name'))
         visit = self._create_visit_occurrence(
             person_id=person_id,
@@ -280,17 +264,20 @@ class SyncView(APIView):
             type_concept=type_concept,
         )
 
-        measurement_ids = []
-        for item in items:
-            m_id = self._create_measurement(
+        measurement_ids = next_pk_batch(Measurement, 'measurement_id', len(items))
+        measurement_objects = []
+        for m_id, item in zip(measurement_ids, items):
+            measurement_objects.append(self._build_measurement(
+                measurement_id=m_id,
                 person_id=person_id,
                 item=item,
                 visit=visit,
                 type_concept=type_concept,
                 loinc_cache=loinc_cache,
                 ucum_cache=ucum_cache,
-            )
-            measurement_ids.append(m_id)
+                hk_concept_cache=hk_concept_cache,
+            ))
+        Measurement.objects.bulk_create(measurement_objects)
 
         # Provenance
         self._record_provenance(
@@ -372,13 +359,58 @@ class SyncView(APIView):
         person = resolve_or_create_person(identity)
         return person.person_id
 
+    def _preload_hk_concepts(self, items, loinc_cache):
+        """Pre-fetch or create HK-Labs concepts for LOINC-unmatched tests."""
+        names_needing_hk = set()
+        for item in items:
+            loinc_code = item.get('loinc_code')
+            if not loinc_code or loinc_code not in loinc_cache:
+                names_needing_hk.add(item['test_name'])
+
+        if not names_needing_hk:
+            return {}
+
+        slugs = {_normalize_slug(name): name for name in names_needing_hk}
+        existing = Concept.objects.filter(
+            vocabulary_id=HK_LABS_VOCAB_ID,
+            concept_code__in=list(slugs.keys()),
+        )
+        cache = {}
+        for c in existing:
+            for slug, name in list(slugs.items()):
+                if slug == c.concept_code:
+                    cache[name] = c.concept_id
+
+        missing = names_needing_hk - set(cache.keys())
+        if missing:
+            _ensure_hk_deps('Measurement', 'Lab Test')
+            new_ids = next_pk_batch(Concept, 'concept_id', len(missing))
+            new_concepts = []
+            for concept_id, name in zip(new_ids, missing):
+                code = _normalize_slug(name)
+                new_concepts.append(Concept(
+                    concept_id=concept_id,
+                    concept_name=name[:255],
+                    domain_id='Measurement',
+                    vocabulary_id=HK_LABS_VOCAB_ID,
+                    concept_class_id='Lab Test',
+                    standard_concept=None,
+                    concept_code=code[:50],
+                    valid_start_date=date(1970, 1, 1),
+                    valid_end_date=date(2099, 12, 31),
+                ))
+                cache[name] = concept_id
+            Concept.objects.bulk_create(new_concepts)
+
+        return cache
+
     def _get_or_create_care_site(self, lab_name):
         if not lab_name:
             return None
         care_site = CareSite.objects.filter(care_site_name=lab_name).first()
         if care_site:
             return care_site
-        cs_id = _next_pk(CareSite, 'care_site_id')
+        cs_id = next_pk(CareSite, 'care_site_id')
         try:
             return CareSite.objects.create(
                 care_site_id=cs_id,
@@ -389,7 +421,7 @@ class SyncView(APIView):
             return CareSite.objects.filter(care_site_name=lab_name).first()
 
     def _create_visit_occurrence(self, person_id, care_site, lab_date, report_filename, visit_concept, type_concept):
-        visit_id = _next_pk(VisitOccurrence, 'visit_occurrence_id')
+        visit_id = next_pk(VisitOccurrence, 'visit_occurrence_id')
         return VisitOccurrence.objects.create(
             visit_occurrence_id=visit_id,
             person_id=person_id,
@@ -401,7 +433,8 @@ class SyncView(APIView):
             visit_source_value=(report_filename or '')[:50],
         )
 
-    def _create_measurement(self, person_id, item, visit, type_concept, loinc_cache, ucum_cache):
+    def _build_measurement(self, measurement_id, person_id, item, visit, type_concept,
+                           loinc_cache, ucum_cache, hk_concept_cache):
         loinc_code = item.get('loinc_code')
         test_name = item['test_name']
 
@@ -414,10 +447,10 @@ class SyncView(APIView):
             if concept:
                 measurement_concept_id = concept.concept_id
             else:
-                measurement_source_concept_id = self._get_or_create_hk_concept(test_name)
+                measurement_source_concept_id = hk_concept_cache.get(test_name)
                 measurement_source_value = test_name[:50]
         else:
-            measurement_source_concept_id = self._get_or_create_hk_concept(test_name)
+            measurement_source_concept_id = hk_concept_cache.get(test_name)
             measurement_source_value = test_name[:50]
 
         unit_concept_id = None
@@ -425,9 +458,8 @@ class SyncView(APIView):
         if unit_str:
             unit_concept_id = ucum_cache.get(unit_str)
 
-        m_id = _next_pk(Measurement, 'measurement_id')
-        Measurement.objects.create(
-            measurement_id=m_id,
+        return Measurement(
+            measurement_id=measurement_id,
             person_id=person_id,
             measurement_concept_id=measurement_concept_id,
             measurement_date=item['measured_at'],
@@ -443,29 +475,3 @@ class SyncView(APIView):
             unit_source_value=(item.get('source_unit') or item.get('unit') or '')[:50],
             value_source_value=(item.get('source_text') or '')[:50],
         )
-        return m_id
-
-    def _get_or_create_hk_concept(self, test_name):
-        """Get or create a HK-Labs custom vocabulary concept for a LOINC-unmatched test."""
-        code = _normalize_slug(test_name)
-        existing = Concept.objects.filter(
-            vocabulary_id=HK_LABS_VOCAB_ID,
-            concept_code=code,
-        ).first()
-        if existing:
-            return existing.concept_id
-
-        _ensure_hk_deps('Measurement', 'Lab Test')
-        concept_id = _next_hk_concept_id()
-        Concept.objects.create(
-            concept_id=concept_id,
-            concept_name=test_name[:255],
-            domain_id='Measurement',
-            vocabulary_id=HK_LABS_VOCAB_ID,
-            concept_class_id='Lab Test',
-            standard_concept=None,
-            concept_code=code[:50],
-            valid_start_date=date(1970, 1, 1),
-            valid_end_date=date(2099, 12, 31),
-        )
-        return concept_id

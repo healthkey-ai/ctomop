@@ -105,13 +105,12 @@ class ServiceTokenAuthentication(BaseAuthentication):
         if not hmac.compare_digest(header[7:], secret):
             return None
 
-        identity = Identity.objects.filter(
+        identity, created = Identity.objects.get_or_create(
             issuer='urn:service', sub='hk-labs-sync',
-        ).first()
-        if not identity:
-            identity = Identity.objects.filter(is_superuser=True).first()
-        if not identity:
-            return None
+        )
+        if created:
+            identity.set_unusable_password()
+            identity.save(update_fields=['password'])
 
         return (identity, "service-token")
 

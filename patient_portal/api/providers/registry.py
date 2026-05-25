@@ -28,3 +28,9 @@ def get_providers() -> list[TokenProvider]:
 
     _providers = result
     return _providers
+
+
+def clear_providers():
+    """Reset cached providers (for testing)."""
+    global _providers
+    _providers = None

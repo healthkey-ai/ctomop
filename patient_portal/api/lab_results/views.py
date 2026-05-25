@@ -1,8 +1,6 @@
 from collections import defaultdict
-from decimal import Decimal, InvalidOperation
-
 from django.contrib.contenttypes.models import ContentType
-from django.db import connection
+from django.db import connection, transaction
 from django.db.models import Q as models_Q
 from rest_framework import status
 from rest_framework.pagination import PageNumberPagination
@@ -15,7 +13,7 @@ from omop_core.models import (
 )
 from patient_portal.api.permissions import ScopedTokenPermission, get_request_org
 
-from .serializers import LabResultCardSerializer, LabValueSerializer
+from .serializers import LabResultCardSerializer, LabValueSerializer, MeasurementUpdateSerializer
 
 MAX_VALUES_PER_CONCEPT = 10
 
@@ -75,7 +73,9 @@ def _resolve_person_id(request):
                 pass
             if pid != own_pid and not can_access_patient(request.user, pid):
                 org = get_request_org(request)
-                if org is None:
+                if org is None or not PatientInfo.objects.filter(
+                    person_id=pid, organization=org,
+                ).exists():
                     return None, Response(
                         {'detail': 'Access denied.'},
                         status=status.HTTP_403_FORBIDDEN,
@@ -95,7 +95,11 @@ def _resolve_person_id(request):
         pass
 
     # Fallback: resolve by email on PatientInfo
-    pi = PatientInfo.objects.filter(email=request.user.email).first()
+    email_qs = PatientInfo.objects.filter(email=request.user.email)
+    org = get_request_org(request)
+    if org is not None:
+        email_qs = email_qs.filter(organization=org)
+    pi = email_qs.first()
     if pi is None:
         return None, Response(
             {'detail': 'No patient record linked to your account.'},
@@ -231,79 +235,112 @@ class ResultsSummaryView(APIView):
             columns = [col[0] for col in cursor.description]
             return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
+    _HYDRATE_SQL = """
+    WITH ranked AS (
+        SELECT
+            m.measurement_id,
+            CASE
+                WHEN m.measurement_concept_id = 0
+                     AND m.measurement_source_concept_id IS NOT NULL
+                THEN m.measurement_source_concept_id
+                ELSE m.measurement_concept_id
+            END AS eff_id,
+            m.measurement_date,
+            m.value_as_number,
+            m.value_as_string,
+            m.range_low,
+            m.range_high,
+            m.measurement_type_concept_id,
+            m.unit_concept_id,
+            m.unit_source_value,
+            m.visit_occurrence_id,
+            ROW_NUMBER() OVER (
+                PARTITION BY
+                    CASE
+                        WHEN m.measurement_concept_id = 0
+                             AND m.measurement_source_concept_id IS NOT NULL
+                        THEN m.measurement_source_concept_id
+                        ELSE m.measurement_concept_id
+                    END
+                ORDER BY m.measurement_date DESC, m.measurement_id DESC
+            ) AS rn
+        FROM measurement m
+        WHERE m.person_id = %s
+          AND (
+              m.measurement_concept_id = ANY(%s)
+              OR (m.measurement_concept_id = 0
+                  AND m.measurement_source_concept_id = ANY(%s))
+          )
+    )
+    SELECT r.*,
+           tc.concept_name AS type_concept_name,
+           uc.concept_code AS unit_concept_code
+    FROM ranked r
+    LEFT JOIN concept tc ON tc.concept_id = r.measurement_type_concept_id
+    LEFT JOIN concept uc ON uc.concept_id = r.unit_concept_id
+    WHERE r.rn <= %s
+    ORDER BY r.eff_id, r.measurement_date DESC, r.measurement_id DESC
+    """
+
     @staticmethod
     def _hydrate_page(person_id, page_summaries):
         if not page_summaries:
             return []
 
         concept_ids = [s['effective_concept_id'] for s in page_summaries]
-        concept_id_set = set(concept_ids)
 
-        measurements = (
-            Measurement.objects
-            .filter(person_id=person_id)
-            .filter(
-                models_Q(measurement_concept_id__in=concept_ids)
-                | models_Q(
-                    measurement_concept_id=0,
-                    measurement_source_concept_id__in=concept_ids,
-                )
+        with connection.cursor() as cursor:
+            cursor.execute(
+                ResultsSummaryView._HYDRATE_SQL,
+                [person_id, concept_ids, concept_ids, MAX_VALUES_PER_CONCEPT],
             )
-            .select_related('measurement_type_concept', 'unit_concept')
-            .order_by('-measurement_date', '-measurement_id')
-        )
+            columns = [col[0] for col in cursor.description]
+            rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
 
         groups = defaultdict(list)
-        for m in measurements:
-            eff_id = m.measurement_concept_id
-            if eff_id == 0 and m.measurement_source_concept_id:
-                eff_id = m.measurement_source_concept_id
-            if eff_id in concept_id_set and len(groups[eff_id]) < MAX_VALUES_PER_CONCEPT:
-                groups[eff_id].append(m)
-
         visit_ids = set()
-        for meas_list in groups.values():
-            for m in meas_list:
-                if m.visit_occurrence_id:
-                    visit_ids.add(m.visit_occurrence_id)
+        for row in rows:
+            groups[row['eff_id']].append(row)
+            if row['visit_occurrence_id']:
+                visit_ids.add(row['visit_occurrence_id'])
         provenance = _load_visit_provenance(visit_ids)
 
         cards = []
         for summary in page_summaries:
             cid = summary['effective_concept_id']
-            meas_list = groups.get(cid, [])
+            meas_rows = groups.get(cid, [])
 
             values = []
-            for m in meas_list:
-                unit_str = m.unit_source_value
-                if not unit_str and m.unit_concept:
-                    unit_str = m.unit_concept.concept_code
+            for row in meas_rows:
+                unit_str = row['unit_source_value']
+                if not unit_str and row['unit_concept_code']:
+                    unit_str = row['unit_concept_code']
 
                 type_label = None
-                if m.measurement_type_concept_id:
+                if row['measurement_type_concept_id']:
                     type_label = MEASUREMENT_TYPE_LABELS.get(
-                        m.measurement_type_concept_id,
+                        row['measurement_type_concept_id'],
                     )
-                    if type_label is None and m.measurement_type_concept:
-                        type_label = m.measurement_type_concept.concept_name
+                    if type_label is None and row['type_concept_name']:
+                        type_label = row['type_concept_name']
 
                 lab_name = None
                 report_filename = None
-                if m.visit_occurrence_id:
-                    prov = provenance.get(m.visit_occurrence_id)
+                if row['visit_occurrence_id']:
+                    prov = provenance.get(row['visit_occurrence_id'])
                     if prov:
                         lab_name = prov.get('lab_name')
                         report_filename = prov.get('report_filename')
 
                 values.append({
-                    'measurement_id': m.measurement_id,
-                    'value': m.value_as_number,
-                    'value_string': m.value_as_string,
+                    'measurement_id': row['measurement_id'],
+                    'value': row['value_as_number'],
+                    'value_string': row['value_as_string'],
                     'unit': unit_str,
-                    'status': _compute_status(m.value_as_number, m.range_low, m.range_high),
-                    'measured_at': m.measurement_date,
-                    'range_low': m.range_low,
-                    'range_high': m.range_high,
+                    'status': _compute_status(row['value_as_number'], row['range_low'], row['range_high']),
+                    'measured_at': row['measurement_date'],
+                    'range_low': row['range_low'],
+                    'range_high': row['range_high'],
                     'source': type_label,
                     'lab_name': lab_name,
                     'report_filename': report_filename,
@@ -507,77 +544,35 @@ class MeasurementDetailView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        data = request.data
+        serializer = MeasurementUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        field_map = {
+            'value': 'value_as_number',
+            'value_string': 'value_as_string',
+            'measured_at': 'measurement_date',
+            'range_low': 'range_low',
+            'range_high': 'range_high',
+        }
         updated = False
-
-        if 'value' in data:
-            if data['value'] is None:
-                m.value_as_number = None
-            else:
-                try:
-                    m.value_as_number = Decimal(str(data['value']))
-                except (InvalidOperation, ValueError):
-                    return Response(
-                        {'detail': 'Invalid value.'},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
-            updated = True
-
-        if 'value_string' in data:
-            m.value_as_string = (data['value_string'] or '')[:60]
-            updated = True
-
-        if 'measured_at' in data:
-            from datetime import date as date_type
-            try:
-                if isinstance(data['measured_at'], str):
-                    m.measurement_date = date_type.fromisoformat(data['measured_at'])
-                else:
-                    m.measurement_date = data['measured_at']
-            except (ValueError, TypeError):
-                return Response(
-                    {'detail': 'Invalid measured_at date.'},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-            updated = True
-
-        if 'range_low' in data:
-            if data['range_low'] is None:
-                m.range_low = None
-            else:
-                try:
-                    m.range_low = Decimal(str(data['range_low']))
-                except (InvalidOperation, ValueError):
-                    return Response(
-                        {'detail': 'Invalid range_low.'},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
-            updated = True
-
-        if 'range_high' in data:
-            if data['range_high'] is None:
-                m.range_high = None
-            else:
-                try:
-                    m.range_high = Decimal(str(data['range_high']))
-                except (InvalidOperation, ValueError):
-                    return Response(
-                        {'detail': 'Invalid range_high.'},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
-            updated = True
+        for api_field, model_field in field_map.items():
+            if api_field in data:
+                setattr(m, model_field, data[api_field] if data[api_field] is not None else None)
+                updated = True
 
         if updated:
-            m.save()
-            source = self._provenance_source(request, m.person_id)
-            ProvenanceRecord.objects.create(
-                source=source,
-                source_user_id=f"{getattr(request.user, 'issuer', '')}|{getattr(request.user, 'sub', '')}",
-                target_patient_id=str(m.person_id),
-                modification_reason='measurement_update',
-                content_type=ContentType.objects.get_for_model(Measurement),
-                object_id=measurement_id,
-            )
+            with transaction.atomic():
+                m.save()
+                source = self._provenance_source(request, m.person_id)
+                ProvenanceRecord.objects.create(
+                    source=source,
+                    source_user_id=f"{getattr(request.user, 'issuer', '')}|{getattr(request.user, 'sub', '')}",
+                    target_patient_id=str(m.person_id),
+                    modification_reason='measurement_update',
+                    content_type=ContentType.objects.get_for_model(Measurement),
+                    object_id=measurement_id,
+                )
 
         return Response({'detail': 'Updated.'}, status=status.HTTP_200_OK)
 
@@ -601,15 +596,16 @@ class MeasurementDetailView(APIView):
             )
         person_id = m.person_id
         source = self._provenance_source(request, person_id)
-        ProvenanceRecord.objects.create(
-            source=source,
-            source_user_id=f"{getattr(request.user, 'issuer', '')}|{getattr(request.user, 'sub', '')}",
-            target_patient_id=str(person_id),
-            modification_reason='measurement_delete',
-            content_type=ContentType.objects.get_for_model(Measurement),
-            object_id=measurement_id,
-        )
-        m.delete()
+        with transaction.atomic():
+            ProvenanceRecord.objects.create(
+                source=source,
+                source_user_id=f"{getattr(request.user, 'issuer', '')}|{getattr(request.user, 'sub', '')}",
+                target_patient_id=str(person_id),
+                modification_reason='measurement_delete',
+                content_type=ContentType.objects.get_for_model(Measurement),
+                object_id=measurement_id,
+            )
+            m.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -656,19 +652,20 @@ class VisitDeleteView(APIView):
                     status=status.HTTP_404_NOT_FOUND,
                 )
 
-        ProvenanceRecord.objects.create(
-            source='ADMIN_CORRECTION',
-            source_user_id=f"{getattr(request.user, 'issuer', '')}|{getattr(request.user, 'sub', '')}",
-            target_patient_id=str(visit.person_id),
-            modification_reason='visit_delete',
-            content_type=ContentType.objects.get_for_model(VisitOccurrence),
-            object_id=visit_id,
-        )
+        with transaction.atomic():
+            ProvenanceRecord.objects.create(
+                source='ADMIN_CORRECTION',
+                source_user_id=f"{getattr(request.user, 'issuer', '')}|{getattr(request.user, 'sub', '')}",
+                target_patient_id=str(visit.person_id),
+                modification_reason='visit_delete',
+                content_type=ContentType.objects.get_for_model(VisitOccurrence),
+                object_id=visit_id,
+            )
 
-        meas_count, _ = Measurement.objects.filter(
-            visit_occurrence=visit,
-        ).delete()
-        visit.delete()
+            meas_count, _ = Measurement.objects.filter(
+                visit_occurrence=visit,
+            ).delete()
+            visit.delete()
 
         return Response(
             {'deleted_measurements': meas_count},

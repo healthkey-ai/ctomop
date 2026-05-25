@@ -233,3 +233,27 @@ if not DEBUG:
         csrf_origins.append(render_url)
     
     CSRF_TRUSTED_ORIGINS = csrf_origins
+
+
+# ---------------------------------------------------------------------------
+# Airflow integration
+# ---------------------------------------------------------------------------
+# REST API endpoint of the healthkey-etl Airflow instance and credentials.
+# `upload_fhir` triggers the `fhir_ingest` DAG through
+# `patient_portal.infrastructure.airflow_client`.
+AIRFLOW_URL = os.environ.get('AIRFLOW_URL', '')
+AIRFLOW_USERNAME = os.environ.get('AIRFLOW_USERNAME', '')
+AIRFLOW_PASSWORD = os.environ.get('AIRFLOW_PASSWORD', '')
+
+# ---------------------------------------------------------------------------
+# MyChart / SMART-on-FHIR client (ctomop talks to Epic as an OAuth client).
+EPIC_CLIENT_ID = os.environ.get('EPIC_CLIENT_ID', 'be9a198f-7515-426a-be62-1748297837da')
+EPIC_REDIRECT_URI = os.environ.get('EPIC_REDIRECT_URI', 'http://localhost:3001/redirections/epic')
+EPIC_SCOPES = os.environ.get(
+    'EPIC_SCOPES',
+    'openid profile fhirUser patient/*.read offline_access launch/patient',
+)
+# All Persons created via the MyChart self-service flow land in this Organization.
+MYCHART_TARGET_ORGANIZATION_SLUG = os.environ.get(
+    'MYCHART_TARGET_ORGANIZATION_SLUG', 'mychart-self-service',
+)

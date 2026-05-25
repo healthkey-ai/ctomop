@@ -12,6 +12,7 @@ from .views import (
     # Controlled vocabulary
     vocabulary_list,
 )
+from patient_portal.mychart.views import MyChartViewSet
 
 router = DefaultRouter()
 
@@ -34,6 +35,9 @@ router.register(r'documents', PatientDocumentViewSet, basename='documents')
 
 # Clinical trial enrollment status tracker (trial metadata from EXACT)
 router.register(r'trial-enrollments', PatientTrialEnrollmentViewSet, basename='trial-enrollments')
+
+# MyChart / SMART-on-FHIR OAuth client (Epic)
+router.register(r'mychart', MyChartViewSet, basename='mychart')
 
 urlpatterns = [
     path('', include(router.urls)),

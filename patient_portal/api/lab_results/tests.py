@@ -874,6 +874,173 @@ class OrgScopedSyncRejectionTest(TestCase):
         self.assertIn('Person not in your organization', resp.data['detail'])
 
 
+class FirebaseAuthedSyncTest(TestCase):
+    """Tests for sync endpoint when authenticated via Firebase token (PartnerAuth).
+
+    When request.user is a real Identity (issuer != 'urn:service'), the sync
+    endpoint should resolve the person from request.user directly — not from
+    actor_iss/actor_sub in the payload.
+    """
+
+    def setUp(self):
+        _setup_vocab()
+        self.firebase_user = Identity.objects.get_or_create(
+            issuer='https://securetoken.google.com/healthtree-test',
+            sub='firebase-uid-abc123',
+            defaults={'email': 'patient@example.com'},
+        )[0]
+        self.firebase_user.set_unusable_password()
+        self.firebase_user.save()
+
+        self.person = Person.objects.create(person_id=9001)
+        PatientInfo.objects.create(person=self.person, email='patient@example.com')
+        PatientUser.objects.create(identity=self.firebase_user, person=self.person)
+
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.firebase_user)
+
+    def _sync_payload(self, **overrides):
+        base = {
+            'measurements': [{
+                'test_name': 'Hemoglobin',
+                'loinc_code': '718-7',
+                'value': '14.0',
+                'unit': 'g/dL',
+                'measured_at': '2026-05-15',
+            }],
+            'source_type': 'document_extraction',
+        }
+        base.update(overrides)
+        return base
+
+    def test_firebase_authed_sync_resolves_person_from_request_user(self):
+        resp = self.client.post(
+            '/api/lab-results/sync/', self._sync_payload(), format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        m = Measurement.objects.get(measurement_id=resp.data['measurement_ids'][0])
+        self.assertEqual(m.person_id, self.person.person_id)
+
+    def test_firebase_authed_sync_ignores_actor_fields_in_body(self):
+        resp = self.client.post(
+            '/api/lab-results/sync/',
+            self._sync_payload(
+                actor_iss='urn:different', actor_sub='different-sub',
+            ),
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        m = Measurement.objects.get(measurement_id=resp.data['measurement_ids'][0])
+        self.assertEqual(m.person_id, self.person.person_id)
+
+    def test_firebase_authed_sync_same_person_as_me_endpoint(self):
+        from patient_portal.api.views import PatientInfoViewSet
+        resp = self.client.post(
+            '/api/lab-results/sync/', self._sync_payload(), format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        synced_person_id = Measurement.objects.get(
+            measurement_id=resp.data['measurement_ids'][0],
+        ).person_id
+
+        pu = PatientUser.objects.get(identity=self.firebase_user)
+        self.assertEqual(synced_person_id, pu.person_id)
+
+    def test_firebase_authed_with_explicit_person_id_for_other_person_denied(self):
+        other_person = Person.objects.create(person_id=8888)
+        PatientInfo.objects.create(person=other_person)
+        resp = self.client.post(
+            '/api/lab-results/sync/',
+            self._sync_payload(person_id=other_person.person_id),
+            format='json',
+        )
+        self.assertIn(resp.status_code, [
+            status.HTTP_400_BAD_REQUEST,
+            status.HTTP_403_FORBIDDEN,
+        ])
+
+    def test_firebase_authed_existing_user_no_patientuser_links_via_email(self):
+        new_user = Identity.objects.get_or_create(
+            issuer='https://securetoken.google.com/healthtree-test',
+            sub='firebase-uid-brand-new',
+            defaults={'email': 'emailmatch@example.com'},
+        )[0]
+        new_user.set_unusable_password()
+        new_user.save()
+        person2 = Person.objects.create(person_id=9002)
+        PatientInfo.objects.create(person=person2, email='emailmatch@example.com')
+        self.client.force_authenticate(user=new_user)
+
+        resp = self.client.post(
+            '/api/lab-results/sync/', self._sync_payload(), format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        pu = PatientUser.objects.get(identity=new_user)
+        self.assertEqual(pu.person_id, person2.person_id)
+        m = Measurement.objects.get(measurement_id=resp.data['measurement_ids'][0])
+        self.assertEqual(m.person_id, person2.person_id)
+
+
+class ServiceTokenSyncFallbackTest(TestCase):
+    """Tests that service-token auth still uses actor_iss/actor_sub from payload."""
+
+    def setUp(self):
+        _setup_vocab()
+        self.service_user = Identity.objects.get_or_create(
+            issuer='urn:service', sub='hk-labs-sync',
+        )[0]
+        self.service_user.set_unusable_password()
+        self.service_user.save()
+
+        self.patient = Identity.objects.create_user(
+            email='patient-svc@test.com', password='test',
+        )
+        self.person = Person.objects.create(person_id=9010)
+        PatientInfo.objects.create(person=self.person, email='patient-svc@test.com')
+        PatientUser.objects.create(identity=self.patient, person=self.person)
+
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.service_user)
+
+    def test_service_token_resolves_person_from_actor_fields(self):
+        resp = self.client.post('/api/lab-results/sync/', {
+            'actor_iss': self.patient.issuer,
+            'actor_sub': self.patient.sub,
+            'measurements': [{
+                'test_name': 'WBC', 'loinc_code': '718-7',
+                'value': '7.0', 'unit': 'g/dL', 'measured_at': '2026-05-15',
+            }],
+            'source_type': 'document_extraction',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+    def test_service_token_empty_actor_and_no_person_id_returns_400(self):
+        resp = self.client.post('/api/lab-results/sync/', {
+            'actor_iss': '',
+            'actor_sub': '',
+            'measurements': [{
+                'test_name': 'WBC', 'value': '7.0',
+                'unit': 'K/uL', 'measured_at': '2026-05-15',
+            }],
+            'source_type': 'document_extraction',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_service_token_known_actor_resolves_correctly(self):
+        resp = self.client.post('/api/lab-results/sync/', {
+            'actor_iss': self.patient.issuer,
+            'actor_sub': self.patient.sub,
+            'measurements': [{
+                'test_name': 'WBC', 'loinc_code': '718-7',
+                'value': '7.0', 'unit': 'g/dL', 'measured_at': '2026-05-15',
+            }],
+            'source_type': 'document_extraction',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        m = Measurement.objects.get(measurement_id=resp.data['measurement_ids'][0])
+        self.assertEqual(m.person_id, self.person.person_id)
+
+
 class SyncNonSuperuserTest(TestCase):
     """Test sync endpoint with a non-superuser identity using self-access (PatientUser link)."""
 

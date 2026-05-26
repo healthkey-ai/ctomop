@@ -166,13 +166,9 @@ class SyncView(APIView):
 
     @transaction.atomic
     def post(self, request):
-        import sys
-        logger.info("sync: start")
-        sys.stderr.flush()
         serializer = SyncRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
-        logger.info("sync: validated")
 
         actor_iss = data.get('actor_iss', '')
         actor_sub = data.get('actor_sub', '')
@@ -180,24 +176,24 @@ class SyncView(APIView):
         is_on_behalf_of = bool(person_id)
 
         if not person_id:
-            logger.info("sync: resolving person from identity iss=%s sub=%s", actor_iss, actor_sub[:8])
-            person_id = self._resolve_person_from_identity(actor_iss, actor_sub)
-            logger.info("sync: resolved person_id=%s", person_id)
+            if hasattr(request.user, 'issuer') and request.user.issuer != 'urn:service':
+                from patient_portal.services import resolve_or_create_person
+                person = resolve_or_create_person(request.user)
+                person_id = person.person_id
+            else:
+                person_id = self._resolve_person_from_identity(actor_iss, actor_sub)
             if person_id is None:
                 return Response(
                     {'detail': 'Cannot resolve person from actor identity.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-        logger.info("sync: checking person exists pid=%s", person_id)
         if not Person.objects.filter(person_id=person_id).exists():
             return Response(
                 {'detail': 'Person not found.'},
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        logger.info("sync: person exists, resolving actor identity")
-        # Authorization
         actor_identity = self._resolve_actor_identity(actor_iss, actor_sub, request.user)
         has_explicit_actor = bool(actor_iss and actor_sub)
 
@@ -229,7 +225,6 @@ class SyncView(APIView):
                     status=status.HTTP_403_FORBIDDEN,
                 )
 
-        logger.info("sync: auth done, org=%s", org)
         source_type = data['source_type']
         type_concept_id = (
             PATIENT_SELF_REPORT_CONCEPT_ID
@@ -237,11 +232,8 @@ class SyncView(APIView):
             else DOCUMENT_EXTRACTION_CONCEPT_ID
         )
 
-        logger.info("sync: ensuring concepts")
         visit_concept = _ensure_concept(OUTPATIENT_VISIT_CONCEPT_ID)
-        logger.info("sync: visit_concept=%s", visit_concept)
         type_concept = _ensure_concept(type_concept_id)
-        logger.info("sync: type_concept=%s", type_concept)
         if visit_concept is None or type_concept is None:
             return Response(
                 {'detail': 'Required OMOP concepts not available. Run load_athena_vocabularies.'},
@@ -264,9 +256,7 @@ class SyncView(APIView):
                 for c in Concept.objects.filter(vocabulary_id='UCUM', concept_code__in=unit_codes)
             }
 
-        logger.info("sync: preloading hk concepts")
         hk_concept_cache = self._preload_hk_concepts(items, loinc_cache)
-        logger.info("sync: getting care site")
         care_site = self._get_or_create_care_site(data.get('lab_name'))
         visit = self._create_visit_occurrence(
             person_id=person_id,

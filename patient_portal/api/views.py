@@ -306,16 +306,28 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
     def me(self, request):
         """GET/PATCH /api/patient-info/me/ — current user's own PatientInfo."""
         from patient_portal.models import PatientUser
+        person = None
+        patient_info = None
+
         try:
             patient_user = PatientUser.objects.select_related('person').get(identity=request.user)
+            person = patient_user.person
         except PatientUser.DoesNotExist:
-            return Response({'error': 'No patient record linked to this account'}, status=status.HTTP_404_NOT_FOUND)
+            pass
 
-        person = patient_user.person
-        try:
-            patient_info = PatientInfo.objects.get(person=person)
-        except PatientInfo.DoesNotExist:
-            return Response({'error': 'Patient information not found'}, status=status.HTTP_404_NOT_FOUND)
+        if person is not None:
+            try:
+                patient_info = PatientInfo.objects.get(person=person)
+            except PatientInfo.DoesNotExist:
+                pass
+
+        if patient_info is None and getattr(request.user, 'email', None):
+            patient_info = PatientInfo.objects.filter(email=request.user.email).first()
+            if patient_info is not None:
+                person = patient_info.person
+
+        if patient_info is None:
+            return Response({'error': 'No patient record linked to this account'}, status=status.HTTP_404_NOT_FOUND)
 
         if request.method == 'GET':
             user_serializer = UserSerializer(request.user)

@@ -58,7 +58,8 @@ class GenderField(serializers.CharField):
         return self.CODE_TO_DISPLAY.get(value, 'Unknown')
 
     def to_internal_value(self, data):
-        return self.DISPLAY_TO_CODE.get(data, data)
+        title = str(data).title()
+        return self.DISPLAY_TO_CODE.get(title, data)
 
 
 class PatientInfoSerializer(serializers.ModelSerializer):

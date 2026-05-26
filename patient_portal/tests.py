@@ -2846,7 +2846,7 @@ class PatientInfoOmopSyncTest(_SmartBase):
         person = Person.objects.create(person_id=91020)
         pi = PatientInfo.objects.create(person=person)
 
-        self._patch(pi, {'gender': 'female', 'date_of_birth': '1975-06-15'})
+        self._patch(pi, {'gender': 'Female', 'date_of_birth': '1975-06-15'})
 
         person.refresh_from_db()
         self.assertEqual(person.year_of_birth, 1975)

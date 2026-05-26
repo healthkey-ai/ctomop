@@ -66,7 +66,7 @@ class PatientInfoSerializer(serializers.ModelSerializer):
     person_id = serializers.IntegerField(source='person.person_id', read_only=True)
     patient_name = serializers.SerializerMethodField()
     age = serializers.SerializerMethodField()
-    gender = GenderField(required=False, allow_blank=True)
+    gender = GenderField(required=False, allow_blank=True, allow_null=True)
     refractory_status = serializers.CharField(source='treatment_refractory_status', read_only=True)
 
     class Meta:

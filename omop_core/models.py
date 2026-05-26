@@ -682,7 +682,7 @@ class CareSite(models.Model):
 
 class LoincClass(models.Model):
     """LOINC CLASS → display name mapping from LoincClass.csv (loinc.org archive)."""
-    code = models.CharField(max_length=32, primary_key=True)
+    code = models.CharField(max_length=64, primary_key=True)
     display_name = models.CharField(max_length=128)
 
     class Meta:

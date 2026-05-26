@@ -1,5 +1,6 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useContext } from "react";
 import api from "@/api/axios";
+import { PatientInfoContext } from "@/federation/PatientInfoContext";
 
 export interface VocabOption {
   value: string;
@@ -26,6 +27,8 @@ export const useVocabulary = (
   const cached = cache.get(cacheKey);
   const [options, setOptions] = useState<VocabOption[]>(cached?.options ?? []);
   const [source, setSource] = useState<VocabSource | null>(cached?.source ?? null);
+  const ctx = useContext(PatientInfoContext);
+  const client = ctx?.apiClient ?? api;
   const [loading, setLoading] = useState(!cache.has(cacheKey));
 
   useEffect(() => {
@@ -35,7 +38,7 @@ export const useVocabulary = (
     // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount
     setLoading(true);
 
-    api
+    client
       .get(`/vocabularies/${modelName}/`)
       .then((res) => {
         if (cancelled) return;
@@ -61,7 +64,7 @@ export const useVocabulary = (
     return () => {
       cancelled = true;
     };
-  }, [cacheKey, modelName, valueField]);
+  }, [cacheKey, client, modelName, valueField]);
 
   return { options, loading, source };
 };

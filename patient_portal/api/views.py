@@ -302,6 +302,42 @@ class PatientInfoViewSet(viewsets.ReadOnlyModelViewSet):
         records = ProvenanceRecord.objects.filter(q).select_related('content_type').order_by('-created_at')
         return Response(ProvenanceRecordSerializer(records, many=True).data)
 
+    @action(detail=False, methods=['get', 'patch'], permission_classes=[ScopedTokenPermission])
+    def me(self, request):
+        """GET/PATCH /api/patient-info/me/ — current user's own PatientInfo."""
+        from patient_portal.models import PatientUser
+        try:
+            patient_user = PatientUser.objects.select_related('person').get(identity=request.user)
+        except PatientUser.DoesNotExist:
+            return Response({'error': 'No patient record linked to this account'}, status=status.HTTP_404_NOT_FOUND)
+
+        person = patient_user.person
+        try:
+            patient_info = PatientInfo.objects.get(person=person)
+        except PatientInfo.DoesNotExist:
+            return Response({'error': 'Patient information not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if request.method == 'GET':
+            user_serializer = UserSerializer(request.user)
+            patient_serializer = PatientInfoSerializer(patient_info)
+            return Response({
+                'patient_info': patient_serializer.data,
+                'user': user_serializer.data,
+            })
+
+        # PATCH
+        serializer = PatientInfoSerializer(patient_info, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+
+        changed_fields = set(request.data.keys())
+        try:
+            sync_to_omop(patient_info, changed_fields, changed_data=dict(request.data))
+        except Exception:
+            pass
+
+        return Response(serializer.data)
+
     @action(detail=False, methods=['post'], permission_classes=[ScopedTokenPermission])
     def upload_csv(self, request):
         """Upload patients from CSV file"""

@@ -35,6 +35,7 @@ export default defineConfig(({ mode }) => {
         filename: "remoteEntry.js",
         exposes: {
           "./LabResults": "./src/federation/LabResults.tsx",
+          "./PatientInfo": "./src/federation/PatientInfo.tsx",
           "./types": "./src/federation/types.ts",
         },
         shared: {

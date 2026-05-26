@@ -14,6 +14,7 @@ def next_pk(model, pk_field):
     """Return the next PK value from the table's sequence."""
     seq = _seq_name(model, pk_field)
     with connection.cursor() as cur:
+        cur.execute("SET LOCAL statement_timeout = '5s'")
         cur.execute("SELECT nextval(%s)", [seq])
         return cur.fetchone()[0]
 
@@ -24,6 +25,7 @@ def next_pk_batch(model, pk_field, count):
         return []
     seq = _seq_name(model, pk_field)
     with connection.cursor() as cur:
+        cur.execute("SET LOCAL statement_timeout = '5s'")
         cur.execute(
             "SELECT nextval(%s) FROM generate_series(1, %s)",
             [seq, count],

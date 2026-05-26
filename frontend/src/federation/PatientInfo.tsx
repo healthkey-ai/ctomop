@@ -96,8 +96,8 @@ function PatientInfoInner({ readOnly, onPatientUpdated }: Pick<PatientInfoProps,
     return user ? (user.name || user.email || "Patient") : "Patient";
   }, [data]);
 
-  const [editedInfo, setEditedInfo] = useState<Record<string, unknown>>({});
-  const [editedName, setEditedName] = useState("");
+  const [editedInfo, setEditedInfo] = useState<Record<string, unknown>>(initialInfo);
+  const [editedName, setEditedName] = useState(initialName);
   const [activeTab, setActiveTab] = useState(0);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
 

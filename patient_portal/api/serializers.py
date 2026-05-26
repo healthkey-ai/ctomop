@@ -49,12 +49,23 @@ class PatientListSerializer(serializers.ModelSerializer):
         return None
 
 
+class GenderField(serializers.CharField):
+    """Translates between display values (Male/Female) and DB codes (M/F)."""
+    DISPLAY_TO_CODE = {'Male': 'M', 'Female': 'F', 'Other': '', 'Unknown': ''}
+    CODE_TO_DISPLAY = {'M': 'Male', 'F': 'Female'}
+
+    def to_representation(self, value):
+        return self.CODE_TO_DISPLAY.get(value, 'Unknown')
+
+    def to_internal_value(self, data):
+        return self.DISPLAY_TO_CODE.get(data, data)
+
+
 class PatientInfoSerializer(serializers.ModelSerializer):
-    """Read-only serializer for PatientInfo. All fields are derived from OMOP tables via refresh_patient_info."""
     person_id = serializers.IntegerField(source='person.person_id', read_only=True)
     patient_name = serializers.SerializerMethodField()
     age = serializers.SerializerMethodField()
-    gender = serializers.SerializerMethodField()
+    gender = GenderField(required=False, allow_blank=True)
     refractory_status = serializers.CharField(source='treatment_refractory_status', read_only=True)
 
     class Meta:
@@ -74,17 +85,6 @@ class PatientInfoSerializer(serializers.ModelSerializer):
             age = today.year - obj.date_of_birth.year - ((today.month, today.day) < (obj.date_of_birth.month, obj.date_of_birth.day))
             return age
         return None
-
-    def get_gender(self, obj):
-        if obj.person and obj.person.gender_concept:
-            gender_name = obj.person.gender_concept.concept_name
-            if gender_name == 'MALE':
-                return 'Male'
-            elif gender_name == 'FEMALE':
-                return 'Female'
-            else:
-                return 'Other'
-        return 'Unknown'
 
 # ---------------------------------------------------------------------------
 # OMOP clinical event serializers

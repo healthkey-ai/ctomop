@@ -140,17 +140,26 @@ class Command(BaseCommand):
                 self._log(f'  Cleaned up {filename}.')
 
     def _clear(self):
+        from django.db import connection
         self._log('Clearing existing vocabulary data...')
-        ConceptAncestor.objects.all().delete()
-        self._log('  Cleared concept_ancestor.')
-        ConceptRelationship.objects.all().delete()
-        self._log('  Cleared concept_relationship.')
-        Concept.objects.filter(vocabulary_id__in=VOCAB_SCOPE).delete()
-        self._log('  Cleared concept.')
-        Relationship.objects.all().delete()
-        self._log('  Cleared relationship.')
-        Vocabulary.objects.filter(vocabulary_id__in=VOCAB_SCOPE).delete()
-        self._log('  Cleared vocabulary.')
+        t = time.monotonic()
+        with connection.cursor() as cur:
+            cur.execute('DELETE FROM concept_ancestor')
+            self._log(f'  Cleared concept_ancestor ({cur.rowcount:,} rows, {time.monotonic() - t:.0f}s)')
+            t1 = time.monotonic()
+            cur.execute('DELETE FROM concept_relationship')
+            self._log(f'  Cleared concept_relationship ({cur.rowcount:,} rows, {time.monotonic() - t1:.0f}s)')
+            t1 = time.monotonic()
+            placeholders = ','.join(['%s'] * len(VOCAB_SCOPE))
+            cur.execute(f'DELETE FROM concept WHERE vocabulary_id IN ({placeholders})', list(VOCAB_SCOPE))
+            self._log(f'  Cleared concept ({cur.rowcount:,} rows, {time.monotonic() - t1:.0f}s)')
+            t1 = time.monotonic()
+            cur.execute('DELETE FROM relationship')
+            self._log(f'  Cleared relationship ({cur.rowcount:,} rows, {time.monotonic() - t1:.0f}s)')
+            t1 = time.monotonic()
+            cur.execute(f'DELETE FROM vocabulary WHERE vocabulary_id IN ({placeholders})', list(VOCAB_SCOPE))
+            self._log(f'  Cleared vocabulary ({cur.rowcount:,} rows, {time.monotonic() - t1:.0f}s)')
+        self._log(f'  Clear phase done in {time.monotonic() - t:.0f}s')
 
     def _load_relationships(self, dry_run):
         self._log('Loading relationships...')

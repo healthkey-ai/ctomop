@@ -38,16 +38,18 @@ def _open_tsv(base, filename):
     return open(path, encoding='utf-8', newline='')
 
 
-def _download_gcs_blob(bucket, filename, stdout):
+def _download_gcs_blob(bucket, filename, log):
     blob = bucket.blob(filename)
     if not blob.exists():
         raise CommandError(f'Required blob not found: gs://{bucket.name}/{filename}')
     dest = Path('/tmp/vocab') / filename
     dest.parent.mkdir(parents=True, exist_ok=True)
     size_mb = (blob.size or 0) / 1048576
-    stdout.write(f'  Downloading {filename} ({size_mb:.0f}MB)...')
+    log(f'  Downloading {filename} ({size_mb:.0f}MB)...')
+    t = time.monotonic()
     blob.download_to_filename(str(dest))
-    stdout.write(f'  Downloaded {filename}.')
+    elapsed = time.monotonic() - t
+    log(f'  Downloaded {filename} in {elapsed:.0f}s.')
     return open(dest, encoding='utf-8', newline='')
 
 
@@ -95,7 +97,7 @@ class Command(BaseCommand):
         if bucket_name:
             from google.cloud import storage as gcs
             self._gcs_bucket = gcs.Client().bucket(bucket_name)
-            self.stdout.write(f'Loading from gs://{bucket_name}/ (download-one-process-delete)')
+            self._log(f'Loading from gs://{bucket_name}/ (download-one-process-delete)')
 
         t0 = time.monotonic()
 
@@ -103,7 +105,6 @@ class Command(BaseCommand):
 
         if replace and not dry_run:
             self._clear()
-            self.stdout.write('Cleared existing vocabulary data.')
 
         counts = {
             'relationship':         self._load_relationships(dry_run),
@@ -119,12 +120,16 @@ class Command(BaseCommand):
         }
         verb = 'would load' if dry_run else 'loaded'
         for table, n in counts.items():
-            self.stdout.write(f'  {table}: {n} rows {verb}')
-        self.stdout.write(f'Done in {time.monotonic() - t0:.1f}s')
+            self._log(f'  {table}: {n:,} rows {verb}')
+        self._log(f'Done in {time.monotonic() - t0:.0f}s')
+
+    def _log(self, msg):
+        self.stdout.write(msg)
+        self.stdout.flush()
 
     def _open(self, filename):
         if self._gcs_bucket:
-            return _download_gcs_blob(self._gcs_bucket, filename, self.stdout)
+            return _download_gcs_blob(self._gcs_bucket, filename, self._log)
         return _open_tsv(self._base, filename)
 
     def _cleanup(self, filename):
@@ -132,16 +137,23 @@ class Command(BaseCommand):
             tmp = Path('/tmp/vocab') / filename
             if tmp.exists():
                 tmp.unlink()
-                self.stdout.write(f'  Cleaned up {filename}.')
+                self._log(f'  Cleaned up {filename}.')
 
     def _clear(self):
+        self._log('Clearing existing vocabulary data...')
         ConceptAncestor.objects.all().delete()
+        self._log('  Cleared concept_ancestor.')
         ConceptRelationship.objects.all().delete()
+        self._log('  Cleared concept_relationship.')
         Concept.objects.filter(vocabulary_id__in=VOCAB_SCOPE).delete()
+        self._log('  Cleared concept.')
         Relationship.objects.all().delete()
+        self._log('  Cleared relationship.')
         Vocabulary.objects.filter(vocabulary_id__in=VOCAB_SCOPE).delete()
+        self._log('  Cleared vocabulary.')
 
     def _load_relationships(self, dry_run):
+        self._log('Loading relationships...')
         count = 0
         batch = []
         with self._open('RELATIONSHIP.csv') as f:
@@ -156,7 +168,7 @@ class Command(BaseCommand):
                         relationship_concept_id=int(row['relationship_concept_id'] or 0),
                     )
                 except (ValueError, KeyError) as exc:
-                    self.stderr.write(f'Warning: skipping malformed relationship row: {exc}')
+                    self._log(f'Warning: skipping malformed relationship row: {exc}')
                     continue
                 count += 1
                 if not dry_run:
@@ -194,12 +206,15 @@ class Command(BaseCommand):
 
     def _load_small(self, filename, dry_run, row_fn):
         """Generic loader for small lookup tables (Vocabulary, Domain, ConceptClass)."""
+        self._log(f'Loading {filename}...')
+        t = time.monotonic()
         count = 0
         batch = []
         model = None
         try:
             f = self._open(filename)
         except CommandError:
+            self._log(f'  {filename} not found, skipping.')
             return 0
         with f:
             for row in csv.DictReader(f, delimiter='\t'):
@@ -216,10 +231,12 @@ class Command(BaseCommand):
                 count += 1
         if model and batch and not dry_run:
             model.objects.bulk_create(batch, ignore_conflicts=True)
+        self._cleanup(filename)
+        self._log(f'  {filename}: {count:,} rows loaded in {time.monotonic() - t:.0f}s')
         return count
 
     def _load_concepts(self, dry_run):
-        self.stdout.write('Loading concepts...')
+        self._log('Loading CONCEPT.csv...')
         t = time.monotonic()
         count = 0
         scanned = 0
@@ -228,7 +245,7 @@ class Command(BaseCommand):
             for row in csv.DictReader(f, delimiter='\t'):
                 scanned += 1
                 if scanned % PROGRESS_EVERY == 0:
-                    self.stdout.write(f'  concepts: scanned {scanned:,} rows, {count:,} in scope...')
+                    self._log(f'  concepts: scanned {scanned:,} rows, {count:,} in scope...')
                 if not _concept_in_scope(row):
                     continue
                 try:
@@ -236,7 +253,7 @@ class Command(BaseCommand):
                     start = _parse_date(row['valid_start_date'])
                     end = _parse_date(row['valid_end_date'])
                 except (ValueError, KeyError) as exc:
-                    self.stderr.write(f'Warning: skipping malformed concept row: {exc}')
+                    self._log(f'Warning: skipping malformed concept row: {exc}')
                     continue
                 count += 1
                 if not dry_run:
@@ -257,17 +274,17 @@ class Command(BaseCommand):
                         batch = []
         _bulk(Concept, batch, dry_run)
         self._cleanup('CONCEPT.csv')
-        self.stdout.write(f'  concepts: {count:,} loaded from {scanned:,} rows in {time.monotonic() - t:.0f}s')
+        self._log(f'  concepts: {count:,} loaded from {scanned:,} rows in {time.monotonic() - t:.0f}s')
         return count
 
     def _load_concept_relationships(self, dry_run):
-        self.stdout.write('Loading concept relationships...')
+        self._log('Loading CONCEPT_RELATIONSHIP.csv...')
         t = time.monotonic()
         loaded_ids = set(
             Concept.objects.filter(vocabulary_id__in=VOCAB_SCOPE)
                            .values_list('concept_id', flat=True)
         )
-        self.stdout.write(f'  {len(loaded_ids):,} concept IDs in filter set')
+        self._log(f'  {len(loaded_ids):,} concept IDs in filter set')
         count = 0
         scanned = 0
         batch = []
@@ -275,7 +292,7 @@ class Command(BaseCommand):
             for row in csv.DictReader(f, delimiter='\t'):
                 scanned += 1
                 if scanned % PROGRESS_EVERY == 0:
-                    self.stdout.write(f'  relationships: scanned {scanned:,} rows, {count:,} matched...')
+                    self._log(f'  relationships: scanned {scanned:,} rows, {count:,} matched...')
                 try:
                     c1 = int(row['concept_id_1'])
                     c2 = int(row['concept_id_2'])
@@ -298,17 +315,17 @@ class Command(BaseCommand):
                         batch = []
         _bulk(ConceptRelationship, batch, dry_run)
         self._cleanup('CONCEPT_RELATIONSHIP.csv')
-        self.stdout.write(f'  relationships: {count:,} loaded from {scanned:,} rows in {time.monotonic() - t:.0f}s')
+        self._log(f'  relationships: {count:,} loaded from {scanned:,} rows in {time.monotonic() - t:.0f}s')
         return count
 
     def _load_concept_ancestors(self, dry_run):
-        self.stdout.write('Loading concept ancestors...')
+        self._log('Loading CONCEPT_ANCESTOR.csv...')
         t = time.monotonic()
         hemonc_ids = set(
             Concept.objects.filter(vocabulary_id='HemOnc')
                            .values_list('concept_id', flat=True)
         )
-        self.stdout.write(f'  {len(hemonc_ids):,} HemOnc IDs in filter set')
+        self._log(f'  {len(hemonc_ids):,} HemOnc IDs in filter set')
         count = 0
         scanned = 0
         batch = []
@@ -316,7 +333,7 @@ class Command(BaseCommand):
             for row in csv.DictReader(f, delimiter='\t'):
                 scanned += 1
                 if scanned % PROGRESS_EVERY == 0:
-                    self.stdout.write(f'  ancestors: scanned {scanned:,} rows, {count:,} matched...')
+                    self._log(f'  ancestors: scanned {scanned:,} rows, {count:,} matched...')
                 try:
                     anc = int(row['ancestor_concept_id'])
                     desc = int(row['descendant_concept_id'])
@@ -342,5 +359,5 @@ class Command(BaseCommand):
                         batch = []
         _bulk(ConceptAncestor, batch, dry_run)
         self._cleanup('CONCEPT_ANCESTOR.csv')
-        self.stdout.write(f'  ancestors: {count:,} loaded from {scanned:,} rows in {time.monotonic() - t:.0f}s')
+        self._log(f'  ancestors: {count:,} loaded from {scanned:,} rows in {time.monotonic() - t:.0f}s')
         return count

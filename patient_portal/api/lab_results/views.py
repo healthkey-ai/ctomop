@@ -9,7 +9,8 @@ from rest_framework.views import APIView
 
 from omop_core.models import (
     CareSite, Concept, LoincClass, LoincCodeClass,
-    Measurement, PatientInfo, ProvenanceRecord, VisitOccurrence,
+    Measurement, MeasurementOwnership, PatientInfo,
+    ProvenanceRecord, VisitOccurrence,
 )
 from patient_portal.api.permissions import ScopedTokenPermission, get_request_org
 
@@ -433,6 +434,7 @@ class ValuesView(APIView):
         page = paginator.paginate_queryset(measurements, request)
 
         provenance = self._load_provenance(page)
+        ownership_map = self._load_ownership(page, provenance)
         values = []
         for m in page:
             unit_str = m.unit_source_value
@@ -446,6 +448,7 @@ class ValuesView(APIView):
                     type_label = m.measurement_type_concept.concept_name
 
             prov = provenance.get(m.visit_occurrence_id, {})
+            uploads = ownership_map.get(m.measurement_id, [])
             values.append({
                 'measurement_id': m.measurement_id,
                 'value': m.value_as_number,
@@ -458,6 +461,7 @@ class ValuesView(APIView):
                 'source': type_label,
                 'lab_name': prov.get('lab_name'),
                 'report_filename': prov.get('report_filename'),
+                'uploads': uploads,
             })
 
         original_name = None
@@ -479,6 +483,40 @@ class ValuesView(APIView):
     def _load_provenance(self, measurements):
         visit_ids = {m.visit_occurrence_id for m in measurements if m.visit_occurrence_id}
         return _load_visit_provenance(visit_ids)
+
+    @staticmethod
+    def _load_ownership(measurements, existing_provenance):
+        """Return {measurement_id: [{lab_name, report_filename}, ...]} for all owning visits."""
+        m_ids = [m.measurement_id for m in measurements]
+        if not m_ids:
+            return {}
+
+        ownership_rows = MeasurementOwnership.objects.filter(
+            measurement_id__in=m_ids,
+        ).values_list('measurement_id', 'visit_occurrence_id')
+
+        extra_visit_ids = set()
+        m_to_visits = defaultdict(list)
+        for m_id, v_id in ownership_rows:
+            m_to_visits[m_id].append(v_id)
+            if v_id not in existing_provenance:
+                extra_visit_ids.add(v_id)
+
+        all_provenance = dict(existing_provenance)
+        if extra_visit_ids:
+            all_provenance.update(_load_visit_provenance(extra_visit_ids))
+
+        result = {}
+        for m_id, visit_ids in m_to_visits.items():
+            uploads = []
+            for v_id in visit_ids:
+                prov = all_provenance.get(v_id, {})
+                uploads.append({
+                    'lab_name': prov.get('lab_name'),
+                    'report_filename': prov.get('report_filename'),
+                })
+            result[m_id] = uploads
+        return result
 
 
 class MeasurementDetailView(APIView):
@@ -680,12 +718,35 @@ class VisitDeleteView(APIView):
                 object_id=visit_id,
             )
 
-            meas_count, _ = Measurement.objects.filter(
-                visit_occurrence=visit,
-            ).delete()
+            # Ownership-aware delete: only remove measurements with no remaining owners
+            owned_ids = list(
+                MeasurementOwnership.objects.filter(
+                    visit_occurrence_id=visit_id,
+                ).values_list('measurement_id', flat=True)
+            )
+            MeasurementOwnership.objects.filter(visit_occurrence_id=visit_id).delete()
+
+            if owned_ids:
+                still_owned = set(
+                    MeasurementOwnership.objects.filter(
+                        measurement_id__in=owned_ids,
+                    ).values_list('measurement_id', flat=True)
+                )
+                orphaned = [m_id for m_id in owned_ids if m_id not in still_owned]
+                if orphaned:
+                    Measurement.objects.filter(measurement_id__in=orphaned).delete()
+            else:
+                # Fallback for measurements created before ownership tracking
+                orphaned = list(
+                    Measurement.objects.filter(
+                        visit_occurrence=visit,
+                    ).values_list('measurement_id', flat=True)
+                )
+                Measurement.objects.filter(measurement_id__in=orphaned).delete()
+
             visit.delete()
 
         return Response(
-            {'deleted_measurements': meas_count},
+            {'deleted_measurements': len(orphaned)},
             status=status.HTTP_200_OK,
         )

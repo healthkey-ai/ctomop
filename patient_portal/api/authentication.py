@@ -4,11 +4,17 @@ PartnerAuthentication delegates to pluggable token providers configured
 in PARTNER_AUTH_PROVIDERS.  Each provider first gets a lightweight
 can_handle() check (unverified JWT payload inspection — no secrets,
 no external calls) before the real verify() is invoked.
+
+Verified tokens are cached for up to 60 seconds so repeated requests
+with the same Bearer token skip provider.verify() and DB lookups.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 
+from django.conf import settings
+from django.core.cache import cache as django_cache
 from rest_framework.authentication import BaseAuthentication, SessionAuthentication
 from rest_framework.exceptions import AuthenticationFailed
 
@@ -20,6 +26,11 @@ from .providers.base import TokenClaims, decode_jwt_unverified
 logger = logging.getLogger(__name__)
 
 
+def _token_cache_key(token: str) -> str:
+    digest = hashlib.sha256(token.encode()).hexdigest()[:32]
+    return f"auth:partner:{digest}"
+
+
 class PartnerAuthentication(BaseAuthentication):
 
     def authenticate(self, request):
@@ -28,6 +39,11 @@ class PartnerAuthentication(BaseAuthentication):
             return None
 
         token = header[7:]
+
+        cached = self._from_cache(token)
+        if cached is not None:
+            return cached
+
         providers = get_providers()
         if not providers:
             return None
@@ -54,9 +70,39 @@ class PartnerAuthentication(BaseAuthentication):
 
             identity = self._get_or_create_identity(claims)
             _ensure_person(identity, claims)
+            self._to_cache(token, identity.pk, claims)
             return (identity, claims)
 
         return None
+
+    @staticmethod
+    def _from_cache(token: str):
+        data = django_cache.get(_token_cache_key(token))
+        if data is None:
+            return None
+        try:
+            identity = Identity.objects.get(pk=data["pk"])
+        except Identity.DoesNotExist:
+            return None
+        claims = TokenClaims(**data["claims"])
+        return (identity, claims)
+
+    @staticmethod
+    def _to_cache(token: str, identity_pk: int, claims: TokenClaims):
+        django_cache.set(
+            _token_cache_key(token),
+            {
+                "pk": identity_pk,
+                "claims": {
+                    "issuer": claims.issuer,
+                    "sub": claims.sub,
+                    "email": claims.email,
+                    "name": claims.name,
+                    "raw": claims.raw,
+                },
+            },
+            timeout=settings.AUTH_TOKEN_CACHE_TTL,
+        )
 
     def authenticate_header(self, request):
         return "Bearer"
@@ -92,7 +138,6 @@ class ServiceTokenAuthentication(BaseAuthentication):
 
     def authenticate(self, request):
         import hmac
-        from django.conf import settings
 
         secret = getattr(settings, "SERVICE_AUTH_TOKEN", "").strip()
         if not secret:

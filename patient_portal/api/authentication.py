@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import logging
 
+from django.conf import settings
 from django.core.cache import cache as django_cache
 from rest_framework.authentication import BaseAuthentication, SessionAuthentication
 from rest_framework.exceptions import AuthenticationFailed
@@ -23,8 +24,6 @@ from .providers import get_providers
 from .providers.base import TokenClaims, decode_jwt_unverified
 
 logger = logging.getLogger(__name__)
-
-_AUTH_CACHE_TTL = 60
 
 
 def _token_cache_key(token: str) -> str:
@@ -102,7 +101,7 @@ class PartnerAuthentication(BaseAuthentication):
                     "raw": claims.raw,
                 },
             },
-            timeout=_AUTH_CACHE_TTL,
+            timeout=settings.AUTH_TOKEN_CACHE_TTL,
         )
 
     def authenticate_header(self, request):
@@ -139,7 +138,6 @@ class ServiceTokenAuthentication(BaseAuthentication):
 
     def authenticate(self, request):
         import hmac
-        from django.conf import settings
 
         secret = getattr(settings, "SERVICE_AUTH_TOKEN", "").strip()
         if not secret:

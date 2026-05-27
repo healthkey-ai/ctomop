@@ -182,13 +182,7 @@ SELECT
     c.concept_code,
     c.concept_name,
     c.vocabulary_id,
-    COALESCE(
-        lc.display_name,
-        CASE WHEN c.vocabulary_id IN ('LOINC', 'HK-Labs')
-             THEN 'Uncategorized'
-             ELSE 'Other'
-        END
-    ) AS category
+    COALESCE(lc.display_name, 'Other') AS category
 FROM eff
 JOIN concept c ON c.concept_id = eff.eff_id
 LEFT JOIN loinc_code_class lcc
@@ -197,14 +191,11 @@ LEFT JOIN loinc_code_class lcc
 LEFT JOIN loinc_class lc
        ON lc.code = lcc.loinc_class_code
 GROUP BY eff.eff_id, c.concept_code, c.concept_name, c.vocabulary_id,
-         COALESCE(
-             lc.display_name,
-             CASE WHEN c.vocabulary_id IN ('LOINC', 'HK-Labs')
-                  THEN 'Uncategorized'
-                  ELSE 'Other'
-             END
-         )
-ORDER BY category, latest_date DESC
+         COALESCE(lc.display_name, 'Other')
+ORDER BY CASE WHEN COALESCE(lc.display_name, 'Other') = 'Other'
+              THEN 1 ELSE 0 END,
+         COALESCE(lc.display_name, 'Other'),
+         latest_date DESC
 """
 
 
@@ -419,9 +410,9 @@ class ValuesView(APIView):
 
         category_cache = _build_category_cache()
         if concept.vocabulary_id == 'LOINC':
-            category = category_cache.get(concept.concept_code, 'Uncategorized')
+            category = category_cache.get(concept.concept_code, 'Other')
         elif concept.vocabulary_id == 'HK-Labs':
-            category = 'Uncategorized'
+            category = 'Other'
         else:
             category = 'Other'
 

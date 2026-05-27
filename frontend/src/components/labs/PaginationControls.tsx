@@ -53,7 +53,7 @@ export function PaginationControls({
   const availableSizes = (pageSizes ?? DEFAULT_PAGE_SIZES).filter(isValidPageSize);
 
   return (
-    <div className="flex flex-col items-center gap-3 text-sm text-muted-foreground sm:flex-row sm:justify-between">
+    <div className="flex flex-wrap items-center justify-between gap-3 text-sm text-muted-foreground">
       <span>
         {totalCount === 0
           ? "No results"

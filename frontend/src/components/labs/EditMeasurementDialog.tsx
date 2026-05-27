@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Button } from "@/components/ui-labs/button";
 import {
   Dialog,
@@ -37,18 +37,17 @@ export function EditMeasurementDialog({
   const [rangeLow, setRangeLow] = useState("");
   const [rangeHigh, setRangeHigh] = useState("");
 
-  const isQualitative = measurement?.value == null && measurement?.value_string != null;
-
-  const handleOpen = (next: boolean) => {
-    if (next && measurement) {
+  useEffect(() => {
+    if (measurement) {
       setValue(measurement.value != null ? String(Number(measurement.value)) : "");
       setValueString(measurement.value_string ?? "");
       setMeasuredAt(measurement.measured_at ?? "");
       setRangeLow(measurement.range_low != null ? String(Number(measurement.range_low)) : "");
       setRangeHigh(measurement.range_high != null ? String(Number(measurement.range_high)) : "");
     }
-    onOpenChange(next);
-  };
+  }, [measurement]);
+
+  const isQualitative = measurement?.value == null && measurement?.value_string != null;
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -65,7 +64,7 @@ export function EditMeasurementDialog({
   };
 
   return (
-    <Dialog open={open} onOpenChange={handleOpen}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-sm">
         <DialogHeader>
           <DialogTitle>Edit measurement</DialogTitle>

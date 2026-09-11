@@ -4,21 +4,23 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_production_uses_bounded_database_preparation_before_gunicorn():
+def test_production_runs_migrations_before_gunicorn_without_loading_vocabularies():
     script = (ROOT / 'start.sh').read_text()
 
-    preparation = 'python manage.py prepare_production_database --gdrive'
+    migration = 'python manage.py migrate --noinput'
     gunicorn = 'exec gunicorn ctomop.wsgi:application'
 
     assert 'python manage.py seed_omop_concepts' not in script
     assert 'python manage.py load_athena_vocabularies' not in script
-    assert preparation in script
-    assert script.index(preparation) < script.index(gunicorn)
-    assert 'ATHENA_VOCABULARY_GDRIVE_URL' in script
+    # Vocabulary preparation is an explicit management operation, not a
+    # prerequisite for every web restart (see the start.sh contract in #1124).
+    assert 'python manage.py prepare_production_database' not in script
+    assert migration in script
+    assert script.index(migration) < script.index(gunicorn)
 
 
-def test_render_requires_the_athena_source_for_the_web_service():
+def test_render_web_service_uses_the_tested_startup_script():
     blueprint = (ROOT / 'render.yaml').read_text()
 
     web_service = blueprint.split('  - type: worker', 1)[0]
-    assert '- key: ATHENA_VOCABULARY_GDRIVE_URL' in web_service
+    assert 'startCommand: "chmod +x start.sh && ./start.sh"' in web_service

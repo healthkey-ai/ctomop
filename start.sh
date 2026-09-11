@@ -16,23 +16,9 @@ set -e
 echo "Running production deploy checks..."
 python manage.py check --deploy --fail-level ERROR
 
-# Migration 0201 seeds curated HK-Labs text -> LOINC mappings. Its targets are
-# Athena concepts, so it must never run against an empty/partial vocabulary.
-# Bring the schema to the migration immediately before it, load the complete
-# Athena release, then apply 0201 and every later migration. This deliberately
-# replaces the retired seed_omop_concepts command: production must use Athena
-# as the single source of truth for standard concepts.
-echo "Preparing the schema for the Athena vocabulary load..."
-python manage.py migrate omop_core 0200 --noinput
-
 : "${ATHENA_VOCABULARY_GDRIVE_URL:?ATHENA_VOCABULARY_GDRIVE_URL must point to the full Athena vocabulary folder before this service can deploy}"
-echo "Loading the full Athena vocabulary before remaining migrations..."
-# Run the optional UMLS full-release cache/import as separate maintenance;
-# downloading it here can exhaust the web instance's temporary filesystem.
-python manage.py load_athena_vocabularies --gdrive "$ATHENA_VOCABULARY_GDRIVE_URL" --skip-umls-cache
-
-echo "Applying migrations that require the Athena vocabulary..."
-python manage.py migrate --noinput
+echo "Preparing the production database..."
+python manage.py prepare_production_database --gdrive "$ATHENA_VOCABULARY_GDRIVE_URL"
 
 echo "Creating/resetting admin user..."
 python manage.py setup_admin

@@ -30,11 +30,19 @@ partial downloads are removed when the command exits, including on errors.
 Local `--archive` inputs remain intact. Python's `TMPDIR` can point scratch
 downloads at a separately mounted directory when needed.
 
-Web startup passes `--skip-umls-cache`: the optional UMLS full-release download
-and import must run as separate maintenance, rather than competing for temporary
-space during the Athena bootstrap. This does not skip any Athena tables or
-change the existing clinical vocabulary scope. Gunicorn still starts after the
-load and migrations complete; Render may report no open ports during that work.
+Web startup runs `prepare_production_database`. If migration 0201 is pending, it
+first checks whether all LOINC concepts that migration resolves already exist.
+Only when some are absent does it download Athena and scan `CONCEPT.csv`; this
+bounded mode inserts exactly the required concepts and verifies the complete set
+before applying 0201. It skips the relationship tables, release publication,
+code-mapping artifact, and optional UMLS cache. After 0201 is recorded, later
+deploys skip Athena entirely and apply ordinary migrations before Gunicorn.
+
+The complete Athena vocabulary is loaded as a separate maintenance operation.
+That bulk import is too large for Render's 15-minute web start command and may
+also exceed its 30-minute pre-deploy command. The migration bootstrap is not a
+substitute for that maintenance load; it exists only to satisfy 0201 safely and
+let the web process bind within Render's deadline.
 
 Render references: [Blueprint environment variables](https://render.com/docs/blueprint-spec#setting-environment-variables)
 and [default environment variables](https://render.com/docs/environment-variables).

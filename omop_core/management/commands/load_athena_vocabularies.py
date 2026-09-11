@@ -1,5 +1,6 @@
 import csv
 import hashlib
+import importlib
 import io
 import json
 import os
@@ -375,6 +376,15 @@ def _concept_in_scope(vid, concept_code, concept_class_id, domain_id):
     return True
 
 
+def required_hklabs_loinc_codes():
+    """Return the exact LOINC code set migration 0201 resolves."""
+    migration = importlib.import_module('omop_core.migrations.0201_seed_hklabs_sccm')
+    codes = {code for _, code, _ in migration._LOINC_COMMON}
+    codes.update(migration._CATALOG_LOINC.values())
+    codes.update(code for _, code in migration._CURATED_ALIASES)
+    return frozenset(codes)
+
+
 def _copy_rows(table, columns, rows, log, direct=False):
     """COPY rows into table. direct=True skips the conflict-tolerant temp table."""
     if not rows:
@@ -440,6 +450,11 @@ class Command(BaseCommand):
                             ))
         parser.add_argument('--skip-umls-cache', action='store_true',
                             help='Skip optional UMLS archive caching even when UMLS_API_KEY is set.')
+        parser.add_argument('--migration-bootstrap', action='store_true', help=(
+            'Load only the LOINC concepts required by migration 0201, verify '
+            'all are present, and stop before release publication. Intended '
+            'only for the bounded production migration bootstrap.'
+        ))
 
     def handle(self, *args, **options):
         # Own only this invocation's downloads; clean partial files on failures
@@ -455,8 +470,16 @@ class Command(BaseCommand):
         gdrive_url = options['gdrive']
         replace = options['replace']
         dry_run = options['dry_run']
+        migration_bootstrap = options.get('migration_bootstrap', False)
         skip_clinical_vocabulary_verification = options['skip_clinical_vocabulary_verification']
         self._umls_release = None
+
+        if migration_bootstrap and (replace or dry_run):
+            raise CommandError('--migration-bootstrap cannot be combined with --replace or --dry-run')
+        self._concept_code_scope = required_hklabs_loinc_codes() if migration_bootstrap else None
+        if migration_bootstrap:
+            options['concepts_only'] = True
+            options['skip_umls_cache'] = True
 
         sources = [bool(base), bool(archive), bool(bucket_name), bool(gdrive_url)]
         if sum(sources) != 1:
@@ -535,6 +558,13 @@ class Command(BaseCommand):
             })
         if not dry_run:
             self._seed_concept_zero()
+            if migration_bootstrap:
+                self._verify_migration_bootstrap_concepts()
+                self._log(
+                    '  Migration bootstrap complete; skipping full Athena release publication. '
+                    'Run the ordinary loader separately to finish the full vocabulary.'
+                )
+                return
             if replace:
                 self._remove_stale_concepts()
             self._sync_cdm_source_metadata()
@@ -592,6 +622,21 @@ class Command(BaseCommand):
             '  verified required clinical vocabularies: ' +
             ', '.join(f'{vid} ({counts[vid]:,})' for vid in sorted(counts))
         )
+
+    def _verify_migration_bootstrap_concepts(self):
+        required = required_hklabs_loinc_codes()
+        loaded = set(
+            Concept.objects.filter(
+                vocabulary_id='LOINC', concept_code__in=required,
+            ).values_list('concept_code', flat=True)
+        )
+        missing = sorted(required - loaded)
+        if missing:
+            raise CommandError(
+                'Athena archive is missing LOINC concepts required by migration 0201: '
+                + ', '.join(missing)
+            )
+        self._log(f'  verified all {len(required):,} migration-required LOINC concepts')
 
     def _open(self, filename):
         if self._gcs_bucket:
@@ -986,7 +1031,13 @@ class Command(BaseCommand):
                 if scanned % PROGRESS_EVERY == 0:
                     self._log(f'  concepts: scanned {scanned:,}, {count:,} in scope ({time.monotonic() - t:.0f}s)...')
                 vid = cols[i_vocab]
-                if not _concept_in_scope(vid, cols[i_code], cols[i_class], cols[i_domain]):
+                code = cols[i_code]
+                concept_code_scope = getattr(self, '_concept_code_scope', None)
+                if concept_code_scope is not None:
+                    in_scope = vid == 'LOINC' and code in concept_code_scope
+                else:
+                    in_scope = _concept_in_scope(vid, code, cols[i_class], cols[i_domain])
+                if not in_scope:
                     continue
                 try:
                     concept_id = int(cols[i_id])

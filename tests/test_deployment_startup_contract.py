@@ -4,24 +4,17 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_production_loads_athena_before_mappings_that_depend_on_it():
-    """Keep migration 0201 from ever seeding null-target LOINC mappings."""
+def test_production_uses_bounded_database_preparation_before_gunicorn():
     script = (ROOT / 'start.sh').read_text()
 
-    baseline_migration = 'python manage.py migrate omop_core 0200 --noinput'
-    vocabulary_load = 'python manage.py load_athena_vocabularies --gdrive'
-    remaining_migrations = 'python manage.py migrate --noinput'
+    preparation = 'python manage.py prepare_production_database --gdrive'
+    gunicorn = 'exec gunicorn ctomop.wsgi:application'
 
     assert 'python manage.py seed_omop_concepts' not in script
-    assert baseline_migration in script
-    assert vocabulary_load in script
-    assert remaining_migrations in script
-    assert script.index(baseline_migration) < script.index(vocabulary_load)
-    assert script.index(vocabulary_load) < script.index(remaining_migrations)
+    assert 'python manage.py load_athena_vocabularies' not in script
+    assert preparation in script
+    assert script.index(preparation) < script.index(gunicorn)
     assert 'ATHENA_VOCABULARY_GDRIVE_URL' in script
-    vocabulary_command = next(line for line in script.splitlines() if line.startswith(vocabulary_load))
-    assert '--skip-umls-cache' in vocabulary_command
-    assert '--concepts-only' not in vocabulary_command
 
 
 def test_render_requires_the_athena_source_for_the_web_service():

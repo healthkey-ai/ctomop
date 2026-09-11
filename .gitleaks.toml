@@ -27,6 +27,19 @@
 [extend]
 useDefault = true
 
+# The catalog identifier also appears in the handoff's historical scan report.
+# Match only this non-secret value in these files, including past commits.
+[[allowlists]]
+description = "BCL2 amplification genomic marker identifier"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+regexes = ['''^bcl2_amplification$''']
+paths = [
+  '''^omop_core/data/genomics_catalog_v1\.json$''',
+  '''^docs/genomics_handoff\.md$''',
+]
+
 # Applies to every rule.
 [[allowlists]]
 description = "Documented non-secrets and machine-generated hashes"

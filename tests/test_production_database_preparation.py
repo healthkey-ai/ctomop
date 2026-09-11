@@ -84,18 +84,19 @@ def test_migration_bootstrap_scans_archive_but_inserts_only_required_concepts(
 
 
 @pytest.mark.django_db
-def test_migration_bootstrap_fails_if_archive_omits_a_required_code(tmp_path, monkeypatch):
+def test_migration_bootstrap_allows_archive_to_omit_historical_code(tmp_path, monkeypatch):
     archive = tmp_path / 'athena.zip'
     _bootstrap_archive(archive)
     monkeypatch.setattr(
         loader, 'required_hklabs_loinc_codes',
         lambda: frozenset({'REQUIRED-TEST', 'MISSING-TEST'}),
     )
-    with pytest.raises(CommandError, match='MISSING-TEST'):
-        call_command(
-            'load_athena_vocabularies', archive=str(archive),
-            migration_bootstrap=True, stdout=StringIO(),
-        )
+    output = StringIO()
+    call_command(
+        'load_athena_vocabularies', archive=str(archive),
+        migration_bootstrap=True, stdout=output,
+    )
+    assert 'MISSING-TEST' in output.getvalue()
 
 
 @pytest.mark.django_db

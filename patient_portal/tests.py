@@ -10969,6 +10969,19 @@ class ServiceTokenOmopAccessTest(TestCase):
         SERVICE_AUTH_TOKEN='test-service-secret',
         SERVICE_AUTH_SCOPES='patient/*.read system/etl.write',
     )
+    def test_etl_grant_can_refresh_patient_record(self):
+        """system/etl.write must be able to POST /refresh/ (#1170)."""
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION='Bearer test-service-secret')
+        response = client.post(
+            f'/api/v1/patient-records/{self.person_a.person_id}/refresh/')
+        self.assertEqual(response.status_code, 202, response.data)
+        self.assertIn('task_id', response.data)
+
+    @override_settings(
+        SERVICE_AUTH_TOKEN='test-service-secret',
+        SERVICE_AUTH_SCOPES='patient/*.read system/etl.write',
+    )
     def test_etl_capability_is_not_a_general_write_grant(self):
         client = APIClient()
         client.credentials(HTTP_AUTHORIZATION='Bearer test-service-secret')
@@ -26557,6 +26570,23 @@ class PatientSelfEditProfileTest(TestCase):
         self.assertEqual(self.person.month_of_birth, 3)
         self.assertEqual(self.person.day_of_birth, 15)
 
+    def test_patient_can_correct_date_of_birth(self):
+        client = self._client()
+        client.patch(self._url(), {'date_of_birth': '1985-03-15'}, format='json')
+
+        resp = client.patch(
+            self._url(), {'date_of_birth': '1986-04-16'}, format='json',
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.person.refresh_from_db()
+        record = PatientRecord.objects.get(person=self.person)
+        self.assertEqual(record.date_of_birth, date(1986, 4, 16))
+        self.assertEqual(self.person.year_of_birth, 1986)
+        self.assertEqual(self.person.month_of_birth, 4)
+        self.assertEqual(self.person.day_of_birth, 16)
+        self.assertEqual(self.person.birth_datetime.date(), date(1986, 4, 16))
+
     def test_patient_can_set_gender(self):
         resp = self._client().patch(self._url(), {'gender': 'Female'}, format='json')
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
@@ -26595,6 +26625,68 @@ class PatientSelfEditProfileTest(TestCase):
             format='json',
         )
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class DateOfBirthRoleEditTest(TestCase):
+    """Every role with write access can correct an existing date of birth."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.org = Organization.objects.create(name='DOB Org', slug='dob-org')
+        cls.person = Person.objects.create(
+            person_id=99011, year_of_birth=1970, month_of_birth=1, day_of_birth=2,
+        )
+        PatientRecord.objects.create(
+            person=cls.person, organization=cls.org,
+            date_of_birth=date(1970, 1, 2),
+        )
+        cls.patient = Identity.objects.create_user(email='dob-patient@test.com')
+        PatientUser.objects.create(identity=cls.patient, person=cls.person)
+        cls.doctor = Identity.objects.create_user(email='dob-doctor@test.com')
+        GroupAccess.objects.create(identity=cls.doctor, org=cls.org, role='doctor')
+        cls.org_admin = Identity.objects.create_user(email='dob-admin@test.com')
+        GroupAccess.objects.create(
+            identity=cls.org_admin, org=cls.org, role='org_admin',
+        )
+        cls.staff = Identity.objects.create_user(
+            email='dob-staff@test.com', is_staff=True,
+        )
+        cls.superuser = Identity.objects.create_superuser(
+            email='dob-superuser@test.com', password='pw',
+        )
+
+    def test_authorized_roles_can_correct_date_of_birth(self):
+        identities = (
+            ('patient', self.patient),
+            ('doctor', self.doctor),
+            ('org_admin', self.org_admin),
+            ('staff', self.staff),
+            ('superuser', self.superuser),
+        )
+        for offset, (role, identity) in enumerate(identities, start=1):
+            with self.subTest(role=role):
+                client = APIClient()
+                client.force_authenticate(user=identity)
+                expected = date(1980 + offset, offset, offset)
+
+                descriptor = client.get(
+                    '/api/v1/patient-records/writable-fields/',
+                    {'person_id': self.person.person_id},
+                )
+                self.assertEqual(descriptor.status_code, status.HTTP_200_OK)
+                self.assertTrue(descriptor.data['date_of_birth']['writable'])
+
+                response = client.patch(
+                    f'/api/patient-info/{self.person.person_id}/',
+                    {'date_of_birth': expected.isoformat()}, format='json',
+                )
+                self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+                self.person.refresh_from_db()
+                self.assertEqual(
+                    (self.person.year_of_birth, self.person.month_of_birth,
+                     self.person.day_of_birth),
+                    (expected.year, expected.month, expected.day),
+                )
 
 
 class PatientSelfEditClinicalFieldsTest(TestCase):
@@ -26826,3 +26918,124 @@ class PatientSelfEditTherapyLinesTest(TestCase):
         }, format='json')
         # Should be 403 — patient does not have write access to another person
         self.assertIn(resp.status_code, [status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND])
+
+
+class RecordAttestationTest(TestCase):
+    """Tests for admin-field gating and patient record attestation (#1165)."""
+
+    def setUp(self):
+        _make_vocab_fixtures()
+        self.client = APIClient()
+        self.org = _make_org('Attest Org', 'attest-org')
+
+        # Staff user (clinician)
+        self.staff_user = Identity.objects.create_user(
+            email='clinician@attest.com', password='testpass',
+        )
+        self.staff_user.is_staff = True
+        self.staff_user.save()
+
+        # Patient user
+        self.patient_identity = Identity.objects.create_user(
+            email='patient@attest.com', password='testpass',
+        )
+        self.person = Person.objects.create(person_id=77701)
+        self.record = PatientRecord.objects.create(
+            person=self.person, organization=self.org,
+        )
+        GroupAccess.objects.create(
+            identity=self.patient_identity, org=self.org, role='patient',
+        )
+        PatientUser.objects.create(
+            identity=self.patient_identity, person=self.person, is_active=True,
+        )
+
+    # --- 1. Staff can directly set validated via PATCH ---
+    def test_staff_can_set_validated(self):
+        self.client.force_authenticate(user=self.staff_user)
+        resp = self.client.patch(
+            f'/api/patient-info/{self.person.person_id}/',
+            {'validated': True, 'validated_by': 'Dr. Smith', 'validation_date': '2026-09-10'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.record.refresh_from_db()
+        self.assertTrue(self.record.validated)
+        self.assertEqual(self.record.validated_by, 'Dr. Smith')
+
+    # --- 2. Patient PATCH to /me/ silently drops validated ---
+    def test_patient_patch_me_drops_validated(self):
+        self.client.force_authenticate(user=self.patient_identity)
+        resp = self.client.patch(
+            '/api/patient-info/me/',
+            {'validated': True, 'validated_by': 'Sneaky Patient'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.record.refresh_from_db()
+        # validated should NOT have been set — silently dropped
+        self.assertIsNone(self.record.validated)
+        self.assertIsNone(self.record.validated_by)
+
+    # --- 3. Patient POST /me/confirm/ sets all three validation fields ---
+    def test_patient_confirm_sets_validation(self):
+        self.client.force_authenticate(user=self.patient_identity)
+        resp = self.client.post('/api/patient-info/me/confirm/')
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('validated', resp.data)
+        self.assertTrue(resp.data['validated'])
+        self.assertEqual(resp.data['validated_by'], 'patient@attest.com')
+
+        self.record.refresh_from_db()
+        self.assertTrue(self.record.validated)
+        self.assertEqual(self.record.validated_by, 'patient@attest.com')
+        self.assertIsNotNone(self.record.validation_date)
+
+    # --- 4. Confirm projects to Person ---
+    def test_confirm_projects_to_person(self):
+        self.client.force_authenticate(user=self.patient_identity)
+        self.client.post('/api/patient-info/me/confirm/')
+        self.person.refresh_from_db()
+        self.assertTrue(self.person.validated)
+        self.assertEqual(self.person.validated_by, 'patient@attest.com')
+        self.assertIsNotNone(self.person.validation_date)
+
+    # --- 5. Patient can set suppress_demographics_for_others via /me/ ---
+    def test_patient_can_set_suppress_demographics(self):
+        self.client.force_authenticate(user=self.patient_identity)
+        resp = self.client.patch(
+            '/api/patient-info/me/',
+            {'suppress_demographics_for_others': True},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.record.refresh_from_db()
+        self.assertTrue(self.record.suppress_demographics_for_others)
+
+    # --- 6. Staff/doctor/org_admin can set suppress_demographics_for_others ---
+    def test_staff_can_set_suppress_demographics(self):
+        self.client.force_authenticate(user=self.staff_user)
+        resp = self.client.patch(
+            f'/api/patient-info/{self.person.person_id}/',
+            {'suppress_demographics_for_others': True},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.record.refresh_from_db()
+        self.assertTrue(self.record.suppress_demographics_for_others)
+
+    # --- 7. Re-confirm updates the date ---
+    def test_reconfirm_updates_date(self):
+        from datetime import date as date_type
+        # First confirm
+        self.record.validated = True
+        self.record.validated_by = 'patient@attest.com'
+        self.record.validation_date = date_type(2026, 1, 1)
+        self.record.save()
+
+        self.client.force_authenticate(user=self.patient_identity)
+        resp = self.client.post('/api/patient-info/me/confirm/')
+        self.assertEqual(resp.status_code, 200)
+        self.record.refresh_from_db()
+        # Date should be updated to today
+        self.assertNotEqual(self.record.validation_date, date_type(2026, 1, 1))

@@ -1,4 +1,7 @@
+from importlib import import_module
+
 import pytest
+from django.apps import apps
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from omop_core.models import SourceCodeConceptMapping
@@ -6,6 +9,51 @@ from patient_portal.api.views import code_mapping_accuracy
 from patient_portal.models import Identity
 
 pytestmark = pytest.mark.django_db
+
+
+def test_legacy_approved_suggestions_are_backfilled_as_model_acceptances():
+    from tests.factories import ConceptFactory
+
+    suggested = ConceptFactory()
+    replacement = ConceptFactory()
+    eligible = SourceCodeConceptMapping.objects.create(
+        source_code='accepted-suggestion', origin_system='suggest v0.1',
+        suggestion_model_version='v0.1', status='approved',
+        target_concept=suggested, suggested_target_concept=suggested,
+    )
+    excluded = [
+        SourceCodeConceptMapping.objects.create(
+            source_code='approved-code-import', origin_system='code',
+            suggestion_model_version='v0.1', status='approved',
+            target_concept=suggested, suggested_target_concept=suggested,
+        ),
+        SourceCodeConceptMapping.objects.create(
+            source_code='unreviewed-suggestion', origin_system='suggest v0.1',
+            suggestion_model_version='v0.1', status='proposed',
+            target_concept=suggested, suggested_target_concept=suggested,
+        ),
+        SourceCodeConceptMapping.objects.create(
+            source_code='changed-suggestion', origin_system='suggest v0.1',
+            suggestion_model_version='v0.1', status='approved',
+            target_concept=replacement, suggested_target_concept=suggested,
+        ),
+        SourceCodeConceptMapping.objects.create(
+            source_code='unversioned-suggestion', origin_system='suggest',
+            status='approved', target_concept=suggested,
+            suggested_target_concept=suggested,
+        ),
+    ]
+
+    migration = import_module(
+        'omop_core.migrations.0223_backfill_approved_suggestion_outcomes'
+    )
+    migration.backfill_approved_suggestion_outcomes(apps, None)
+
+    eligible.refresh_from_db()
+    assert eligible.suggestion_outcome == 'accepted'
+    for mapping in excluded:
+        mapping.refresh_from_db()
+        assert mapping.suggestion_outcome == ''
 
 
 def test_icd10_accuracy_combines_aliases_for_latest_model():

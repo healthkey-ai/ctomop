@@ -921,6 +921,12 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
     This does not advance derived_at/version: those describe the last full
     OMOP refresh, not the last edit of PatientRecord's own values.
     """
+    if 'date_of_birth' in changed_fields:
+        # PatientRecord.save recalculates age when a DOB exists, but it must be
+        # explicitly cleared first when the date and Person birth components
+        # were removed.
+        patient_info.patient_age = None
+
     for canonical, aliases in _LAB_FIELD_ALIASES.items():
         for alias in aliases:
             setattr(patient_info, alias, getattr(patient_info, canonical))

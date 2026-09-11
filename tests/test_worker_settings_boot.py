@@ -14,6 +14,7 @@ _PROD_ENV = {
     'SECRET_KEY': 'a-real-looking-secret-for-this-test',
     'DATABASE_URL': 'postgresql://postgres@localhost:5432/promop_test',
     'ALLOWED_HOSTS': '',
+    'RENDER_EXTERNAL_HOSTNAME': '',
     'CORS_ALLOWED_ORIGINS': '',
 }
 

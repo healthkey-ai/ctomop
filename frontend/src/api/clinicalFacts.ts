@@ -291,6 +291,18 @@ export async function writeLanguageSkills(
   );
 }
 
+/** POST /api/patient-info/me/confirm/ — patient attests their record is accurate. */
+export async function confirmRecord(): Promise<{
+  validated: boolean;
+  validated_by: string;
+  validation_date: string;
+}> {
+  const { data } = await clinicalClient().post(
+    clinicalUrl('/patient-info/me/confirm/'),
+  );
+  return data;
+}
+
 /**
  * Read a language's capabilities back out of the flattened PatientRecord columns.
  *

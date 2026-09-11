@@ -16,6 +16,7 @@ interface Props {
   editedName: string;
   onNameChange: (name: string) => void;
   onZipcodeChange: (zip: string) => void;
+  patientMode?: boolean;
 }
 
 /**
@@ -38,6 +39,7 @@ interface Props {
  */
 export default function GeneralTab({
   formData, onChange, editedName, onNameChange, onZipcodeChange,
+  patientMode = false,
 }: Props) {
   // Ask about *this* patient: whether a field may be edited depends on who is
   // asking and whose record it is, not only on whether the field is mapped.
@@ -86,10 +88,9 @@ export default function GeneralTab({
     <div>
       {!loading && (
         <p className="mb-4 text-xs text-muted-foreground">
-          Demographics are stored on the patient record; vitals and performance
-          scores are stored as OMOP measurements, so editing one records a result
-          dated below and re-derives the record. A field without an editable box
-          explains why underneath it.
+          Edits are saved to the patient record first. Where a mapping exists,
+          vitals and performance scores are also projected to dated OMOP
+          measurements. Computed fields explain why they are read-only.
         </p>
       )}
 
@@ -101,7 +102,6 @@ export default function GeneralTab({
           </div>
 
           {field('Date of Birth', 'date_of_birth', 'date')}
-          {field('Death Date', 'death_date', 'date')}
 
           <div className="space-y-1.5">
             <label className="text-sm font-medium text-portal-text-primary">Age</label>
@@ -149,13 +149,15 @@ export default function GeneralTab({
         </div>
       </Section>
 
-      <Section title="Clinician Validation" description="Whether a clinician has checked this record.">
-        <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          {field('Validated', 'validated', 'boolean')}
-          {field('Validated By', 'validated_by', 'text')}
-          {field('Validation Date', 'validation_date', 'date')}
-        </div>
-      </Section>
+      {!patientMode && (
+        <Section title="Clinician Validation" description="Whether a clinician has checked this record.">
+          <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
+            {field('Validated', 'validated', 'boolean')}
+            {field('Validated By', 'validated_by', 'text')}
+            {field('Validation Date', 'validation_date', 'date')}
+          </div>
+        </Section>
+      )}
 
       <Section title="Race &amp; Ethnicity" description="Self-reported race and ethnicity (OMB standard categories).">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
@@ -202,6 +204,12 @@ export default function GeneralTab({
           {field('Systolic Blood Pressure (mmHg)', 'systolic_blood_pressure', 'number')}
           {field('Diastolic Blood Pressure (mmHg)', 'diastolic_blood_pressure', 'number')}
           {field('Heart Rate (bpm)', 'heartrate', 'number')}
+        </div>
+      </Section>
+
+      <Section title="End of Life">
+        <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
+          {field('Death Date', 'death_date', 'date')}
         </div>
       </Section>
     </div>

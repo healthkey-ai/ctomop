@@ -74,6 +74,12 @@ services:
       - key: PHR_BASE_URL
         sync: false
 
+      # Unset means Sentry stays off, which is also the rollback.
+      - key: SENTRY_DSN
+        sync: false
+      - key: SENTRY_ENVIRONMENT
+        value: production
+
   - type: worker
     name: promop-worker
     runtime: python
@@ -104,6 +110,13 @@ services:
           name: promop-redis
           type: redis
           property: connectionString
+      - key: SENTRY_DSN
+        fromService:
+          name: promop
+          type: web
+          envVarKey: SENTRY_DSN
+      - key: SENTRY_ENVIRONMENT
+        value: production
 
   - type: redis
     name: promop-redis
@@ -171,6 +184,10 @@ services:
           name: promop-staging-redis
           type: keyvalue
           property: connectionString
+      - key: SENTRY_DSN
+        sync: false
+      - key: SENTRY_ENVIRONMENT
+        value: staging
     region: oregon
   - type: worker
     name: promop-staging-worker
@@ -226,6 +243,13 @@ services:
         value: '1'
       - key: CELERY_WORKER_PREFETCH_MULTIPLIER
         value: '1'
+      - key: SENTRY_DSN
+        fromService:
+          name: promop-staging
+          type: web
+          envVarKey: SENTRY_DSN
+      - key: SENTRY_ENVIRONMENT
+        value: staging
   - type: keyvalue
     name: promop-staging-redis
     region: oregon

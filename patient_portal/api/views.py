@@ -10359,10 +10359,14 @@ def code_mapping_accuracy_dashboard(request):
     if not _can_manage_field_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
     base = SourceCodeConceptMapping.objects.filter(suggestion_model_version__gt='')
-    return Response({'models': [
-        {'model_version': version, **_suggestion_accuracy_payload(base, version)}
-        for version in _suggestion_versions(base)
-    ]})
+    versions = _suggestion_versions(base)
+    return Response({
+        'models': [
+            {'model_version': version, **_suggestion_accuracy_payload(base, version)}
+            for version in versions
+        ],
+        'overall': _suggestion_accuracy_payload(base) if versions else None,
+    })
 
 
 # HK-* vocabulary -> the clinical table whose concept-0 rows it curates. The

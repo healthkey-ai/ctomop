@@ -143,3 +143,18 @@ def test_component_mappings_are_discoverable_and_curatable(setup):
     mapping = FieldConceptMapping.objects.get(field_name='genetic_mutations.origin')
     serializer = FieldConceptMappingSerializer(mapping, data={'status': 'rejected'}, partial=True)
     assert serializer.is_valid(), serializer.errors
+
+
+@pytest.mark.parametrize('assessment', ['absent', 'not_tested', 'no_call', 'indeterminate'])
+def test_nonpositive_assessments_do_not_become_detected_markers(setup, assessment):
+    person, record, _ = setup
+    saved = save_variant(person, {'gene': 'TP53', 'variant': 'p.R175H',
+        'interpretation': 'Pathogenic', 'assessment': assessment})
+    record.refresh_from_db()
+    assert record.genomics_tp53[0]['assessment'] == assessment
+    assert record.tp53_disruption is not True
+    assert not record.molecular_markers
+    save_variant(person, {'assessment': 'present'}, saved['id'])
+    record.refresh_from_db()
+    assert record.tp53_disruption is True
+    assert 'TP53' in record.molecular_markers

@@ -2600,6 +2600,9 @@ def _get_genomics_pathology_data(person: Person, snapshot: OmopSnapshot = None) 
             data['mrd_status'] = value[:50]
 
     mutations = _get_genetic_mutations(person, snapshot).get('genetic_mutations', [])
+    # A recorded negative/no-call is not a detected molecular marker. Legacy
+    # findings without an assessment retain their historical summary behavior.
+    mutations = [m for m in mutations if m.get('assessment') in (None, '', 'present')]
     if mutations:
         # ``genetic_mutations`` remains the structured canonical projection;
         # molecular_markers is its legacy display-compatible summary.
@@ -3862,7 +3865,9 @@ def _compute_derived_fields(patient_info: PatientRecord, *, apply_formulas=True)
 
     mutations = patient_info.genetic_mutations or []
     patient_info.tp53_disruption = any(
-        m.get('gene', '').lower() == 'tp53' and m.get('interpretation') == 'pathogenic'
+        m.get('gene', '').lower() == 'tp53'
+        and (m.get('interpretation') or '').lower() == 'pathogenic'
+        and m.get('assessment') in (None, '', 'present')
         for m in mutations
     )
 

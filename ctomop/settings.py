@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 from corsheaders.defaults import default_headers
 
 from ctomop.frontend_paths import resolve_frontend_root
+from ctomop.sentry import init_sentry
 
 # Load environment variables from .env file (for local development)
 load_dotenv()
@@ -108,6 +109,8 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    # Outermost, so it sees the final response of every request.
+    'patient_portal.api.middleware.SentryServerErrorMiddleware',
     'django.middleware.security.SecurityMiddleware',
     # WhiteNoise, plus the PROlog runner's build when one is mounted — see
     # ctomop/whitenoise.py.
@@ -123,6 +126,9 @@ MIDDLEWARE = [
     'patient_portal.api.middleware.ForcePasswordChangeMiddleware',
     'patient_portal.api.middleware.DeprecationWarningMiddleware',
 ]
+
+# Not in AppConfig.ready(), so a failure during app loading is captured too.
+SENTRY_ENABLED = init_sentry(DEBUG)
 
 SPECTACULAR_SETTINGS = {
     'TITLE': 'PROMOP API',
@@ -415,6 +421,8 @@ DATA_UPLOAD_MAX_MEMORY_SIZE = int(
 
 REST_FRAMEWORK = {
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+    # DRF answers an APIException itself, so Django never sees the 5xx.
+    'EXCEPTION_HANDLER': 'patient_portal.api.exception_handlers.sentry_exception_handler',
     'DEFAULT_AUTHENTICATION_CLASSES': _auth_classes,
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',

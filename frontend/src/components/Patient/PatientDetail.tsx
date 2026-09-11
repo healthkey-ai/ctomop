@@ -20,6 +20,7 @@ import BloodTab from "@/components/PatientInfo/tabs/BloodTab";
 import LabsTab from "@/components/PatientInfo/tabs/LabsTab";
 import BehaviorTab from "@/components/PatientInfo/tabs/BehaviorTab";
 import WearableTab from "@/components/PatientInfo/tabs/WearableTab";
+import ClinicalSummaryTab from "@/components/PatientInfo/tabs/ClinicalSummaryTab";
 import PatientOmopTab from "./PatientOmopTab";
 import { confirmRecord } from "@/api/clinicalFacts";
 
@@ -673,7 +674,7 @@ export default function PatientDetail({
   const canViewOmop = !patientMode && !!(user?.is_staff || user?.is_org_admin);
   const coreTabs = ["General", getDiseaseTabLabel(), "Treatment", "Blood", "Labs"];
   const afterLabsTabs = patientMode ? ["Allergies"] : [];
-  const trailingTabs = ["Behavior", "Wearables"];
+  const trailingTabs = ["Behavior", "Wearables", "Summary"];
   const surveyTabs = patientMode ? ["Surveys"] : [];
   const adminTabs = canViewOmop ? ["OMOP"] : [];
   const tabLabels = [...coreTabs, ...afterLabsTabs, ...trailingTabs, ...surveyTabs, ...adminTabs];
@@ -682,7 +683,8 @@ export default function PatientDetail({
   const allergiesIdx = patientMode ? coreTabs.length : -1;
   const behaviorIdx = coreTabs.length + afterLabsTabs.length;
   const wearablesIdx = behaviorIdx + 1;
-  const surveysIdx = patientMode ? wearablesIdx + 1 : -1;
+  const summaryIdx = wearablesIdx + 1;
+  const surveysIdx = patientMode ? summaryIdx + 1 : -1;
   const omopIdx = canViewOmop ? tabLabels.length - 1 : -1;
 
   const tabDescriptions: Record<number, string> = {
@@ -694,6 +696,7 @@ export default function PatientDetail({
     ...(allergiesIdx >= 0 ? { [allergiesIdx]: "Known allergies and intolerances from your health records." } : {}),
     [behaviorIdx]: "Lifestyle, socioeconomic, and behavioural health factors.",
     [wearablesIdx]: "30 day summaries derived from synced OMOP data.",
+    [summaryIdx]: "Read-only overview of all clinical data grouped by domain.",
     ...(surveysIdx >= 0 ? { [surveysIdx]: "Surveys assigned to you by your care team." } : {}),
     ...(omopIdx >= 0 ? { [omopIdx]: "Raw OMOP rows associated with this patient." } : {}),
   };
@@ -910,6 +913,7 @@ export default function PatientDetail({
                 {allergiesIdx >= 0 && activeTab === allergiesIdx && <AllergyList user={user ?? null} />}
                 {activeTab === behaviorIdx && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} />}
                 {activeTab === wearablesIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} />}
+                {activeTab === summaryIdx && <ClinicalSummaryTab formData={editedInfo} onNavigateToTab={setActiveTab} />}
                 {surveysIdx >= 0 && activeTab === surveysIdx && <PatientSurveys user={user ?? null} />}
                 {omopIdx >= 0 && activeTab === omopIdx && personId && <PatientOmopTab personId={personId} />}
               </div>

@@ -1463,7 +1463,7 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
 
 def suggest_one_mapping(source_code, source_vocabulary_id, omop_table, *,
                         source_description='', strategies=None,
-                        lexical_limit=CANDIDATE_LIMIT):
+                        lexical_limit=CANDIDATE_LIMIT, activity=None):
     """Run the shared retrieval and ranking pipeline for one dialog row."""
     if strategies is None:
         strategies = list(DEFAULT_STRATEGIES)
@@ -1477,16 +1477,28 @@ def suggest_one_mapping(source_code, source_vocabulary_id, omop_table, *,
     description = source_description or (
         source_concept.concept_name if source_concept else umls_name
     )
+    def emit(stage, **details):
+        if activity is not None:
+            activity({
+                "stage": stage, "source_code": source_code,
+                "source_vocabulary_id": source_vocabulary_id, **details,
+            })
+
+    emit("retrieving")
     job = _prepare(
         source_code=source_code, source_vocabulary_id=source_vocabulary_id,
         source_text=description, domain_id=domain_id,
         strategies=strategies, lexical_limit=lexical_limit,
+        on_candidates=lambda strategy, candidates: emit(
+            "candidates", strategy=strategy, candidates=candidates,
+        ),
         source_context=build_source_context(
             source_code=source_code, vocabulary_id=source_vocabulary_id,
             description=source_description, source_concept=source_concept,
             umls_name=umls_name, domain_id=domain_id, omop_table=omop_table,
         ),
     )
+    emit("ranking")
     rank_and_expand_jobs([job])
 
     from omop_core.services.athena_mapping_guard import (
@@ -1502,6 +1514,7 @@ def suggest_one_mapping(source_code, source_vocabulary_id, omop_table, *,
         'strategy_used': job['strategy_used'],
         'umls_cui': job['umls_cui'],
         'candidates_considered': len(job['candidates']),
+        'candidates': job['candidates'],
         'vector_reranked': job['vector_reranked'],
         'query_expansion': job.get('query_expansion'),
     }

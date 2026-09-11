@@ -13,8 +13,9 @@ set -e
 echo "Running production deploy checks..."
 python manage.py check --deploy --fail-level ERROR
 
-echo "Running migrations..."
-python manage.py migrate --noinput
+: "${ATHENA_VOCABULARY_GDRIVE_URL:?ATHENA_VOCABULARY_GDRIVE_URL must point to the full Athena vocabulary folder before this service can deploy}"
+echo "Preparing the production database..."
+python manage.py prepare_production_database --gdrive "$ATHENA_VOCABULARY_GDRIVE_URL"
 
 echo "Creating/resetting admin user..."
 python manage.py setup_admin

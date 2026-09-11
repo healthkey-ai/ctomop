@@ -115,3 +115,26 @@ Curators approve, edit, reject, or replace proposed mappings in the Code
 Mapping UI. Approval makes the row effective and can re-point already stored
 clinical rows; that governed decision is why importers must never promote a
 proposal themselves.
+
+### Live Suggest candidates
+
+The main mapping page requests `include_activity: true` when posting to
+`/api/v1/code-mappings/suggest/`, then polls
+`/api/v1/code-mappings/suggest-runs/<run_id>/?include_activity=1` once per second.
+The opt-in POST response includes activity for inline runs that finish before
+the response is sent. Queued runs expose activity while the worker runs.
+
+For each source mapping, `candidates` events contain the `mapping_id`, source
+identifiers, `strategy` (`umls`, `lexical`, or `semantic`), and all candidates
+returned by that retrieval stage. Semantic candidates include `vector_distance`
+(cosine distance; lower is closer). Empty candidate lists record completed
+searches with no matches. Enabled searches continue after a unique UMLS match;
+the unique curated match retains winner precedence. `ranked` events include the
+winner and full ranking pool, including additional query-expansion candidates.
+`result` events indicate whether the destination was saved.
+
+After the run finishes, choosing another candidate patches the existing mapping
+with `destination_concept_id` and `status: "proposed"`. The mapping still awaits
+review. Its original suggested target remains available for accuracy tracking;
+approving an alternative records an overridden suggestion. Candidate selection
+is disabled while the run is writing and for preview-only results.

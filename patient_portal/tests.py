@@ -22799,10 +22799,17 @@ class AsyncDerivationTest(TestCase):
         self.assertIn(resp.status_code,
                       (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))
 
+    @override_settings(SERVICE_AUTH_SCOPES='patient/*.read patient/*.write')
     def test_status_is_get_only(self):
+        # Pass the scope check so this exercises the endpoint's method guard.
         resp = self.client.post(self._status_url('some-task'))
 
         self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+    def test_status_rejects_post_with_etl_scope(self):
+        resp = self.client.post(self._status_url('some-task'))
+
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_a_queued_derivation_is_pollable_end_to_end_inline(self):
         """The default no-broker path still satisfies the poll-for-outcome contract."""

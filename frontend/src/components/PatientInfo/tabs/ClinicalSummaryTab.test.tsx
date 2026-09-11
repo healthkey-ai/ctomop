@@ -65,12 +65,12 @@ function setupEmptyQueries() {
 
 function renderTab(
   formData: Record<string, unknown> = {},
-  onNavigateToTab = vi.fn(),
+  onNavigateToLabs = vi.fn(),
 ) {
   return {
-    onNavigateToTab,
+    onNavigateToLabs,
     ...render(
-      <ClinicalSummaryTab formData={formData} onNavigateToTab={onNavigateToTab} />,
+      <ClinicalSummaryTab formData={formData} onNavigateToLabs={onNavigateToLabs} />,
     ),
   };
 }
@@ -92,10 +92,10 @@ describe("ClinicalSummaryTab — empty state", () => {
 
   it("shows CTA link to Labs tab", () => {
     setupEmptyQueries();
-    const { onNavigateToTab } = renderTab();
+    const { onNavigateToLabs } = renderTab();
     const link = screen.getByRole("button", { name: /labs tab/i });
     fireEvent.click(link);
-    expect(onNavigateToTab).toHaveBeenCalledWith(4);
+    expect(onNavigateToLabs).toHaveBeenCalled();
   });
 
   it("does not show empty state when wearable data exists", () => {

@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import api from "@/api/axios";
 import type { PaginatedResponse } from "@/federation/types";
@@ -26,9 +27,13 @@ export function useInfiniteOmopQuery<T>(
     getNextPageParam: (lastPage, _allPages, lastPageParam) =>
       lastPage.next ? (lastPageParam as number) + 1 : undefined,
     enabled: !!personId,
+    staleTime: 30_000,
   });
 
-  const allResults = query.data?.pages.flatMap((p) => p.results) ?? [];
+  const allResults = useMemo(
+    () => query.data?.pages.flatMap((p) => p.results) ?? [],
+    [query.data?.pages],
+  );
   const totalCount = query.data?.pages[0]?.count ?? 0;
 
   return {

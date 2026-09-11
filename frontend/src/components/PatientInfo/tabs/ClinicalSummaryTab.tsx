@@ -16,7 +16,7 @@ import type { LabResultValue, LabValueStatus } from "@/federation/types";
 
 interface Props {
   formData: Record<string, unknown>;
-  onNavigateToTab: (idx: number) => void;
+  onNavigateToLabs: () => void;
 }
 
 // ── Wearable field groups ──────────────────────────────────────────────────
@@ -155,12 +155,8 @@ function formatWearableValue(val: unknown, unit: string): string {
 
 // ── Sub-components ─────────────────────────────────────────────────────────
 
-function SectionBadge({ count }: { count: number }) {
-  return (
-    <span className="ml-2 inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">
-      {count}
-    </span>
-  );
+function sectionTitle(label: string, count: number): string {
+  return count > 0 ? `${label} (${count})` : label;
 }
 
 function EmptySection({ label }: { label: string }) {
@@ -211,7 +207,7 @@ function StatCard({
 
 // ── Main component ─────────────────────────────────────────────────────────
 
-export default function ClinicalSummaryTab({ formData, onNavigateToTab }: Props) {
+export default function ClinicalSummaryTab({ formData, onNavigateToLabs }: Props) {
   const personId = (formData?.person_id ?? formData?.person) as number | undefined;
 
   // Fetch all five domains
@@ -273,7 +269,7 @@ export default function ClinicalSummaryTab({ formData, onNavigateToTab }: Props)
           <button
             type="button"
             className="font-medium text-portal-brand hover:underline"
-            onClick={() => onNavigateToTab(4)}
+            onClick={onNavigateToLabs}
           >
             Labs tab
           </button>{" "}
@@ -286,9 +282,7 @@ export default function ClinicalSummaryTab({ formData, onNavigateToTab }: Props)
   return (
     <div>
       {/* ── Conditions ─────────────────────────────────────────────────── */}
-      <Section title="Conditions">
-        <h4 className="sr-only">Conditions</h4>
-        <SectionBadge count={conditions.totalCount} />
+      <Section title={sectionTitle("Conditions", conditions.totalCount)}>
         {conditions.totalCount === 0 && !conditions.isLoading ? (
           <EmptySection label="conditions" />
         ) : (
@@ -318,9 +312,7 @@ export default function ClinicalSummaryTab({ formData, onNavigateToTab }: Props)
       </Section>
 
       {/* ── Medications ────────────────────────────────────────────────── */}
-      <Section title="Medications">
-        <h4 className="sr-only">Medications</h4>
-        <SectionBadge count={drugs.totalCount} />
+      <Section title={sectionTitle("Medications", drugs.totalCount)}>
         {drugs.totalCount === 0 && !drugs.isLoading ? (
           <EmptySection label="medications" />
         ) : (
@@ -348,9 +340,7 @@ export default function ClinicalSummaryTab({ formData, onNavigateToTab }: Props)
       </Section>
 
       {/* ── Procedures ─────────────────────────────────────────────────── */}
-      <Section title="Procedures">
-        <h4 className="sr-only">Procedures</h4>
-        <SectionBadge count={procedures.totalCount} />
+      <Section title={sectionTitle("Procedures", procedures.totalCount)}>
         {procedures.totalCount === 0 && !procedures.isLoading ? (
           <EmptySection label="procedures" />
         ) : (
@@ -377,9 +367,7 @@ export default function ClinicalSummaryTab({ formData, onNavigateToTab }: Props)
       </Section>
 
       {/* ── Lab Results (Measurements) ──────────────────────────────── */}
-      <Section title="Lab Results">
-        <h4 className="sr-only">Lab Results</h4>
-        <SectionBadge count={measurements.totalCount} />
+      <Section title={sectionTitle("Lab Results", measurements.totalCount)}>
         {measurements.totalCount === 0 && !measurements.isLoading ? (
           <EmptySection label="lab results" />
         ) : (
@@ -415,9 +403,7 @@ export default function ClinicalSummaryTab({ formData, onNavigateToTab }: Props)
       </Section>
 
       {/* ── Observations ───────────────────────────────────────────────── */}
-      <Section title="Observations">
-        <h4 className="sr-only">Observations</h4>
-        <SectionBadge count={observations.totalCount} />
+      <Section title={sectionTitle("Observations", observations.totalCount)}>
         {observations.totalCount === 0 && !observations.isLoading ? (
           <EmptySection label="observations" />
         ) : (

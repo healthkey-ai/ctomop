@@ -381,6 +381,8 @@ def _classify_tab(field_name: str) -> str:
     Wearable _30d fields are computed — they go to 'other' and render
     in the Computed section at the bottom of each tab.
     """
+    if field_name == 'genetic_mutations' or field_name.startswith('genomics_'):
+        return 'genomics'
     if field_name in _TAB_GENERAL:
         return 'general'
     if field_name in _TAB_DISEASE:
@@ -675,6 +677,31 @@ def get_all_field_descriptors() -> list[dict]:
             'formula': formula_dict,
             'explanation': 'Administrator-defined PatientRecord field.',
             'derivation_error': derivation_error,
+        })
+
+    # Nested variant attributes are mappings within genetic_mutations, not
+    # independent patient-level scalars. Expose them for curator review too.
+    from omop_core.services.genomics_catalog import catalog
+    for attribute in catalog()['attributes']:
+        name = 'genetic_mutations.' + attribute['key']
+        mapping = mappings_by_field.get(name)
+        result.append({
+            'field_name': name, 'field_type': attribute['value_kind'],
+            'category': 'editable', 'tab': 'genomics', 'provenance': None,
+            'mapping': {
+                'id': mapping.id, 'concept_id': mapping.concept_id,
+                'concept_name': mapping.concept.concept_name if mapping.concept else '',
+                'vocabulary_id': mapping.vocabulary_id, 'concept_code': mapping.concept_code,
+                'unit': mapping.unit, 'omop_table': mapping.omop_table,
+                'status': mapping.status,
+                'reviewer': mapping.reviewer.username if mapping.reviewer else None,
+                'reviewed_at': mapping.reviewed_at.isoformat() if mapping.reviewed_at else None,
+                'notes': mapping.notes,
+            } if mapping else None,
+            'suggestion': None, 'unit_options': STANDARD_UNIT_CHOICES,
+            'mappable': True, 'locked_table': None, 'choices': [], 'formula': None,
+            'explanation': 'Linked attribute of each Genomics finding; not a patient-level scalar.',
+            'derivation_error': None,
         })
 
     # Sort: needs-concept-set first, then by field name.

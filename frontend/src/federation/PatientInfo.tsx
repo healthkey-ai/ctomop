@@ -8,6 +8,7 @@ import { fetchWritableFields, LIFECYCLE, type FieldDescriptors } from "@/hooks/u
 // Profile fields now write through PatientRecord PATCH alongside clinical fields.
 import GeneralTab from "@/components/PatientInfo/tabs/GeneralTab";
 import DiseaseTab from "@/components/PatientInfo/tabs/DiseaseTab";
+import GenomicsTab from "@/components/PatientInfo/tabs/GenomicsTab";
 import TreatmentTab from "@/components/PatientInfo/tabs/TreatmentTab";
 import BloodTab from "@/components/PatientInfo/tabs/BloodTab";
 import LabsTab from "@/components/PatientInfo/tabs/LabsTab";
@@ -237,27 +238,7 @@ function PatientInfoInner({ readOnly, onPatientUpdated }: Pick<PatientInfoProps,
     scheduleAutoSave({ ...base, patient_name: name });
   }, [scheduleAutoSave, readOnly]);
 
-  const handleMutationAdd = useCallback(() => {
-    const raw = pendingDataRef.current?.genetic_mutations ?? editedInfoRef.current?.genetic_mutations ?? [];
-    const m = [...(raw as { gene: string; mutation: string; origin: string; interpretation: string }[])];
-    m.push({ gene: "", mutation: "", origin: "", interpretation: "" });
-    handleFieldChange("genetic_mutations", m);
-  }, [handleFieldChange]);
 
-  const handleMutationRemove = useCallback((i: number) => {
-    const raw = pendingDataRef.current?.genetic_mutations ?? editedInfoRef.current?.genetic_mutations ?? [];
-    const m = [...(raw as { gene: string; mutation: string; origin: string; interpretation: string }[])];
-    m.splice(i, 1);
-    handleFieldChange("genetic_mutations", m);
-  }, [handleFieldChange]);
-
-  const handleMutationChange = useCallback((i: number, field: string, value: string) => {
-    const raw = pendingDataRef.current?.genetic_mutations ?? editedInfoRef.current?.genetic_mutations ?? [];
-    const m = [...(raw as { gene: string; mutation: string; origin: string; interpretation: string }[])];
-    m[i] = { ...m[i], [field]: value };
-    if (field === "gene") m[i].mutation = "";
-    handleFieldChange("genetic_mutations", m);
-  }, [handleFieldChange]);
 
   const handleZipcodeChange = useCallback(async (zipcode: string) => {
     handleFieldChange("postal_code", zipcode);
@@ -312,15 +293,16 @@ function PatientInfoInner({ readOnly, onPatientUpdated }: Pick<PatientInfoProps,
     );
   }
 
-  const tabLabels = ["General", getDiseaseTabLabel(), "Treatment", "Blood", "Labs", "Behavior", "Wearable"];
+  const tabLabels = ["General", getDiseaseTabLabel(), "Treatment", "Blood", "Labs", "Behavior", "Wearable", "Genomics"];
   const tabDescriptions: Record<number, string> = {
     0: "Keep patient details up to date for accurate personalisation.",
-    1: "Disease-specific clinical information and genetic details.",
+    1: "Disease-specific clinical information.",
     2: "Therapy history, treatment lines, and planned therapies.",
     3: "Blood counts and differential.",
     4: "Chemistry, liver function, coagulation, cardiac and tumour markers.",
     5: "Lifestyle, socioeconomic, and behavioural health factors.",
     6: "Apple wearable 30-day summaries derived from synced OMOP data.",
+    7: "Genes, variants, origins, interpretations, and test details.",
   };
 
   return (
@@ -369,9 +351,6 @@ function PatientInfoInner({ readOnly, onPatientUpdated }: Pick<PatientInfoProps,
             <DiseaseTab
               formData={editedInfo}
               onChange={handleFieldChange}
-              onMutationAdd={handleMutationAdd}
-              onMutationRemove={handleMutationRemove}
-              onMutationChange={handleMutationChange}
               diseaseType={getDiseaseType()}
             />
           )}
@@ -393,6 +372,7 @@ function PatientInfoInner({ readOnly, onPatientUpdated }: Pick<PatientInfoProps,
           {activeTab === 4 && <LabsTab formData={editedInfo} onChange={handleFieldChange} />}
           {activeTab === 5 && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} />}
           {activeTab === 6 && <WearableTab formData={editedInfo} onChange={handleFieldChange} />}
+          {activeTab === 7 && <GenomicsTab formData={editedInfo} readOnly={readOnly} />}
         </div>
       </div>
     </div>

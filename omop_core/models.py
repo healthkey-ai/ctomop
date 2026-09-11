@@ -1234,7 +1234,7 @@ class Measurement(models.Model):
     measurement_type_concept = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='measurement_types', db_column='measurement_type_concept_id')
     operator_concept = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='measurement_operators', db_column='operator_concept_id', null=True, blank=True)
     value_as_number = models.DecimalField(max_digits=15, decimal_places=5, null=True, blank=True)
-    value_as_string = models.CharField(max_length=60, null=True, blank=True)
+    value_as_string = models.TextField(null=True, blank=True)
     value_as_concept = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='measurement_values', db_column='value_as_concept_id', null=True, blank=True)
     qualifier_concept = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='measurement_qualifiers', db_column='qualifier_concept_id', null=True, blank=True)
     unit_concept = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='measurement_units', db_column='unit_concept_id', null=True, blank=True)
@@ -1303,7 +1303,7 @@ class Observation(models.Model):
     observation_datetime = models.DateTimeField(null=True, blank=True)
     observation_type_concept = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='observation_types', db_column='observation_type_concept_id')
     value_as_number = models.DecimalField(max_digits=15, decimal_places=5, null=True, blank=True)
-    value_as_string = models.CharField(max_length=60, null=True, blank=True)
+    value_as_string = models.TextField(null=True, blank=True)
     value_as_concept = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='observation_values', db_column='value_as_concept_id', null=True, blank=True)
     qualifier_concept = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='observation_qualifiers', db_column='qualifier_concept_id', null=True, blank=True)
     unit_concept = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='observation_units', db_column='unit_concept_id', null=True, blank=True)
@@ -3160,6 +3160,50 @@ class PatientRecord(models.Model):
 
     # Genetic mutations
     genetic_mutations = models.JSONField(blank=True, null=False, default=list)
+    # Named priority-marker projections. Each holds all matching findings,
+    # including repeated tests; only the genomics writer may author their facts.
+    genomics_brca1 = models.JSONField(blank=True, default=list)
+    genomics_brca2 = models.JSONField(blank=True, default=list)
+    genomics_pik3ca = models.JSONField(blank=True, default=list)
+    genomics_tp53 = models.JSONField(blank=True, default=list)
+    genomics_esr1 = models.JSONField(blank=True, default=list)
+    genomics_palb1 = models.JSONField(blank=True, default=list)
+    genomics_kras = models.JSONField(blank=True, default=list)
+    genomics_nras = models.JSONField(blank=True, default=list)
+    genomics_braf = models.JSONField(blank=True, default=list)
+    genomics_myc = models.JSONField(blank=True, default=list)
+    genomics_fam46c = models.JSONField(blank=True, default=list)
+    genomics_dis3 = models.JSONField(blank=True, default=list)
+    genomics_xbp1 = models.JSONField(blank=True, default=list)
+    genomics_bcl2 = models.JSONField(blank=True, default=list)
+    genomics_ezh2 = models.JSONField(blank=True, default=list)
+    genomics_kmt2d = models.JSONField(blank=True, default=list)
+    genomics_crebbp = models.JSONField(blank=True, default=list)
+    genomics_bcl6 = models.JSONField(blank=True, default=list)
+    genomics_notch1 = models.JSONField(blank=True, default=list)
+    genomics_notch2 = models.JSONField(blank=True, default=list)
+    genomics_sf3b1 = models.JSONField(blank=True, default=list)
+    genomics_atm = models.JSONField(blank=True, default=list)
+    genomics_nsd2 = models.JSONField(blank=True, default=list)
+    genomics_cdkn2a = models.JSONField(blank=True, default=list)
+    genomics_smarca4 = models.JSONField(blank=True, default=list)
+    genomics_ccnd1 = models.JSONField(blank=True, default=list)
+    genomics_del17p = models.JSONField(blank=True, default=list)
+    genomics_t414 = models.JSONField(blank=True, default=list)
+    genomics_t1114 = models.JSONField(blank=True, default=list)
+    genomics_t1416 = models.JSONField(blank=True, default=list)
+    genomics_gain1q = models.JSONField(blank=True, default=list)
+    genomics_hyperdiploidy = models.JSONField(blank=True, default=list)
+    genomics_chromothripsis = models.JSONField(blank=True, default=list)
+    genomics_igh = models.JSONField(blank=True, default=list)
+    genomics_bcl2_amplification = models.JSONField(blank=True, default=list)
+    genomics_complex_karyotype = models.JSONField(blank=True, default=list)
+    genomics_complex_karyotype_excl_t1114 = models.JSONField(blank=True, default=list)
+    genomics_del11q = models.JSONField(blank=True, default=list)
+    genomics_del13q = models.JSONField(blank=True, default=list)
+    genomics_trisomy12 = models.JSONField(blank=True, default=list)
+    genomics_atm_atr = models.JSONField(blank=True, default=list)
+    genomics_notch1_notch2 = models.JSONField(blank=True, default=list)
 
     # PD-L1 and biomarkers
     pd_l1_tumor_cells = models.IntegerField(blank=True, null=True)
@@ -3589,7 +3633,7 @@ class FieldConceptMapping(models.Model):
     value_kind = models.CharField(
         max_length=10, blank=True, default='',
         choices=[('number', 'Number'), ('string', 'String'),
-                 ('date', 'Date'), ('boolean', 'Boolean')],
+                 ('date', 'Date'), ('boolean', 'Boolean'), ('json', 'Structured findings')],
         help_text='Which value column the fact is written to.',
     )
     type_concept_id = models.IntegerField(

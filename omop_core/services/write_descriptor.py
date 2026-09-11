@@ -553,6 +553,22 @@ def build_writable_field_descriptor():
 
     descriptor = {}
     for field in sorted(PATIENT_RECORD_OMOP_MAPPED_FIELDS - _LIFECYCLE_FIELDS):
+        if field.startswith('genomics_'):
+            mapping = curated.get(field, {})
+            writable = (mapping.get('writable', False) and mapping.get('value_kind') == 'json'
+                        and mapping.get('projection', {}).get('omop_table') == 'measurement')
+            descriptor[field] = {
+                'kind': KIND_EDITABLE, 'writable': bool(writable), 'target': 'patient_record',
+                'reason': 'Priority findings write through approved Genomics mappings.',
+            }
+            continue
+        if field == 'genetic_mutations':
+            descriptor[field] = {
+                'kind': KIND_EDITABLE, 'writable': True, 'target': 'genomics',
+                'endpoint': '/api/v1/patient-records/{person_id}/genomics/',
+                'reason': 'Edit individual variants in the Genomics tab; each variant writes linked OMOP facts.',
+            }
+            continue
         if field in _EPISODE_COMPUTED_FIELDS:
             descriptor[field] = {
                 'kind': KIND_COMPUTED,

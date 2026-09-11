@@ -68,6 +68,13 @@ const tableTab = (...keys) => `
 beforeEach(__resetTabFieldState);
 
 describe('no-duplicate-tab-field', () => {
+  it('checks collection editors against other tabs by their owning field', () => {
+    expect(ids([
+      ['GenomicsTab.tsx', 'const Tab = () => <section data-patient-field="genetic_mutations" />'],
+      ['DiseaseTab.tsx', inlineTab('genetic_mutations')],
+    ])).toEqual(['duplicate']);
+  });
+
   it('catches a duplicate declared inline on both tabs', () => {
     expect(ids([
       ['ATab.tsx', inlineTab('psa_ng_ml')],

@@ -115,7 +115,7 @@ import re
 from decimal import Decimal, InvalidOperation
 from io import StringIO
 from .permissions import (
-    EtlPatientCrudPermission, EtlWritePermission, PatientCrudPermission,
+    EtlPatientCrudPermission, EtlWritePermission, PatientCrudPermission, GenomicsCrudPermission,
     PatientDeletePermission, PatientSelfScopePermission, ScopedTokenPermission,
     VocabReadPermission, get_request_org, is_service_token,
 )
@@ -138,17 +138,10 @@ from django.views.decorators.http import require_http_methods
 logger = logging.getLogger(__name__)
 
 
-_GENETIC_MUTATION_CODE = '36908-2'
-_GENETIC_MUTATION_SOURCE_PREFIX = 'promop-genetic-mutation:'
-_MUTATION_ORIGIN_CONCEPTS = {'germline': 255395001, 'somatic': 255461003}
-_MUTATION_INTERPRETATION_CONCEPTS = {
-    'pathogenic': 30166007, 'benign': 10828004, 'vus': 42425007,
-}
-
-
 def _write_genetic_mutations(person, mutations):
     from omop_core.services.genomics import replace_variants
     replace_variants(person, mutations)
+
 
 class PatientRecordPagination(PageNumberPagination):
     page_size = 25
@@ -1027,7 +1020,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 return None, Response({'detail': 'You have read-only access to this patient.'}, status=403)
         return person, None
 
-    @action(detail=True, methods=['get', 'post'], url_path='genomics')
+    @action(detail=True, methods=['get', 'post'], url_path='genomics', permission_classes=[GenomicsCrudPermission, PatientSelfScopePermission])
     def genomics(self, request, pk=None):
         from omop_core.services.genomics import list_variants, save_variant
         person, error = self._genomics_access(request, pk)
@@ -1039,7 +1032,21 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         type_id = 32865 if get_actor_role(request.user, person.person_id) in ('self', 'representative') else 32817
         return Response(save_variant(person, request.data, type_concept_id=type_id), status=201)
 
-    @action(detail=True, methods=['get', 'patch', 'delete'], url_path=r'genomics/(?P<variant_id>[0-9]+)')
+    @action(detail=True, methods=['get'], url_path='genomics-catalog')
+    def genomics_catalog(self, request, pk=None):
+        from omop_core.models import FieldConceptMapping
+        from omop_core.services.genomics_catalog import catalog, disease_code, markers
+        person, error = self._genomics_access(request, pk)
+        if error is not None:
+            return error
+        record = PatientRecord.objects.get(person=person)
+        disease = request.query_params.get('disease', record.disease)
+        code = disease_code(disease)
+        approved = set(FieldConceptMapping.objects.filter(status='approved').values_list('field_name', flat=True))
+        return Response({'version': catalog()['version'], 'disease': code,
+            'markers': [{**m, 'writable': m['field_name'] in approved} for m in markers() if code in m['diseases']]})
+
+    @action(detail=True, methods=['get', 'patch', 'delete'], url_path=r'genomics/(?P<variant_id>[0-9]+)', permission_classes=[GenomicsCrudPermission, PatientSelfScopePermission])
     def genomic_variant(self, request, pk=None, variant_id=None):
         from omop_core.services.genomics import _find, delete_variant, save_variant
         person, error = self._genomics_access(request, pk)
@@ -1063,6 +1070,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         # the provider UI PATCHes, and leaving the key in the body would 405 the
         # request below as a non-projection-owned field.
         patient_name, patch_data = _pop_patient_name(request.data)
+        from omop_core.services.genomics_catalog import patient_fields
+        priority_edits = {key: patch_data.pop(key) for key in list(patch_data) if key in patient_fields()}
+        priority_edits = {key: value for key, value in priority_edits.items() if value != getattr(patient_info, key)}
 
         # Validation fields are staff-only; patients use /me/confirm/ instead.
         # Silent drop (not 400) because auto-save sends the full GET representation.
@@ -1087,6 +1097,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         # before the vocabulary has been loaded).
         if mutations == PatientRecordSerializer(patient_info).data.get('genetic_mutations'):
             mutations = None
+        if mutations is not None and priority_edits:
+            raise ValidationError({'genetic_mutations': 'Edit either the full list or named priority fields in one request.'})
 
         # Validate language_skills early, before the transaction.
         if language_skills is not None and not isinstance(language_skills, dict):
@@ -1124,6 +1136,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                          and serializer.validated_data[field] is not None))
             }
             _apply_patient_name(person, patient_name)
+            if priority_edits:
+                from omop_core.services.genomics import replace_priority_fields
+                from omop_core.authorization import get_actor_role
+                type_id = 32865 if get_actor_role(request.user, person.person_id) in ('self', 'representative') else 32817
+                replace_priority_fields(person, priority_edits, type_id)
+                patient_info.refresh_from_db()
             if mutations is not None:
                 _write_genetic_mutations(person, mutations)
                 patient_info.refresh_from_db()

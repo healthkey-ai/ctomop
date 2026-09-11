@@ -56,4 +56,5 @@ paths = [
   '''.*/test_[^/]*\.py$''',
   '''.*\.(test|itest)\.tsx?$''',
   '''.*/__tests__/.*''',
+  '''omop_core/data/.*\.json$''',
 ]

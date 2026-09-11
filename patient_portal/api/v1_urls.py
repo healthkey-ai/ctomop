@@ -16,6 +16,7 @@ from .views import (
     TherapyLineViewSet,
     PatientDocumentViewSet,
     PatientTrialEnrollmentViewSet,
+    TrialSearchPreferencesViewSet,
     ImmunizationListViewSet, AllergyListViewSet,
     PatientConsentViewSet,
     PatientMessageViewSet,
@@ -82,6 +83,7 @@ router.register(r'supportive-therapies', SupportiveTherapyViewSet, basename='v1-
 router.register(r'therapy-lines', TherapyLineViewSet, basename='v1-therapy-lines')
 router.register(r'documents', PatientDocumentViewSet, basename='v1-documents')
 router.register(r'trial-enrollments', PatientTrialEnrollmentViewSet, basename='v1-trial-enrollments')
+router.register(r'trial-search-preferences', TrialSearchPreferencesViewSet, basename='v1-trial-search-preferences')
 router.register(r'consents', PatientConsentViewSet, basename='v1-consents')
 router.register(r'messages', PatientMessageViewSet, basename='v1-messages')
 router.register(r'immunizations', ImmunizationListViewSet, basename='v1-immunizations')

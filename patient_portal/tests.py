@@ -26550,6 +26550,23 @@ class PatientSelfEditProfileTest(TestCase):
         self.assertEqual(self.person.month_of_birth, 3)
         self.assertEqual(self.person.day_of_birth, 15)
 
+    def test_patient_can_correct_date_of_birth(self):
+        client = self._client()
+        client.patch(self._url(), {'date_of_birth': '1985-03-15'}, format='json')
+
+        resp = client.patch(
+            self._url(), {'date_of_birth': '1986-04-16'}, format='json',
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.person.refresh_from_db()
+        record = PatientRecord.objects.get(person=self.person)
+        self.assertEqual(record.date_of_birth, date(1986, 4, 16))
+        self.assertEqual(self.person.year_of_birth, 1986)
+        self.assertEqual(self.person.month_of_birth, 4)
+        self.assertEqual(self.person.day_of_birth, 16)
+        self.assertEqual(self.person.birth_datetime.date(), date(1986, 4, 16))
+
     def test_patient_can_set_gender(self):
         resp = self._client().patch(self._url(), {'gender': 'Female'}, format='json')
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
@@ -26588,6 +26605,68 @@ class PatientSelfEditProfileTest(TestCase):
             format='json',
         )
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class DateOfBirthRoleEditTest(TestCase):
+    """Every role with write access can correct an existing date of birth."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.org = Organization.objects.create(name='DOB Org', slug='dob-org')
+        cls.person = Person.objects.create(
+            person_id=99011, year_of_birth=1970, month_of_birth=1, day_of_birth=2,
+        )
+        PatientRecord.objects.create(
+            person=cls.person, organization=cls.org,
+            date_of_birth=date(1970, 1, 2),
+        )
+        cls.patient = Identity.objects.create_user(email='dob-patient@test.com')
+        PatientUser.objects.create(identity=cls.patient, person=cls.person)
+        cls.doctor = Identity.objects.create_user(email='dob-doctor@test.com')
+        GroupAccess.objects.create(identity=cls.doctor, org=cls.org, role='doctor')
+        cls.org_admin = Identity.objects.create_user(email='dob-admin@test.com')
+        GroupAccess.objects.create(
+            identity=cls.org_admin, org=cls.org, role='org_admin',
+        )
+        cls.staff = Identity.objects.create_user(
+            email='dob-staff@test.com', is_staff=True,
+        )
+        cls.superuser = Identity.objects.create_superuser(
+            email='dob-superuser@test.com', password='pw',
+        )
+
+    def test_authorized_roles_can_correct_date_of_birth(self):
+        identities = (
+            ('patient', self.patient),
+            ('doctor', self.doctor),
+            ('org_admin', self.org_admin),
+            ('staff', self.staff),
+            ('superuser', self.superuser),
+        )
+        for offset, (role, identity) in enumerate(identities, start=1):
+            with self.subTest(role=role):
+                client = APIClient()
+                client.force_authenticate(user=identity)
+                expected = date(1980 + offset, offset, offset)
+
+                descriptor = client.get(
+                    '/api/v1/patient-records/writable-fields/',
+                    {'person_id': self.person.person_id},
+                )
+                self.assertEqual(descriptor.status_code, status.HTTP_200_OK)
+                self.assertTrue(descriptor.data['date_of_birth']['writable'])
+
+                response = client.patch(
+                    f'/api/patient-info/{self.person.person_id}/',
+                    {'date_of_birth': expected.isoformat()}, format='json',
+                )
+                self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+                self.person.refresh_from_db()
+                self.assertEqual(
+                    (self.person.year_of_birth, self.person.month_of_birth,
+                     self.person.day_of_birth),
+                    (expected.year, expected.month, expected.day),
+                )
 
 
 class PatientSelfEditClinicalFieldsTest(TestCase):

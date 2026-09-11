@@ -605,22 +605,27 @@ def _project_profile_fields(person, direct_fields, patch_data):
             setattr(person, field, value)
             person_changed.append(field)
 
-    # ---- date_of_birth → year/month/day on Person ----
-    # Fill-if-empty: once a DOB is recorded it cannot be changed through
-    # the UI, only through a service-token ingest that knows the source.
+    # ---- date_of_birth → OMOP Person birth columns ----
+    # A date of birth is factual source data, not a computed field. Corrections
+    # therefore replace every OMOP representation together; otherwise a stale
+    # birth_datetime could disagree with year/month/day after an edit.
     if 'date_of_birth' in profile_fields:
-        existing_dob = person.year_of_birth is not None
         dob = patch_data['date_of_birth']
-        if dob is not None and not existing_dob:
-            if isinstance(dob, str):
-                dob = parse_date(dob)
-            if dob is not None:
-                for attr, val in [('year_of_birth', dob.year),
-                                  ('month_of_birth', dob.month),
-                                  ('day_of_birth', dob.day)]:
-                    if getattr(person, attr) != val:
-                        setattr(person, attr, val)
-                        person_changed.append(attr)
+        if isinstance(dob, str):
+            dob = parse_date(dob)
+        values = {
+            'year_of_birth': dob.year if dob else None,
+            'month_of_birth': dob.month if dob else None,
+            'day_of_birth': dob.day if dob else None,
+            'birth_datetime': (
+                timezone.make_aware(datetime.combine(dob, datetime.min.time()))
+                if dob else None
+            ),
+        }
+        for attr, value in values.items():
+            if getattr(person, attr) != value:
+                setattr(person, attr, value)
+                person_changed.append(attr)
 
     # ---- Demographics (gender, race, ethnicity) ----
     for field in profile_fields & set(_PROFILE_DEMOGRAPHIC_FIELDS):
@@ -1165,6 +1170,11 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             profile_projected = _project_profile_fields(
                 person, direct_fields, profile_patch_data,
             )
+            if 'date_of_birth' in profile_projected:
+                # PatientRecord.save calculates age from its related Person when
+                # DOB is cleared. Keep that relation on the just-updated Person
+                # instance rather than the stale object cached by serializer.save().
+                patient_info.person = person
             clinical_fields = direct_fields - profile_projected
 
             if clinical_fields:
@@ -5288,13 +5298,11 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
 
     @action(detail=False, methods=['get'], url_path='writable-fields')
     def writable_fields(self, request: Request) -> Response:
-        """Which projection fields a client may edit, and the OMOP fact to write.
+        """Which PatientRecord fields a client may edit and their OMOP projection.
 
-        PatientRecord has no writable clinical columns, so an editor must write the
-        underlying fact instead. This tells it which table, concept and unit each
-        field needs. Fields with no reviewed concept set are reported as unwritable
-        with a reason rather than omitted, so a client can render them read-only and
-        explain why instead of failing on save.
+        User edits land on PatientRecord. A complete mapping adds the table,
+        concept, type, source and unit metadata used to project that edit to OMOP.
+        Computed and separately authored fields remain classified with a reason.
 
         Pass ``?person_id=N`` to get the answer *for this caller and this
         patient*. Without it the response describes the deployment: which fields

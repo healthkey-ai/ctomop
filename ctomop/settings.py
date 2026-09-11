@@ -36,6 +36,20 @@ SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-your-default-key-chan
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.environ.get('DEBUG', 'False') == 'True'
 
+# Render supplies its public hostname even when a Blueprint sync leaves the
+# dashboard-managed ALLOWED_HOSTS unset. Keep custom domains and allow the
+# service's own hostname (also used by Render health checks), never a wildcard.
+ALLOWED_HOSTS = [
+    host.strip()
+    for host in os.environ.get('ALLOWED_HOSTS', '').split(',')
+    if host.strip()
+]
+_render_hostname = os.environ.get('RENDER_EXTERNAL_HOSTNAME', '').strip()
+if _render_hostname and _render_hostname not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append(_render_hostname)
+if DEBUG:
+    ALLOWED_HOSTS = ['*']
+
 if not DEBUG:
     import sys as _sys
     # Skip the production guard for management commands that must run before the
@@ -47,6 +61,10 @@ if not DEBUG:
         'copy_curation',
     }
     _running_mgmt = len(_sys.argv) > 1 and _sys.argv[1] in _management_commands
+    # start.sh runs this before migrations. Validate the real runtime settings
+    # here too, rather than allowing a warning followed by a later boot failure.
+    if len(_sys.argv) > 1 and _sys.argv[1] == 'check' and '--deploy' in _sys.argv:
+        _running_mgmt = False
     # A Celery worker serves no HTTP, so the host and origin checks below would
     # only stop it from booting. Its secret and database still have to be real.
     _running_worker = os.path.basename(_sys.argv[0] if _sys.argv else '') == 'celery'
@@ -61,9 +79,10 @@ if not DEBUG:
             _config_errors.append(
                 'DATABASE_URL must be set (SQLite is not supported in production)'
             )
-        if not _running_worker and not os.environ.get('ALLOWED_HOSTS'):
+        if not _running_worker and not ALLOWED_HOSTS:
             _config_errors.append(
-                'ALLOWED_HOSTS must be set to your domain(s), e.g. "app.example.com"'
+                'ALLOWED_HOSTS must be set to your domain(s), e.g. "app.example.com" '
+                '(or RENDER_EXTERNAL_HOSTNAME must be supplied by Render)'
             )
         if not _running_worker and not os.environ.get('CORS_ALLOWED_ORIGINS'):
             _config_errors.append(
@@ -75,15 +94,6 @@ if not DEBUG:
                 'Missing required production settings:\n'
                 + '\n'.join(f'  - {e}' for e in _config_errors)
             )
-
-if DEBUG:
-    ALLOWED_HOSTS = ['*']
-else:
-    ALLOWED_HOSTS = [
-        h.strip()
-        for h in os.environ.get('ALLOWED_HOSTS', '').split(',')
-        if h.strip()
-    ]
 
 # Application definition
 INSTALLED_APPS = [

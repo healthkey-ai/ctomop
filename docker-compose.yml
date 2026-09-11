@@ -58,6 +58,7 @@ services:
       PHR_BASE_URL: ${PHR_BASE_URL:-}
 
       SERVICE_AUTH_TOKEN: ${SERVICE_AUTH_TOKEN:-}
+      SERVICE_AUTH_SCOPES: ${SERVICE_AUTH_SCOPES:-patient/*.read}
     ports:
       # Host port is configurable: 8000 is commonly taken by a sibling service
       # in a full local stack. The container always listens on 8000.

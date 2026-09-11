@@ -11,6 +11,7 @@ import logging
 import math
 import statistics
 from collections import defaultdict
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import date, datetime, timedelta
 from django.db import models
 from django.db.models import DateTimeField, Q
@@ -657,6 +658,7 @@ class OmopSnapshot:
     obs_by_code: dict           # concept_code → [Observation]
     meas_by_source: dict        # source_value → [Measurement]
     obs_by_source: dict         # source_value → [Observation]
+    death_date_assertion: object | None = None  # Latest UI assertion, including an explicit clear
 
 
 def _build_snapshot(person: Person) -> OmopSnapshot:
@@ -699,6 +701,12 @@ def _build_snapshot(person: Person) -> OmopSnapshot:
     )
     death = Death.objects.filter(person=person).only('death_date').first()
 
+    death_date_assertion = next((o for o in observations
+        if o.observation_source_value == 'patient-record:death_date'), None)
+    from omop_core.services.omop_projection import without_cleared_history
+    measurements = without_cleared_history(measurements, 'measurement')
+    observations = without_cleared_history(observations, 'observation')
+
     # Build code/source indexes
     meas_by_code: dict[str, list] = defaultdict(list)
     meas_by_source: dict[str, list] = defaultdict(list)
@@ -727,6 +735,7 @@ def _build_snapshot(person: Person) -> OmopSnapshot:
         drug_exposures=drug_exposures,
         procedures=procedures,
         death=death,
+        death_date_assertion=death_date_assertion,
         meas_by_code=dict(meas_by_code),
         obs_by_code=dict(obs_by_code),
         meas_by_source=dict(meas_by_source),
@@ -798,6 +807,22 @@ def _get_custom_patient_field_data(snapshot: OmopSnapshot) -> dict[str, object]:
     return values
 
 
+def _derived_value_matches(field_name, derived_value, saved_value):
+    """Compare at the PatientRecord column's precision, including float extractors."""
+    if _is_empty(derived_value) or _is_empty(saved_value):
+        return _is_empty(derived_value) and _is_empty(saved_value)
+    field = PatientRecord._meta.get_field(field_name)
+    if isinstance(field, models.DecimalField):
+        quantum = Decimal(1).scaleb(-field.decimal_places)
+        try:
+            return Decimal(str(derived_value)).quantize(quantum, rounding=ROUND_HALF_UP) == (
+                Decimal(str(saved_value)).quantize(quantum, rounding=ROUND_HALF_UP)
+            )
+        except (InvalidOperation, ValueError):
+            return False
+    return derived_value == saved_value
+
+
 def refresh_patient_record(person: Person) -> PatientRecord:
     """Derive and upsert PatientRecord from OMOP tables for a given person.
 
@@ -812,6 +837,17 @@ def refresh_patient_record(person: Person) -> PatientRecord:
             patient_info = PatientRecord.objects.select_for_update().get(person=person)
         except PatientRecord.DoesNotExist:
             patient_info = PatientRecord(person=person)
+        # Reuse the supplied Person when save computes age; avoid another lookup.
+        patient_info.person = person
+
+        # Snapshot user-edited values that may not yet have OMOP backing.
+        # After derivation, these are restored when derivation produced nothing
+        # for the field (meaning no OMOP fact backs it yet).
+        user_edited = set(patient_info.user_edited_fields or [])
+        preserved = {}
+        for field in user_edited:
+            if hasattr(patient_info, field):
+                preserved[field] = getattr(patient_info, field)
 
         # Clear all OMOP-derived fields before re-deriving so deletions are reflected.
         _clear_derived_fields(patient_info)
@@ -851,28 +887,105 @@ def refresh_patient_record(person: Person) -> PatientRecord:
                 setattr(patient_info, field, value)
 
         patient_info.custom_fields = _get_custom_patient_field_data(snapshot)
+        from omop_core.services.omop_projection import curated_values_from_snapshot
+        for field, value in curated_values_from_snapshot(snapshot).items():
+            setattr(patient_info, field, value)
 
-        _compute_derived_fields(patient_info)
+        # Pending edits (including explicit clears) win until OMOP actually
+        # represents the saved value. A stale fact or a failed projection must
+        # not silently undo a user's change.
+        still_orphaned = []
+        for field, value in preserved.items():
+            derived_value = getattr(patient_info, field, None)
+            matches = _derived_value_matches(field, derived_value, value)
+            # Keep the already-stored representation even on a match so saving
+            # a float extractor result cannot introduce another rounding step.
+            setattr(patient_info, field, value)
+            if not matches:
+                still_orphaned.append(field)
+        # Individual courses supersede legacy aggregate supportive-field edits.
+        from omop_core.services.supportive_therapy_service import supportive_course_summary
+        course_values = supportive_course_summary(person)
+        for field, value in course_values.items():
+            setattr(patient_info, field, value)
+        patient_info.user_edited_fields = sorted(set(still_orphaned) - course_values.keys())
 
         patient_info.derivation_version = DERIVATION_VERSION
         patient_info.derived_at = timezone.now()
+        return recompute_patient_record_fields(patient_info)
 
-        patient_info.save()
-        # PatientRecord.save retains a few legacy calculations (notably BMI).
-        # Reapply active formulas with a direct update so an approved formula is
-        # the final derivation authority for its target field.
-        formula_fields = _apply_active_field_formulas(patient_info)
-        if formula_fields:
-            concrete_names = {field.name for field in PatientRecord._meta.concrete_fields}
-            updates = {
-                field: getattr(patient_info, field) for field in formula_fields
-                if field in concrete_names
-            }
-            if any(field not in concrete_names for field in formula_fields):
-                updates['custom_fields'] = patient_info.custom_fields
-            updates['updated_at'] = timezone.now()
-            PatientRecord.objects.filter(pk=patient_info.pk).update(**updates)
-        return patient_info
+
+def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fields=()) -> PatientRecord:
+    """Save aliases and calculations from the current record without reading OMOP facts.
+
+    This does not advance derived_at/version: those describe the last full
+    OMOP refresh, not the last edit of PatientRecord's own values.
+    """
+    for canonical, aliases in _LAB_FIELD_ALIASES.items():
+        for alias in aliases:
+            setattr(patient_info, alias, getattr(patient_info, canonical))
+    # Full refresh clears these before extraction. Direct edits need to clear
+    # dependent results when an input is removed, without clearing other data.
+    for result, inputs in {
+        'hr_status': {'estrogen_receptor_status', 'progesterone_receptor_status'},
+        'metastatic_status': {'distant_metastasis_stage'},
+        'renal_adequacy_status': {'egfr_ml_min_173m2', 'serum_creatinine_mg_dl'},
+        'no_active_infection_status': {'active_infection_status'},
+        'no_other_active_malignancies': {'active_malignancies'},
+    }.items():
+        if inputs.intersection(changed_fields):
+            setattr(patient_info, result, None)
+    _compute_derived_fields(patient_info, apply_formulas=False)
+    _clear_overflowing_decimal_fields(patient_info)
+    patient_info.save()
+    # Model.save retains legacy calculations (notably BMI). Active formulas
+    # remain the final authority, for both direct edits and full OMOP refreshes.
+    formula_fields = _apply_active_field_formulas(patient_info)
+    if formula_fields:
+        concrete_names = {field.name for field in PatientRecord._meta.concrete_fields}
+        updates = {
+            field: getattr(patient_info, field) for field in formula_fields
+            if field in concrete_names
+        }
+        if any(field not in concrete_names for field in formula_fields):
+            updates['custom_fields'] = patient_info.custom_fields
+        updates['updated_at'] = timezone.now()
+        PatientRecord.objects.filter(pk=patient_info.pk).update(**updates)
+    return patient_info
+
+
+def _clear_overflowing_decimal_fields(patient_info: PatientRecord) -> None:
+    """Leave an oversized derived decimal unset instead of losing the refresh.
+
+    PostgreSQL reports only a generic numeric overflow at save time. Checking
+    the integer portion against each model column's declared precision lets the
+    remaining derived fields persist and identifies the bad projection value in
+    logs. Values are checked after rounding to the column's stored scale, since
+    a near-limit fraction can otherwise round up into an overflow.
+    """
+    for field in PatientRecord._meta.concrete_fields:
+        if not isinstance(field, models.DecimalField):
+            continue
+        value = getattr(patient_info, field.attname)
+        if value is None:
+            continue
+        try:
+            decimal_value = Decimal(str(value))
+            stored_value = decimal_value.quantize(
+                Decimal(1).scaleb(-field.decimal_places),
+                rounding=ROUND_HALF_UP,
+            )
+        except (InvalidOperation, ValueError):
+            continue
+        integer_digits = field.max_digits - field.decimal_places
+        if not stored_value.is_finite() or stored_value.adjusted() + 1 > integer_digits:
+            logger.warning(
+                'Skipping overflowing derived value for person_id=%s field=%s value=%r '
+                '(max_digits=%s decimal_places=%s)',
+                patient_info.person_id, field.name, value,
+                field.max_digits, field.decimal_places,
+            )
+            setattr(patient_info, field.attname, None)
 
 
 # ---------------------------------------------------------------------------
@@ -930,6 +1043,16 @@ def _get_demographics(person: Person, snapshot: OmopSnapshot = None) -> dict:
 
     if snapshot.death:
         data['death_date'] = snapshot.death.death_date
+    assertion = snapshot.death_date_assertion
+    if assertion is not None:
+        from omop_core.services.omop_projection import CLEAR_VALUE
+        if assertion.value_source_value == CLEAR_VALUE:
+            data['death_date'] = None
+        elif assertion.value_as_string:
+            try:
+                data['death_date'] = date.fromisoformat(assertion.value_as_string)
+            except ValueError:
+                pass
 
     if person.year_of_birth not in PERSON_YEAR_PLACEHOLDERS:
         try:
@@ -1021,7 +1144,16 @@ def _get_location_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
 # Keyed by lowercased concept name; only exact matches are remapped, so
 # unrelated conditions pass through untouched.
 _DISEASE_ALIASES = {
-    'myeloma': 'multiple myeloma',
+    'myeloma': 'Multiple Myeloma',
+    'myeloma (disorder)': 'Multiple Myeloma',
+    'multiple myeloma': 'Multiple Myeloma',
+    'multiple myeloma (disorder)': 'Multiple Myeloma',
+    'follicular lymphoma': 'Follicular Lymphoma',
+    'follicular lymphoma (disorder)': 'Follicular Lymphoma',
+    'chronic lymphocytic leukemia': 'Chronic Lymphocytic Leukemia',
+    'chronic lymphocytic leukemia (disorder)': 'Chronic Lymphocytic Leukemia',
+    'mantle cell lymphoma': 'Mantle Cell Lymphoma',
+    'mantle cell lymphoma (disorder)': 'Mantle Cell Lymphoma',
     # Breast cancer — all common OMOP/SNOMED surface forms → single canonical title
     'breast cancer': 'Breast Cancer',
     'breast cancer (disorder)': 'Breast Cancer',
@@ -1244,7 +1376,10 @@ def _get_treatment_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     if current_meds:
         data['concomitant_medications'] = ', '.join(current_meds)
 
-    # Try Episode-based therapy line grouping first
+    # Therapy-line projections have one durable source of truth: persisted
+    # Episode/EpisodeEvent groups.  Refresh must not invent an in-memory line
+    # from DrugExposure rows; ARTEMIS (or another episode producer) owns that
+    # transformation and persists it before this read model is refreshed.
     try:
         from omop_oncology.models import Episode
         episodes = Episode.objects.filter(person=person).select_related(
@@ -1254,24 +1389,9 @@ def _get_treatment_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     except Exception:
         pass
 
-    # No Episodes persisted yet — derive from the single LOT inference engine in
-    # read-only (dry_run) mode, so the same grouping algorithm the enrich/import
-    # steps use to *persist* Episodes also drives derivation. No OMOP rows are
-    # written here; refresh_patient_record stays read-only.
-    if not drug_exposures:
-        return data
-
-    from omop_core.services.lot_inference_service import infer_lot_for_person
-    # The snapshot already has the rows LOT inference needs. Reuse them rather
-    # than querying DrugExposure and ProcedureOccurrence a second time.
-    lots = infer_lot_for_person(
-        person,
-        force=True,
-        dry_run=True,
-        exposures=drug_exposures,
-        procedures=snapshot.procedures,
-    )
-    _apply_inferred_lots(data, lots, drug_exposures=drug_exposures)
+    # Deliberately leave all first-/second-/later-line fields absent when no
+    # persisted episode exists.  refresh_patient_record clears those fields
+    # first, so this also removes stale projections after an Episode is deleted.
     return data
 
 
@@ -1638,6 +1758,10 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, sn
 
     for episode in episodes:
         event_ids = ee_by_episode.get(episode.episode_id, [])
+        # An Episode only represents a therapy line once its backing events are
+        # persisted.  Do not project a dangling header row into PatientRecord.
+        if not event_ids:
+            continue
         drugs_in_episode = [de_by_id[eid] for eid in event_ids if eid in de_by_id]
 
         drug_name_set = {
@@ -2103,6 +2227,9 @@ _BIOMARKER_MEASUREMENT_LOINCS = frozenset({
 _BIOMARKER_OBS_LOINCS = frozenset({'44667-4'})
 _HISTOLOGIC_TYPE_LOINCS = frozenset({'59847-4'})
 _GENETIC_MUTATION_LOINCS = {
+    # Generic, repeatable LOINC question used by the clinician-facing mutation
+    # editor (#905).  The gene is carried in qualifier_source_value.
+    '36908-2': None,
     '21636-6': 'BRCA1',
     '21640-8': 'BRCA2',   # BRCA2 gene c.6174delT [Presence] in Blood or Tissue
     '21739-8': 'TP53',    # TP53 gene mutations found [Identifier] in Blood or Tissue
@@ -3309,7 +3436,10 @@ def _get_genetic_mutations(person: Person, snapshot: OmopSnapshot = None) -> dic
     for measurement in genetic_measurements:
         if not measurement.value_as_string:
             continue
-        gene = _GENETIC_MUTATION_LOINCS.get(_measurement_code(measurement))
+        code = _measurement_code(measurement)
+        gene = _GENETIC_MUTATION_LOINCS.get(code)
+        if code == '36908-2':
+            gene = measurement.qualifier_source_value
         if not gene:
             continue
 
@@ -3325,7 +3455,7 @@ def _get_genetic_mutations(person: Person, snapshot: OmopSnapshot = None) -> dic
         if measurement.value_as_concept and measurement.value_as_concept.concept_id in interpretation_concepts:
             mutation_data['interpretation'] = interpretation_concepts[measurement.value_as_concept.concept_id]
 
-        if measurement.qualifier_source_value:
+        if measurement.qualifier_source_value and code != '36908-2':
             mutation_data['assay_method'] = measurement.qualifier_source_value
 
         mutations.append(mutation_data)
@@ -3380,14 +3510,19 @@ def _get_cll_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         if m:
             data[field] = float(m.value_as_number)
 
-    # A lymph-node size is a distinct clinical meaning from LOINC 21889-1
-    # (Size Tumor).  Require the explicit source qualifier so the same row can
-    # never populate both PatientRecord columns.
+    # Athena Cancer Modifier 36769292 (Dimension of Largest Lymph Node) is the
+    # specific standard concept for this field (#911).  Keep the qualified
+    # legacy LOINC form readable so historical imports remain intact.
     lymph_node = next(
         (m for m in measurements
-         if (getattr(m.measurement_concept, 'concept_code', None) == '21889-1'
-             or m.measurement_source_value == '21889-1')
-         and (m.qualifier_source_value or '').lower() == 'lymph-node'
+         if (
+             getattr(m.measurement_concept, 'concept_id', None) == 36769292
+             or (
+                 (getattr(m.measurement_concept, 'concept_code', None) == '21889-1'
+                  or m.measurement_source_value == '21889-1')
+                 and (m.qualifier_source_value or '').lower() == 'lymph-node'
+             )
+         )
          and m.value_as_number is not None),
         None,
     )
@@ -3648,7 +3783,7 @@ def _parse_date_value(v):
     return None
 
 
-def _compute_derived_fields(patient_info: PatientRecord) -> None:
+def _compute_derived_fields(patient_info: PatientRecord, *, apply_formulas=True) -> None:
     """Compute fields that depend on other PatientRecord fields being set."""
     if patient_info.active_infection_status is not None:
         patient_info.no_active_infection_status = not patient_info.active_infection_status
@@ -3708,6 +3843,7 @@ def _compute_derived_fields(patient_info: PatientRecord) -> None:
     # BMI — computed from weight and height when units are known
     weight = patient_info.weight
     height = patient_info.height
+    patient_info.bmi = None
     if weight is not None and height is not None and float(height) > 0:
         weight_units = (patient_info.weight_units or 'kg').lower()
         height_units = (patient_info.height_units or 'cm').lower()
@@ -3725,6 +3861,11 @@ def _compute_derived_fields(patient_info: PatientRecord) -> None:
     # HR status — derived from ER and PR receptor status (HR+ = ER+ or PR+)
     er = patient_info.estrogen_receptor_status
     pr = patient_info.progesterone_receptor_status
+    her2 = patient_info.her2_status
+    patient_info.tnbc_status = (
+        all(status == 'Negative' for status in (er, pr, her2))
+        if all(status is not None for status in (er, pr, her2)) else None
+    )
     if er is not None or pr is not None:
         if (er and 'positive' in er.lower()) or (pr and 'positive' in pr.lower()):
             patient_info.hr_status = 'HR+'
@@ -3761,7 +3902,8 @@ def _compute_derived_fields(patient_info: PatientRecord) -> None:
     if _lt_candidates:
         patient_info.last_treatment = max(_lt_candidates)
 
-    _apply_active_field_formulas(patient_info)
+    if apply_formulas:
+        _apply_active_field_formulas(patient_info)
 
 
 def _formula_values(patient_info: PatientRecord) -> dict[str, object]:
@@ -3780,6 +3922,10 @@ def _apply_active_field_formulas(patient_info: PatientRecord) -> set[str]:
     from omop_core.models import CustomPatientField, FieldFormula
     from omop_core.services.formula_evaluator import evaluate_formula
 
+    overrides = patient_info.therapy_overrides or {}
+    for field in ('relapse_count', 'treatment_refractory_status'):
+        if field in overrides:
+            setattr(patient_info, field, overrides[field])
     values = _formula_values(patient_info)
     custom_fields = dict(patient_info.custom_fields or {})
     custom_field_names = set(CustomPatientField.objects.filter(
@@ -3787,6 +3933,8 @@ def _apply_active_field_formulas(patient_info: PatientRecord) -> set[str]:
     ).values_list('field_name', flat=True))
     changed_fields = set()
     for field_formula in FieldFormula.objects.filter(is_active=True).order_by('field_name'):
+        if field_formula.field_name in overrides:
+            continue
         try:
             value = evaluate_formula(field_formula.formula, values)
         except ValueError:

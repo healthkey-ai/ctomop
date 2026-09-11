@@ -7,7 +7,6 @@ import { Input } from '@/components/shadcn/input';
 import { today } from '@/api/clinicalFacts';
 import {
   COUNTRY_OPTIONS, US_STATES,
-  DISEASE_OPTIONS, STAGE_OPTIONS, HISTOLOGIC_TYPE_OPTIONS,
   ECOG_OPTIONS, KARNOFSKY_OPTIONS,
 } from '../patientConstants';
 
@@ -17,7 +16,7 @@ interface Props {
   editedName: string;
   onNameChange: (name: string) => void;
   onZipcodeChange: (zip: string) => void;
-  diseaseType?: 'breast' | 'lymphoma' | 'myeloma' | 'cll' | 'other';
+  patientMode?: boolean;
 }
 
 /**
@@ -29,18 +28,9 @@ interface Props {
  * reads back. `writeFieldValue` routes on the target, so the tab does not need
  * to know which is which — only to stop offering boxes the server refuses.
  *
- * Sixteen of its thirty-eight fields are writable. The rest divide into four
- * honest refusals: twelve are unmapped and have no write path at all yet, `bmi`
- * is computed from height and weight, `date_of_birth` is fillable only while
- * empty — the persons endpoint never overwrites one, so a box that appeared to
- * accept a correction would lie about the outcome — and the eight language
- * capabilities are derived from PersonLanguageSkill rows, which this tab has no
- * way to create.
- *
- * Those eight render as three-state rather than as checkboxes on purpose. Blank
- * means nobody asked about that language; false means the patient was asked and
- * does not have the capability. A checkbox collapses the two, and the difference
- * is exactly what a trial filter acts on.
+ * Most fields are writable. The rest divide into honest refusals: some are
+ * unmapped and have no write path at all yet, and `bmi` is computed from height
+ * and weight. Language capabilities are editable on the Behavior tab.
  *
  * Where the descriptor carries its own `options` — gender, race, ethnicity —
  * those win over the local constant. They are the curated set the server
@@ -48,7 +38,8 @@ interface Props {
  * could not code.
  */
 export default function GeneralTab({
-  formData, onChange, editedName, onNameChange, onZipcodeChange, diseaseType,
+  formData, onChange, editedName, onNameChange, onZipcodeChange,
+  patientMode = false,
 }: Props) {
   // Ask about *this* patient: whether a field may be edited depends on who is
   // asking and whose record it is, not only on whether the field is mapped.
@@ -58,14 +49,7 @@ export default function GeneralTab({
 
   const { source: ecogSource }        = useVocabulary('ecog-status', 'code');
   const { source: karnofskySource }   = useVocabulary('karnofsky-score', 'code');
-  const { source: diseaseSource }     = useVocabulary('disease', 'title');
-  const { source: cancerStageSource } = useVocabulary('cancer-stage', 'title');
   const { source: ethnicitySource }   = useVocabulary('ethnicity', 'title');
-  const { options: histologicOptions, source: histologicSource } = useVocabulary('histologic-type', 'title');
-
-  const histOptions = histologicOptions.length
-    ? histologicOptions.map((o: { value: string }) => o.value)
-    : HISTOLOGIC_TYPE_OPTIONS;
 
   const age = formData?.date_of_birth
     ? calculateAge(formData.date_of_birth as string)
@@ -83,7 +67,7 @@ export default function GeneralTab({
     extra: { options?: string[]; vocabSource?: ReturnType<typeof useVocabulary>['source'] } = {},
   ) => {
     const descriptor = descriptors[name];
-    const dated = descriptor?.writable && descriptor.target === 'measurement';
+    const dated = descriptor?.writable && descriptor.projection?.omop_table === 'measurement';
     return (
       <ClinicalField
         label={label}
@@ -119,6 +103,7 @@ export default function GeneralTab({
           </div>
 
           {field('Date of Birth', 'date_of_birth', 'date')}
+          {field('Death Date', 'death_date', 'date')}
 
           <div className="space-y-1.5">
             <label className="text-sm font-medium text-portal-text-primary">Age</label>
@@ -166,13 +151,15 @@ export default function GeneralTab({
         </div>
       </Section>
 
-      <Section title="Clinician Validation" description="Whether a clinician has checked this record.">
-        <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          {field('Validated', 'validated', 'boolean')}
-          {field('Validated By', 'validated_by', 'text')}
-          {field('Validation Date', 'validation_date', 'date')}
-        </div>
-      </Section>
+      {!patientMode && (
+        <Section title="Clinician Validation" description="Whether a clinician has checked this record.">
+          <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
+            {field('Validated', 'validated', 'boolean')}
+            {field('Validated By', 'validated_by', 'text')}
+            {field('Validation Date', 'validation_date', 'date')}
+          </div>
+        </Section>
+      )}
 
       <Section title="Race &amp; Ethnicity" description="Self-reported race and ethnicity (OMB standard categories).">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
@@ -181,17 +168,8 @@ export default function GeneralTab({
         </div>
       </Section>
 
-      <Section title="Clinical Summary" description="Diagnosis and eligibility-related information.">
+      <Section title="Clinical Summary" description="Eligibility-related information. Disease attributes are edited on the Disease tab.">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          {field('Disease', 'disease', 'select', { options: DISEASE_OPTIONS, vocabSource: diseaseSource })}
-          {field('Stage', 'stage', 'select', { options: STAGE_OPTIONS, vocabSource: cancerStageSource })}
-
-          {(!diseaseType || diseaseType === 'breast' || diseaseType === 'other') && (
-            <div className="sm:col-span-2">
-              {field('Histologic Type', 'histologic_type', 'select', { options: histOptions, vocabSource: histologicSource })}
-            </div>
-          )}
-
           {field('ECOG Performance Status', 'ecog_performance_status', 'select', { options: ECOG_OPTIONS, vocabSource: ecogSource })}
           {field('ECOG Assessment Date', 'ecog_assessment_date', 'date')}
           {field('Karnofsky Performance Score', 'karnofsky_performance_score', 'select', { options: KARNOFSKY_OPTIONS, vocabSource: karnofskySource })}
@@ -217,22 +195,6 @@ export default function GeneralTab({
           {field('No Hepatitis B', 'no_hepatitis_b_status', 'boolean')}
           {field('Hepatitis C Positive', 'hepatitis_c_status', 'boolean')}
           {field('No Hepatitis C', 'no_hepatitis_c_status', 'boolean')}
-        </div>
-      </Section>
-
-      <Section
-        title="Language Capabilities"
-        description="Derived from the patient's recorded language skills. Blank means nobody has asked about that language, which is not the same as an inability."
-      >
-        <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          {field('Speaks English', 'english_speak', 'boolean')}
-          {field('Speaks Spanish', 'spanish_speak', 'boolean')}
-          {field('Reads English', 'english_read', 'boolean')}
-          {field('Reads Spanish', 'spanish_read', 'boolean')}
-          {field('Writes English', 'english_write', 'boolean')}
-          {field('Writes Spanish', 'spanish_write', 'boolean')}
-          {field('Understands English', 'english_understand', 'boolean')}
-          {field('Understands Spanish', 'spanish_understand', 'boolean')}
         </div>
       </Section>
 

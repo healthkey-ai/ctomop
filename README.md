@@ -233,4 +233,10 @@ This project follows the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.
 
 ## Citation
 
+The concept-mapping **Semantic retrieval** strategy and search-expansion fallback adapt
+[Lettuce](https://github.com/Health-Informatics-UoN/lettuce)'s approach, developed
+by University of Nottingham Health Informatics under the MIT License. See
+[third-party acknowledgments and license notices](THIRD_PARTY_NOTICES.md) and
+[semantic retrieval setup](docs/semantic-retrieval.md).
+
 If you use PRomop in research, please cite it using [CITATION.cff](CITATION.cff) or via GitHub's "Cite this repository" button.

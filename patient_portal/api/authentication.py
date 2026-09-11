@@ -277,6 +277,16 @@ class ServiceTokenAuthentication(BaseAuthentication):
         if created:
             identity.set_unusable_password()
             identity.save(update_fields=['password'])
+        if identity.is_staff or identity.is_superuser:
+            # The shared bearer is a scoped compatibility credential, never a
+            # Django administrator. Repair the unsafe state proposed in #1144
+            # so IsAdminUser and inline staff checks cannot bypass its grant.
+            Identity.objects.filter(pk=identity.pk).update(
+                is_staff=False, is_superuser=False,
+            )
+            identity.is_staff = False
+            identity.is_superuser = False
+            logger.warning("Removed staff flags from legacy service identity")
 
         return (identity, SERVICE_TOKEN)
 

@@ -21,12 +21,16 @@ vi.mock('@/hooks/useVocabulary', () => ({
 }));
 
 const measurement = (code: string) => ({
-  kind: 'editable', writable: true, target: 'measurement',
-  concept_id: 1, code, value_kind: 'number', type_concept_id: 32856,
-  source_value: code,
+  kind: 'direct', writable: true, target: 'patient_record',
+  value_kind: 'number',
+  projection: {
+    omop_table: 'measurement', concept_id: 1, code,
+    type_concept_id: 32856, source_value: code,
+  },
 });
 
 const DESCRIPTORS: Record<string, unknown> = {
+  death_date: { kind: 'direct', writable: true, target: 'patient_record', value_kind: 'date' },
   // Person attributes — no event date, because the record keeps no history of them.
   gender: {
     kind: 'profile', writable: true, target: 'person', payload_field: 'gender',
@@ -79,7 +83,6 @@ function renderTab(formData: Record<string, unknown> = {}) {
       editedName="Alishia Howell"
       onNameChange={vi.fn()}
       onZipcodeChange={vi.fn()}
-      diseaseType="myeloma"
     />,
   );
 }
@@ -141,13 +144,15 @@ describe('GeneralTab', () => {
     expect(screen.getByTestId('reason-bmi')).toHaveTextContent(/computed from/i);
   });
 
-  it('explains an unmapped field rather than offering it', async () => {
+  it('keeps disease attributes on the Disease tab rather than duplicating editors', async () => {
     // Twelve of the thirty are unmapped. They were selects and text boxes that
     // returned 405 on every save.
-    renderTab({ disease: 'Multiple Myeloma', hiv_status: false });
+    renderTab({ disease: 'Multiple Myeloma', stage: 'III', histologic_type: 'Plasma cell myeloma', hiv_status: false });
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
 
-    expect(screen.getByTestId('reason-disease')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Disease')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Stage')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Histologic Type')).not.toBeInTheDocument();
     expect(screen.getByTestId('reason-hiv_status')).toBeInTheDocument();
   });
 
@@ -250,4 +255,10 @@ describe('GeneralTab — previously unreachable Person fields', () => {
 
     expect(screen.queryAllByLabelText('Result date')).toHaveLength(0);
   });
+});
+
+it('allows correcting the death date', async () => {
+  renderTab({ death_date: '2025-02-01' });
+  await waitFor(() => expect(screen.getByText('Death Date').parentElement?.parentElement?.querySelector('input')).toBeEnabled());
+  expect(screen.getByText('Death Date').parentElement?.parentElement?.querySelector('input')).toHaveValue('2025-02-01');
 });

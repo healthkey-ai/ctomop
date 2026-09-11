@@ -322,9 +322,9 @@ class CanonicalizeDiseaseTest(_OmopBase):
 
     def test_canonicalize_helper_maps_known_aliases(self):
         from omop_core.services.patient_record_service import _canonicalize_disease
-        self.assertEqual(_canonicalize_disease('myeloma'), 'multiple myeloma')
-        self.assertEqual(_canonicalize_disease('Myeloma'), 'multiple myeloma')
-        self.assertEqual(_canonicalize_disease('  MYELOMA  '), 'multiple myeloma')
+        self.assertEqual(_canonicalize_disease('myeloma'), 'Multiple Myeloma')
+        self.assertEqual(_canonicalize_disease('Myeloma'), 'Multiple Myeloma')
+        self.assertEqual(_canonicalize_disease('  MYELOMA  '), 'Multiple Myeloma')
         self.assertEqual(_canonicalize_disease('breast cancer'), 'Breast Cancer')
         self.assertEqual(_canonicalize_disease('Breast cancer'), 'Breast Cancer')
         self.assertEqual(_canonicalize_disease('Breast Cancer (disorder)'), 'Breast Cancer')
@@ -337,6 +337,39 @@ class CanonicalizeDiseaseTest(_OmopBase):
         self.assertEqual(_canonicalize_disease(''), '')
         self.assertIsNone(_canonicalize_disease(None))
 
+    def test_supported_disease_titles_are_consistent(self):
+        from omop_core.services.patient_record_service import _canonicalize_disease
+        for title in (
+            'Multiple Myeloma', 'Follicular Lymphoma', 'Breast Cancer',
+            'Chronic Lymphocytic Leukemia', 'Mantle Cell Lymphoma',
+        ):
+            for raw in (title, title.lower(), f'  {title.upper()}  ', f'{title.lower()} (disorder)'):
+                with self.subTest(raw=raw):
+                    self.assertEqual(_canonicalize_disease(raw), title)
+
+    def test_refresh_uses_canonical_titles_for_mapped_and_unmapped_conditions(self):
+        concept = _concept(90002, 'placeholder', self.dom_cond, self.vocab, self.cc)
+        condition = ConditionOccurrence.objects.create(
+            condition_occurrence_id=92204, person=self.person,
+            condition_concept=concept, condition_start_date=date(2022, 3, 1),
+            condition_type_concept=self.type_concept,
+        )
+        for title in (
+            'Multiple Myeloma', 'Follicular Lymphoma', 'Breast Cancer',
+            'Chronic Lymphocytic Leukemia', 'Mantle Cell Lymphoma',
+        ):
+            concept.concept_name = title.lower()
+            concept.save(update_fields=['concept_name'])
+            for mapped in (True, False):
+                with self.subTest(title=title, mapped=mapped):
+                    condition.condition_concept_id = concept.pk if mapped else 0
+                    condition.condition_source_value = title.lower()
+                    condition.save()
+                    record = refresh_patient_record(self.person)
+                    record.refresh_from_db()
+                    self.assertEqual(record.disease, title)
+                    self.assertEqual(record.disease_slug, title.lower().replace(' ', '-'))
+
     def test_refresh_canonicalizes_bare_myeloma_condition(self):
         myeloma_concept = _concept(90002, 'myeloma', self.dom_cond, self.vocab, self.cc)
         ConditionOccurrence.objects.create(
@@ -347,7 +380,7 @@ class CanonicalizeDiseaseTest(_OmopBase):
             condition_type_concept=self.type_concept,
         )
         pi = refresh_patient_record(self.person)
-        self.assertEqual(pi.disease, 'multiple myeloma')
+        self.assertEqual(pi.disease, 'Multiple Myeloma')
         self.assertEqual(pi.disease_slug, 'multiple-myeloma')
 
 
@@ -5325,10 +5358,12 @@ class SeededSctFieldMappingsTest(TestCase):
             with self.subTest(field=field):
                 entry = descriptor[field]
                 self.assertTrue(entry['writable'], f'{field} is not writable')
-                self.assertEqual(entry['target'], 'observation')
+                self.assertEqual(entry['target'], 'patient_record')
+                self.assertIn('projection', entry)
+                self.assertEqual(entry['projection']['omop_table'], 'observation')
                 # Derivation matches on this exact value; a mismatch would store
                 # a row that never comes back.
-                self.assertEqual(entry['source_value'], source_value)
+                self.assertEqual(entry['projection']['source_value'], source_value)
 
     def test_the_list_fields_offer_their_bounded_vocabulary(self):
         from omop_core.services.write_descriptor import build_writable_field_descriptor
@@ -5381,9 +5416,11 @@ class SeededEmploymentStatusMappingTest(TestCase):
         entry = build_writable_field_descriptor()['employment_status']
 
         self.assertTrue(entry['writable'])
-        self.assertEqual(entry['target'], 'observation')
+        self.assertEqual(entry['target'], 'patient_record')
+        self.assertIn('projection', entry)
+        self.assertEqual(entry['projection']['omop_table'], 'observation')
         # _get_social_data matches on this concept code.
-        self.assertEqual(entry['source_value'], '224362002')
+        self.assertEqual(entry['projection']['source_value'], '224362002')
 
     def test_writing_the_prescribed_fact_derives_back(self):
         """The round trip, not just the recipe.
@@ -5397,18 +5434,19 @@ class SeededEmploymentStatusMappingTest(TestCase):
         from omop_core.services.write_descriptor import build_writable_field_descriptor
 
         entry = build_writable_field_descriptor()['employment_status']
+        projection = entry['projection']
         person = Person.objects.create(person_id=880011, year_of_birth=1970)
         PatientRecord.objects.get_or_create(person=person)
 
         Observation.objects.create(
             observation_id=next_pk(Observation, 'observation_id'),
             person=person,
-            observation_concept=Concept.objects.get(concept_id=entry['concept_id']),
+            observation_concept=Concept.objects.get(concept_id=projection['concept_id']),
             observation_date=date(2025, 4, 1),
             observation_type_concept=Concept.objects.get(
-                concept_id=entry['type_concept_id'],
+                concept_id=projection['type_concept_id'],
             ),
-            observation_source_value=entry['source_value'],
+            observation_source_value=projection['source_value'],
             value_as_string='Employed full-time',
         )
 
@@ -6527,6 +6565,21 @@ class MappingSuggestionsTest(_OmopBase):
         for i in range(times):
             self._measurement(start + i, source_value, day=(i % 28) + 1)
 
+    def _queue(self, source_code, occurrences=12, **kwargs):
+        """A Code Mapping queue row, the way ingest leaves one.
+
+        Suggest reads the tab, not the clinical tables, so this -- not a
+        Measurement -- is what puts a code in front of it.
+        """
+        from omop_core.models import SourceCodeConceptMapping
+        defaults = {
+            'source_vocabulary_id': '', 'omop_table': 'measurement',
+            'domain_id': 'Measurement', 'status': 'proposed', 'origin': 'import',
+            'origin_system': '', 'occurrence_count': occurrences,
+        }
+        defaults.update(kwargs)
+        return SourceCodeConceptMapping.objects.create(source_code=source_code, **defaults)
+
     # -- the threshold ----------------------------------------------------
 
     def test_a_code_below_the_threshold_is_not_proposed(self):
@@ -6676,19 +6729,31 @@ class MappingSuggestionsTest(_OmopBase):
 
     # -- creating the proposals -------------------------------------------
 
-    def test_suggest_creates_proposed_mappings_marked_as_a_machine_guess(self):
+    def test_suggest_marks_its_answer_as_a_machine_guess(self):
         from omop_core.models import SourceCodeConceptMapping
         from omop_core.services.mapping_suggestions import suggest_mappings
-        self._seed('Creatinine', 12, start=95000)
+        # A concept the source value actually retrieves. Two things stopped the
+        # existing fixtures being retrievable, and both made this test assert
+        # the provenance of a suggestion that was never made: 'Creatinine'
+        # scores below the trigram threshold against 'Creatinine [Mass/volume]
+        # in Blood' (the name is three times longer), and `_concept` leaves
+        # standard_concept unset while retrieval takes standard concepts only.
+        exact = _concept(4100010, 'Creatinine', self.dom_meas, self.vocab, self.cc,
+                         code='CREAT-EXACT')
+        exact.standard_concept = 'S'
+        exact.save(update_fields=['standard_concept'])
+        self._queue('Creatinine')
         with override_settings(ANTHROPIC_API_KEY=''):
             results = suggest_mappings('measurement', min_occurrences=10)
 
         self.assertEqual(len(results), 1)
         mapping = SourceCodeConceptMapping.objects.get(source_code='Creatinine')
-        self.assertEqual(mapping.status, 'proposed')
+        self.assertEqual(mapping.target_concept_id, exact.concept_id)
+        self.assertEqual(mapping.status, 'proposed', 'a guess is not a decision')
         self.assertEqual(mapping.origin, 'import')
-        self.assertEqual(mapping.origin_system, 'suggest')
-        self.assertEqual(mapping.occurrence_count, 12)
+        self.assertTrue(mapping.origin_system.startswith('suggest'),
+                        f'expected origin_system to start with "suggest", got {mapping.origin_system!r}')
+        self.assertEqual(mapping.occurrence_count, 12, 'the count must survive a run')
         self.assertEqual(mapping.omop_table, 'measurement')
         self.assertTrue(mapping.notes, 'the curator needs to know why')
 
@@ -6708,11 +6773,10 @@ class MappingSuggestionsTest(_OmopBase):
         loinc_source = _concept(
             4100004, 'LOINC source', self.dom_meas, loinc, self.cc, code='SAME-CODE',
         )
-        for i in range(10):
-            self._measurement(95400 + i, 'SAME-CODE', day=(i % 28) + 1,
-                              source_concept_id=rxnorm_source.concept_id)
-            self._measurement(95500 + i, 'SAME-CODE', day=(i % 28) + 1,
-                              source_concept_id=loinc_source.concept_id)
+        self._queue('SAME-CODE', occurrences=10, source_vocabulary_id='RxNorm',
+                    source_concept=rxnorm_source)
+        self._queue('SAME-CODE', occurrences=10, source_vocabulary_id='LOINC',
+                    source_concept=loinc_source)
 
         with override_settings(ANTHROPIC_API_KEY=''):
             results = suggest_mappings('measurement', min_occurrences=10)
@@ -6729,7 +6793,7 @@ class MappingSuggestionsTest(_OmopBase):
         """A raw code is evidence, not a meaningful HK-* concept name."""
         from omop_core.models import SourceCodeConceptMapping
         from omop_core.services.mapping_suggestions import suggest_mappings
-        self._seed('ZZQQ NOTHING LIKE THIS', 11, start=95000)
+        self._queue('ZZQQ NOTHING LIKE THIS', occurrences=11)
         with override_settings(ANTHROPIC_API_KEY=''):
             suggest_mappings('measurement', min_occurrences=10)
         mapping = SourceCodeConceptMapping.objects.get(
@@ -6743,13 +6807,14 @@ class MappingSuggestionsTest(_OmopBase):
         ).exists())
 
     def test_dry_run_writes_nothing(self):
-        from omop_core.models import SourceCodeConceptMapping
         from omop_core.services.mapping_suggestions import suggest_mappings
-        self._seed('Creatinine', 12, start=95000)
+        row = self._queue('Creatinine')
         with override_settings(ANTHROPIC_API_KEY=''):
             results = suggest_mappings('measurement', min_occurrences=10, dry_run=True)
         self.assertEqual(len(results), 1)
-        self.assertEqual(SourceCodeConceptMapping.objects.count(), 0)
+        row.refresh_from_db()
+        self.assertIsNone(row.target_concept_id)
+        self.assertEqual(row.origin_system, '', 'dry run must not stamp provenance')
 
     def test_a_rejected_code_is_not_proposed_again(self):
         """Rejected is decided. Re-proposing put it back at the front of the
@@ -7155,19 +7220,17 @@ class SeedWearableDeviceMappingsTest(TestCase):
 
 
 class ResolveWearableMappingsTest(TestCase):
-    """Test resolve_wearable_mappings() with DB-driven and fallback modes."""
+    """Test resolve_wearable_mappings() uses SCCM as its sole registry."""
 
     @classmethod
     def setUpTestData(cls):
         seed_test_concepts()
 
-    def test_fallback_to_hardcoded_when_no_db_rows(self):
-        """Without SCCM rows, resolve_wearable_mappings falls back to WEARABLE_CONCEPT_CODE."""
+    def test_no_mapping_without_an_approved_sccm_row(self):
+        """An unseeded device has no hidden Python mapping fallback."""
         from omop_core.services.mappings import resolve_wearable_mappings
         mappings = resolve_wearable_mappings('apple')
-        # Steps should resolve from the hard-coded dict
-        self.assertIn('steps', mappings)
-        self.assertIsNotNone(mappings['steps'])
+        self.assertEqual(mappings, {})
 
     def test_db_mappings_used_when_seeded(self):
         """After seeding, resolve_wearable_mappings reads from the DB."""
@@ -7186,13 +7249,11 @@ class ResolveWearableMappingsTest(TestCase):
         self.assertIn('hrv_rmssd', mappings)
         self.assertIn('resting_hr', mappings)
 
-    def test_db_mapping_overrides_hardcoded(self):
-        """An approved SCCM row takes precedence over the hard-coded dict."""
+    def test_db_mapping_is_the_runtime_mapping(self):
+        """An approved SCCM row is the sole source of runtime resolution."""
         from omop_core.services.mappings import resolve_wearable_mappings
         call_command('seed_wearable_device_mappings', verbosity=0)
         mappings = resolve_wearable_mappings('garmin')
-        # The DB mapping should resolve to the same concept as the hard-coded one
-        # (since they point to the same LOINC code), confirming DB was consulted.
         garmin_steps = SourceCodeConceptMapping.objects.get(
             source_vocabulary_id='Garmin', source_code='steps',
         )

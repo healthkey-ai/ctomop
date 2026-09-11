@@ -68,7 +68,7 @@ def person():
 
 def _patch(client, person, payload):
     return client.patch(
-        f'/api/v1/persons/{person.person_id}/', payload, format='json'
+        f'/api/patient-info/{person.person_id}/', payload, format='json'
     )
 
 
@@ -195,8 +195,10 @@ class TestDescriptor:
 
         d = build_writable_field_descriptor()
         for field, count in (('gender', 3), ('race', 5), ('ethnicity', 2)):
-            assert d[field]['kind'] == 'profile', field
+            assert d[field]['kind'] == 'direct', field
             assert d[field]['writable'] is True, field
+            assert d[field]['target'] == 'patient_record', field
+            assert d[field]['projection_target'] == 'person', field
             assert len(d[field]['options']) == count, field
             assert 'fill_if_empty' not in d[field], field
 
@@ -214,6 +216,7 @@ class TestDescriptor:
         from omop_core.services.write_descriptor import build_writable_field_descriptor
 
         entry = build_writable_field_descriptor()['date_of_birth']
+        assert entry['kind'] == 'direct'
         assert entry['writable'] is False
         assert entry['fill_if_empty'] is True
 

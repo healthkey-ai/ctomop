@@ -5,7 +5,7 @@ import { PatientInfoProvider } from "./PatientInfoProvider";
 import { usePatientInfoMe, usePatchPatientInfo } from "./patientInfoHooks";
 import type { PatientInfoProps } from "./patientInfoTypes";
 import { fetchWritableFields, LIFECYCLE, type FieldDescriptors } from "@/hooks/useWritableFields";
-import { writeFieldValues } from "@/api/clinicalFacts";
+// Profile fields now write through PatientRecord PATCH alongside clinical fields.
 import GeneralTab from "@/components/PatientInfo/tabs/GeneralTab";
 import DiseaseTab from "@/components/PatientInfo/tabs/DiseaseTab";
 import TreatmentTab from "@/components/PatientInfo/tabs/TreatmentTab";
@@ -13,7 +13,6 @@ import BloodTab from "@/components/PatientInfo/tabs/BloodTab";
 import LabsTab from "@/components/PatientInfo/tabs/LabsTab";
 import BehaviorTab from "@/components/PatientInfo/tabs/BehaviorTab";
 import WearableTab from "@/components/PatientInfo/tabs/WearableTab";
-import { CustomPatientFields } from "@/components/PatientInfo/CustomPatientFields";
 
 type SaveStatus = "idle" | "pending" | "saving" | "saved" | "error";
 
@@ -160,42 +159,28 @@ function PatientInfoInner({ readOnly, onPatientUpdated }: Pick<PatientInfoProps,
       const baseline = serverInfoRef.current;
       const personId = baseline.person_id ?? data?.patient_info?.person_id;
 
-      const clinicalEdits = personId
-        ? Object.keys(info).filter(
-            (f) => descriptors[f]?.writable && info[f] !== baseline[f],
-          )
-        : [];
-      // As a set: the Person fields travel in one request, because some are
-      // only valid together (latitude and longitude are a pair).
-      if (clinicalEdits.length) {
-        await writeFieldValues(
-          personId as number,
-          clinicalEdits.map((field) => ({
-            field, descriptor: descriptors[field], value: info[field],
-          })),
-        );
-        for (const field of clinicalEdits) {
-          serverInfoRef.current[field] = info[field];
+      // All fields — clinical and profile — go through PatientRecord PATCH.
+      // The backend projects profile fields to Person/Location and clinical
+      // fields to OMOP tables after the PATCH lands.
+      const patchFields: Record<string, unknown> = {};
+
+      if (personId) {
+        for (const [f, v] of Object.entries(info)) {
+          if (f === "patient_name" || LIFECYCLE.has(f) || v === baseline[f]) continue;
+          const desc = descriptors[f];
+          if (desc?.writable && desc.target === 'patient_record') {
+            patchFields[f] = v;
+          } else if (!(f in descriptors)) {
+            patchFields[f] = v;
+          }
         }
       }
 
-      // patient_name is handled by the server against Person, so it stays. Every
-      // descriptor-known field is OMOP-mapped and never belongs here, whatever
-      // its kind; lifecycle columns go stale on any write; and an unchanged value
-      // has nothing to say.
-      const projectionInfo = Object.fromEntries(
-        Object.entries(info).filter(
-          ([f, v]) =>
-            f !== "patient_name"
-            && !(f in descriptors)
-            && !LIFECYCLE.has(f)
-            && v !== baseline[f],
-        ),
-      );
       const renamed = typeof info.patient_name === "string";
+      const combined = { ...patchFields };
       const payload = renamed
-        ? { ...projectionInfo, patient_name: info.patient_name }
-        : projectionInfo;
+        ? { ...combined, patient_name: info.patient_name }
+        : combined;
 
       // Nothing left to say is not a reason to say it: the OMOP writes above have
       // already done the work, and an empty PATCH can only fail.
@@ -206,7 +191,7 @@ function PatientInfoInner({ readOnly, onPatientUpdated }: Pick<PatientInfoProps,
       }
 
       const result = await patchMutation.mutateAsync(payload);
-      for (const f of Object.keys(projectionInfo)) {
+      for (const f of Object.keys(combined)) {
         serverInfoRef.current[f] = info[f];
       }
       setSaveStatus("saved");
@@ -408,10 +393,6 @@ function PatientInfoInner({ readOnly, onPatientUpdated }: Pick<PatientInfoProps,
           {activeTab === 4 && <LabsTab formData={editedInfo} onChange={handleFieldChange} />}
           {activeTab === 5 && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} />}
           {activeTab === 6 && <WearableTab formData={editedInfo} onChange={handleFieldChange} />}
-          <CustomPatientFields
-            tab={["general", "disease", "treatment", "blood", "labs", "behavior", "wearable"][activeTab]}
-            formData={editedInfo}
-          />
         </div>
       </div>
     </div>

@@ -24,14 +24,17 @@ def test_api_does_not_import_or_call_retired_write_through_service():
     assert "sync_to_omop" not in api_views
 
 
-def test_derivation_does_not_restore_legacy_user_edited_values():
-    """A legacy metadata value must not override absent OMOP clinical facts."""
+def test_derivation_preserves_user_edited_fields():
+    """The PatientRecord-first architecture stores user edits directly and
+    derivation must preserve them when no OMOP fact backs the field yet.
+    user_edited_fields is the mechanism for this preservation."""
     derivation_service = (
         REPOSITORY_ROOT / "omop_core/services/patient_record_service.py"
     ).read_text()
 
-    assert "user_edited_fields" not in derivation_service
-    assert "_restore_user_edited" not in derivation_service
+    # user_edited_fields MUST be present — derivation snapshots and restores
+    # values that have no OMOP backing yet.
+    assert "user_edited_fields" in derivation_service
 
 
 def test_public_contract_documents_read_only_mapped_fields_and_legacy_policy():
@@ -61,16 +64,17 @@ def test_partial_update_schema_description_explains_omop_write_migration():
     """The generated OpenAPI operation inherits this method documentation."""
     api_views = (REPOSITORY_ROOT / "patient_portal/api/views.py").read_text()
 
-    assert "returns 405" in api_views
-    assert "docs/omop_to_patientrecord.md" in api_views
-    assert "Write the appropriate OMOP resource" in api_views
+    # The docstring documents the silent-ignore behaviour for read-only fields
+    # and advises clients to check the writable-fields descriptor.
+    assert "silently ignored" in api_views
+    assert "writable-fields descriptor" in api_views
 
 
 def test_every_concrete_patientrecord_data_column_is_api_read_only():
     """No pending derivation is a temporary PatientRecord write exception."""
     lifecycle_fields = {
         'id', 'person', 'organization', 'created_at', 'updated_at',
-        'derived_at', 'derivation_version', 'user_edited_fields', 'custom_fields',
+        'derived_at', 'derivation_version', 'user_edited_fields', 'custom_fields', 'therapy_overrides',
     }
     writable = {
         field.name for field in PatientRecord._meta.concrete_fields

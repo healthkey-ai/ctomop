@@ -1,10 +1,11 @@
+from typing import Any
+
 from rest_framework import serializers
 from patient_portal.models import Identity, PatientConsent, PatientMessage
 from omop_core.models import (
     PatientRecord, Concept, FieldConceptMapping, FieldSynonym, Person,
     ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
-    PatientDocument, PatientTrialEnrollment, ProvenanceRecord,
-    Survey, PatientSurveyResponse,
+    PatientDocument, PatientTrialEnrollment, TrialSearchPreferences, ProvenanceRecord,
     StemCellTransplant, SctEligibility, PostTransformationOutcome,
     Organization, OrgTrust, OrgInvitation, GroupAccess,
     InterchangeAgreement,
@@ -15,8 +16,12 @@ from datetime import date
 import re
 from django.utils.timezone import localdate
 from django.utils import timezone
-from omop_core.services.access import has_org_admin_access
+from omop_core.services.access import get_admin_access_paths, has_org_admin_access
 from omop_core.services.patient_record_service import PATIENT_RECORD_OMOP_MAPPED_FIELDS
+from omop_core.services.write_descriptor import get_serializer_read_only_fields
+
+#: Columns that Measurement and Observation validate as one value.
+_VALUE_FIELDS = frozenset({'value_as_number', 'value_as_string'})
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -24,12 +29,15 @@ class UserSerializer(serializers.ModelSerializer):
     org_accesses = serializers.SerializerMethodField()
     is_patient = serializers.SerializerMethodField()
     person_id = serializers.SerializerMethodField()
+    effective_roles = serializers.SerializerMethodField()
+    patient_delegations = serializers.SerializerMethodField()
 
     class Meta:
         model = Identity
         fields = [
             'id', 'sub', 'email', 'name', 'is_staff', 'is_superuser',
             'is_org_admin', 'org_accesses', 'is_patient', 'person_id',
+            'effective_roles', 'patient_delegations',
             'must_change_password',
         ]
         read_only_fields = ['must_change_password']
@@ -56,80 +64,95 @@ class UserSerializer(serializers.ModelSerializer):
     def get_is_org_admin(self, obj):
         return has_org_admin_access(obj)
 
-    def get_org_accesses(self, obj):
-        """Return active org access along with the path that granted it.
-
-        Invitations create ``GroupAccess`` rows, while a trusted email domain
-        grants access without one.  Keeping both paths in this response lets
-        the profile explain why an organization appears in a user's access
-        list.
-        """
-        now = timezone.now()
+    def _active_grants(self, obj):
         from django.db.models import Q
-        pending_invitations = OrgInvitation.objects.filter(
-            email__iexact=obj.email,
-            confirmed_at__isnull=True,
-            cancelled_at__isnull=True,
-            expires_at__gt=now,
+        if not hasattr(self, '_role_grants'):
+            self._role_grants = {}
+        if obj.pk not in self._role_grants:
+            self._role_grants[obj.pk] = [
+                grant for grant in GroupAccess.objects.filter(identity=obj).filter(
+                    Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())
+                ).select_related('org', 'group__organization').order_by('id')
+                if (grant.org or grant.group.organization).is_active
+            ]
+        return self._role_grants[obj.pk]
+
+    def get_effective_roles(self, obj):
+        """Every active application grant, without collapsing patient/provider roles."""
+        from patient_portal.models import PatientUser
+        roles = []
+        if obj.is_staff:
+            roles.append({'role': 'staff', 'scope': 'platform',
+                          'source': 'staff_flag', 'expires_at': None})
+        # is_patient is a legacy routing flag that excludes providers. An active
+        # patient link still grants self-access, even when that person is a doctor.
+        patient = PatientUser.objects.filter(identity=obj, is_active=True).first()
+        if patient:
+            roles.append({'role': 'patient', 'scope': 'patient',
+                          'person_id': patient.person_id, 'source': 'patient_link',
+                          'expires_at': None})
+        for grant in self._active_grants(obj):
+            org = grant.org or grant.group.organization
+            roles.append({
+                'role': grant.role,
+                'scope': 'organization' if grant.org_id else 'group',
+                'org_name': org.name, 'org_slug': org.slug,
+                'group_id': grant.group_id,
+                'group_name': grant.group.name if grant.group_id else None,
+                'source': 'org_grant' if grant.org_id else 'group_grant',
+                'expires_at': grant.expires_at,
+            })
+        return roles + self._trust_roles(obj)
+
+    def _trust_roles(self, obj):
+        if not hasattr(self, '_trust_role_cache'):
+            self._trust_role_cache = {}
+        if obj.pk not in self._trust_role_cache:
+            self._trust_role_cache[obj.pk] = [{
+                **{key: value for key, value in path.items() if key != 'org'},
+                'role': 'org_admin', 'scope': 'organization',
+                'org_name': path['org'].name, 'org_slug': path['org'].slug,
+            } for path in get_admin_access_paths(obj) if path['source'] != 'org_grant']
+        return self._trust_role_cache[obj.pk]
+
+    def get_patient_delegations(self, obj):
+        from omop_core.models import PersonalRepresentative
+        return list(PersonalRepresentative.objects.filter(
+            representative=obj, verification_status='VERIFIED',
+        ).order_by('person_id').values('person_id', 'relationship'))
+
+    def get_org_accesses(self, obj):
+        """Compatibility organization list; only active grants carry a role.
+
+        Trust-derived roles retain their granting scope and source. Pending
+        invitations cannot enable professional routes that consume this response.
+        """
+        accesses = []
+        for grant in self._active_grants(obj):
+            org = grant.org or grant.group.organization
+            accesses.append({
+                'org_name': org.name, 'org_slug': org.slug, 'role': grant.role,
+                'expires_at': grant.expires_at, 'access_via': ['explicit_grant'],
+                'group_name': grant.group.name if grant.group_id else None,
+            })
+        for invitation in OrgInvitation.objects.filter(
+            email__iexact=obj.email, confirmed_at__isnull=True,
+            cancelled_at__isnull=True, expires_at__gt=timezone.now(),
             org__is_active=True,
-        ).select_related('org').order_by('org__name')
-        pending_invitation_org_ids = set(pending_invitations.values_list('org_id', flat=True))
-        grants = GroupAccess.objects.filter(
-            identity=obj,
-        ).filter(
-            Q(expires_at__isnull=True) | Q(expires_at__gt=now)
-        ).select_related('org', 'group__organization').order_by('role')
-        accesses = {}
-        for g in grants:
-            org = g.org or (g.group and g.group.organization)
-            if not org or not org.is_active:
-                continue
-            access = accesses.setdefault(org.id, {
-                'org_name': org.name,
-                'org_slug': org.slug,
-                'role': g.role,
-                'expires_at': g.expires_at,
-                'access_via': [],
-            })
-            invitation_source = (
-                'invitation_pending'
-                if org.id in pending_invitation_org_ids
-                else 'invitation'
-            )
-            if invitation_source not in access['access_via']:
-                access['access_via'].append(invitation_source)
-
-        for invitation in pending_invitations:
-            org = invitation.org
-            access = accesses.setdefault(org.id, {
-                'org_name': org.name,
-                'org_slug': org.slug,
-                'role': invitation.role,
+        ).select_related('org').order_by('id'):
+            accesses.append({
+                'org_name': invitation.org.name, 'org_slug': invitation.org.slug,
+                'role': None, 'pending_role': invitation.role,
                 'expires_at': invitation.expires_at,
-                'access_via': [],
+                'access_via': ['invitation_pending'],
             })
-            if 'invitation_pending' not in access['access_via']:
-                access['access_via'].append('invitation_pending')
-
-        email = (obj.email or '').lower()
-        domain = email.rsplit('@', 1)[1] if '@' in email else ''
-        if domain:
-            trusted_orgs = Organization.objects.filter(
-                is_active=True,
-                trusts_granted__trusted_domain__iexact=domain,
-            ).distinct().order_by('name')
-            for org in trusted_orgs:
-                access = accesses.setdefault(org.id, {
-                    'org_name': org.name,
-                    'org_slug': org.slug,
-                    'role': None,
-                    'expires_at': None,
-                'access_via': [],
-                })
-                if 'trusted_domain' not in access['access_via']:
-                    access['access_via'].append('trusted_domain')
-
-        return sorted(accesses.values(), key=lambda access: access['org_name'].lower())
+        for role in self._trust_roles(obj):
+            accesses.append({
+                'org_name': role['org_name'], 'org_slug': role['org_slug'],
+                'role': 'org_admin', 'expires_at': role['expires_at'],
+                'access_via': [role['source']],
+            })
+        return sorted(accesses, key=lambda access: access['org_name'].lower())
 
 
 class OrganizationSerializer(serializers.ModelSerializer):
@@ -293,7 +316,15 @@ class GenderField(serializers.CharField):
 
     def to_internal_value(self, data):
         title = str(data).title()
-        return self.DISPLAY_TO_CODE.get(title, data)
+        if title in self.DISPLAY_TO_CODE:
+            return self.DISPLAY_TO_CODE[title]
+        # Also accept DB codes directly (M, F, empty string).
+        if data in self.CODE_TO_DISPLAY or data == '':
+            return data
+        raise serializers.ValidationError(
+            f"Invalid gender value '{data}'. "
+            f"Expected one of: {', '.join(self.DISPLAY_TO_CODE.keys())}."
+        )
 
 
 def _derived_wearable_fields():
@@ -332,7 +363,9 @@ class PatientRecordSerializer(serializers.ModelSerializer):
     name = serializers.SerializerMethodField()
     age = serializers.SerializerMethodField()
     gender = GenderField(read_only=True)
-    refractory_status = serializers.CharField(source='treatment_refractory_status', read_only=True)
+    refractory_status = serializers.CharField(source='treatment_refractory_status', required=False, allow_null=True, allow_blank=True)
+    relapse_count = serializers.IntegerField(required=False, allow_null=True, min_value=0)
+    supportive_therapy_courses = serializers.SerializerMethodField()
     first_line_therapy_display = serializers.SerializerMethodField()
     second_line_therapy_display = serializers.SerializerMethodField()
     later_therapy_display = serializers.SerializerMethodField()
@@ -350,12 +383,55 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             'organization', 'person', 'created_at', 'updated_at',
             'first_line_therapy_display', 'second_line_therapy_display', 'later_therapy_display',
             'lines_of_therapy', 'therapy_release_id',
-            'death_date',
             # Derivation versioning — set only by refresh_patient_record, never by client.
             'derivation_version', 'derived_at',
-            # Internal migration bookkeeping; clients must not set it.
-            'user_edited_fields', 'custom_fields',
-        ) + tuple(sorted(PATIENT_RECORD_OMOP_MAPPED_FIELDS))
+            # Tracks fields with direct user edits not yet backed by OMOP facts;
+            # managed by the PATCH handler, not by the client.
+            'user_edited_fields', 'custom_fields', 'therapy_overrides',
+        )
+
+    def get_supportive_therapy_courses(self, obj):
+        from patient_portal.api.supportive_therapies import SupportiveTherapySerializer
+        return SupportiveTherapySerializer(
+            obj.person.supportive_courses.select_related('regimen').all(), many=True,
+        ).data
+
+    def validate_death_date(self, value):
+        if value and value > localdate():
+            raise serializers.ValidationError('Death date cannot be in the future.')
+        dob = getattr(self.instance, 'date_of_birth', None)
+        if value and dob and value < dob:
+            raise serializers.ValidationError('Death date cannot precede date of birth.')
+        return value
+
+    def validate_treatment_refractory_status(self, value):
+        from omop_core.services.treatment_catalog import REFRACTORY_STATUSES
+        if value not in (None, '') and value not in REFRACTORY_STATUSES:
+            raise serializers.ValidationError('Select a recognized refractory status.')
+        return value
+
+    validate_refractory_status = validate_treatment_refractory_status
+
+    def update(self, instance, validated_data):
+        overrides = dict(instance.therapy_overrides or {})
+        for field in ('relapse_count', 'treatment_refractory_status'):
+            if field in validated_data:
+                value = validated_data[field]
+                if value in (None, ''):
+                    overrides.pop(field, None)
+                    if field == 'relapse_count':
+                        instance._cleared_relapse_count = True
+                else:
+                    overrides[field] = value
+        instance.therapy_overrides = overrides
+        return super().update(instance, validated_data)
+
+    def get_fields(self):
+        fields = super().get_fields()
+        for name in get_serializer_read_only_fields():
+            if name in fields:
+                fields[name].read_only = True
+        return fields
 
     def get_patient_name(self, obj):
         if obj.person:
@@ -838,17 +914,36 @@ class MeasurementSerializer(serializers.ModelSerializer):
         ]
         extra_kwargs = {'measurement_id': {'required': False}}
 
-    def validate(self, attrs):
+    def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
         attrs = super().validate(attrs)
-        from omop_core.services.field_write_service import coerce_assertion_value
-        source_value = attrs.get('measurement_source_value')
-        num, string, error = coerce_assertion_value(
-            source_value, attrs.get('value_as_number'), attrs.get('value_as_string'),
+        from omop_core.services.field_write_service import (
+            coerce_assertion_value, is_boolean_assertion_code,
         )
+        source_value = attrs.get(
+            'measurement_source_value', getattr(self.instance, 'measurement_source_value', None))
+        explicit = _VALUE_FIELDS & attrs.keys()
+        # An explicit value decides on its own. Feeding the stored sibling back in
+        # would let it win the precedence inside coerce_assertion_value, so
+        # patching a boolean assertion from 1 to 0 would stay true.
+        if explicit or not self.partial:
+            number, string = attrs.get('value_as_number'), attrs.get('value_as_string')
+        else:
+            number = getattr(self.instance, 'value_as_number', None)
+            string = getattr(self.instance, 'value_as_string', None)
+        number, string, error = coerce_assertion_value(source_value, number, string)
         if error:
             raise serializers.ValidationError({'value_as_string': error})
-        attrs['value_as_number'] = num
-        attrs['value_as_string'] = string
+        # The two columns are one answer only for an assertion code, and there
+        # coercion can rewrite the column the caller left out. Anywhere else a
+        # partial write must not touch what it did not carry, which assigning
+        # both unconditionally did.
+        if not self.partial or is_boolean_assertion_code(source_value):
+            attrs['value_as_number'] = number
+            attrs['value_as_string'] = string
+        elif explicit:
+            attrs.update({k: v for k, v in
+                         (('value_as_number', number), ('value_as_string', string))
+                         if k in explicit})
         return attrs
 
 
@@ -867,17 +962,36 @@ class ObservationSerializer(serializers.ModelSerializer):
         ]
         extra_kwargs = {'observation_id': {'required': False}}
 
-    def validate(self, attrs):
+    def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
         attrs = super().validate(attrs)
-        from omop_core.services.field_write_service import coerce_assertion_value
-        source_value = attrs.get('observation_source_value')
-        num, string, error = coerce_assertion_value(
-            source_value, attrs.get('value_as_number'), attrs.get('value_as_string'),
+        from omop_core.services.field_write_service import (
+            coerce_assertion_value, is_boolean_assertion_code,
         )
+        source_value = attrs.get(
+            'observation_source_value', getattr(self.instance, 'observation_source_value', None))
+        explicit = _VALUE_FIELDS & attrs.keys()
+        # An explicit value decides on its own. Feeding the stored sibling back in
+        # would let it win the precedence inside coerce_assertion_value, so
+        # patching a boolean assertion from 1 to 0 would stay true.
+        if explicit or not self.partial:
+            number, string = attrs.get('value_as_number'), attrs.get('value_as_string')
+        else:
+            number = getattr(self.instance, 'value_as_number', None)
+            string = getattr(self.instance, 'value_as_string', None)
+        number, string, error = coerce_assertion_value(source_value, number, string)
         if error:
             raise serializers.ValidationError({'value_as_string': error})
-        attrs['value_as_number'] = num
-        attrs['value_as_string'] = string
+        # The two columns are one answer only for an assertion code, and there
+        # coercion can rewrite the column the caller left out. Anywhere else a
+        # partial write must not touch what it did not carry, which assigning
+        # both unconditionally did.
+        if not self.partial or is_boolean_assertion_code(source_value):
+            attrs['value_as_number'] = number
+            attrs['value_as_string'] = string
+        elif explicit:
+            attrs.update({k: v for k, v in
+                         (('value_as_number', number), ('value_as_string', string))
+                         if k in explicit})
         return attrs
 
 
@@ -935,7 +1049,49 @@ class PatientDocumentSerializer(serializers.ModelSerializer):
 class PatientTrialEnrollmentSerializer(serializers.ModelSerializer):
     class Meta:
         model = PatientTrialEnrollment
-        fields = ['id', 'person', 'trial_id', 'nct_id', 'status']
+        fields = ['id', 'person', 'trial_id', 'nct_id', 'status', 'is_favorite']
+
+    def validate_person(self, value):
+        """`person` may be set at creation and never moved afterwards.
+
+        Object-level permission inspects the row as it stands BEFORE the
+        update, so a patient PATCHing `{'person': <someone else>}` on a row
+        that is legitimately theirs passes every check — and plants an
+        enrollment, with its status, nct_id and coordinator notes, on
+        another patient's chart. They then lose sight of it while that
+        patient and their providers gain it.
+        """
+        if self.instance is not None and value != self.instance.person:
+            raise serializers.ValidationError(
+                'person cannot be changed on an existing enrollment.'
+            )
+        return value
+
+
+class TrialSearchPreferencesSerializer(serializers.ModelSerializer):
+    # Computed on the model so every client agrees on what "a filter the
+    # patient set" means — the trial-search UI paints this number on its
+    # Filters button, and a count computed client-side drifts from the one
+    # the server would compute.
+    non_default_filter_count = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = TrialSearchPreferences
+        fields = ['person', 'preferences', 'non_default_filter_count', 'updated_at']
+        read_only_fields = ['person', 'updated_at']
+
+    def validate_preferences(self, value):
+        """A JSONField accepts any JSON, including a list or a bare string.
+
+        Stored, those serialize back through `non_default_filter_count`,
+        which iterates `.items()` — so one PATCH of `[]` would 500 every
+        later read of that row, not just the write.
+        """
+        if not isinstance(value, dict):
+            raise serializers.ValidationError(
+                'preferences must be a JSON object of filter name to value.'
+            )
+        return value
 
 
 class ProvenanceRecordSerializer(serializers.ModelSerializer):
@@ -946,67 +1102,6 @@ class ProvenanceRecordSerializer(serializers.ModelSerializer):
         fields = ['id', 'source', 'source_user_id', 'target_patient_id',
                   'modification_reason', 'created_at', 'record_type', 'object_id', 'organization']
 
-
-class SurveySerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Survey
-        fields = ['id', 'external_id', 'name', 'title', 'description',
-                  'status', 'disease', 'pages', 'estimated_minutes', 'created_at', 'updated_at']
-        read_only_fields = ['created_at', 'updated_at']
-
-    def validate_pages(self, value):
-        if not isinstance(value, list):
-            raise serializers.ValidationError('pages must be a list.')
-        return value
-
-
-class PatientSurveyResponseSerializer(serializers.ModelSerializer):
-    survey_title = serializers.CharField(source='survey.title', read_only=True)
-    survey_name = serializers.CharField(source='survey.name', read_only=True)
-
-    class Meta:
-        model = PatientSurveyResponse
-        fields = ['id', 'person', 'survey', 'survey_title', 'survey_name',
-                  'values', 'values_dates', 'percent_complete',
-                  'started_at', 'completed_at', 'consent_date', 'consent_signature',
-                  'created_at', 'updated_at']
-        read_only_fields = ['created_at', 'updated_at']
-
-    def validate_percent_complete(self, value):
-        if not (0 <= value <= 100):
-            raise serializers.ValidationError('percent_complete must be between 0 and 100.')
-        return value
-
-    def validate_values(self, value):
-        if not isinstance(value, dict):
-            raise serializers.ValidationError('values must be a dict.')
-        return value
-
-    def validate_values_dates(self, value):
-        if not isinstance(value, dict):
-            raise serializers.ValidationError('values_dates must be a dict.')
-        return value
-
-    def validate_completed_at(self, value):
-        if self.instance and self.instance.completed_at is not None and value is None:
-            raise serializers.ValidationError('Cannot re-open a completed survey.')
-        return value
-
-    def update(self, instance, validated_data):
-        # Strip immutable identity fields — person and survey are set on create only.
-        validated_data.pop('person', None)
-        validated_data.pop('survey', None)
-        # Merge incoming values/values_dates into existing dicts (autosave support).
-        for field in ('values', 'values_dates'):
-            if field in validated_data:
-                current = getattr(instance, field) or {}
-                validated_data[field] = {**current, **validated_data[field]}
-        return super().update(instance, validated_data)
-
-
-# ---------------------------------------------------------------------------
-# Patient consent serializer
-# ---------------------------------------------------------------------------
 
 class PatientConsentSerializer(serializers.ModelSerializer):
     class Meta:
@@ -1137,13 +1232,18 @@ class FieldConceptMappingSerializer(serializers.ModelSerializer):
     def validate_concept_code(self, value):
         if not value:
             return value
-        from omop_core.services.mappings import LAB_FIELD_TO_LOINC
+        from omop_core.services.mappings import (
+            LAB_FIELD_CONCEPT_ALIASES,
+            LAB_FIELD_TO_LOINC,
+        )
         vocab_id = self.initial_data.get('vocabulary_id', '')
         field_name = self.initial_data.get(
             'field_name', getattr(self.instance, 'field_name', ''),
         )
         # Check collision with LAB_FIELD_TO_LOINC (hardcoded LOINC mappings).
         if vocab_id == 'LOINC':
+            if value in LAB_FIELD_CONCEPT_ALIASES.get(field_name, set()):
+                return value
             for _field, (code, _unit, _display) in LAB_FIELD_TO_LOINC.items():
                 if code == value and _field != field_name:
                     raise serializers.ValidationError(
@@ -1366,6 +1466,12 @@ class TherapyLineWriteSerializer(serializers.Serializer):
     outcome = serializers.CharField(
         required=False, allow_blank=True, allow_null=True,
     )
+    intent = serializers.CharField(
+        required=False, allow_blank=True, allow_null=True, max_length=50,
+    )
+    discontinuation_reason = serializers.CharField(
+        required=False, allow_blank=True, allow_null=True, max_length=60,
+    )
     source_value = serializers.CharField(
         required=False, allow_blank=True, allow_null=True, max_length=50,
     )
@@ -1390,6 +1496,21 @@ class TherapyLineWriteSerializer(serializers.Serializer):
                 'regimen. A line with neither groups no drug exposures and no '
                 'therapy field would follow from it.',
             )
+        if attrs.get('outcome'):
+            from omop_core.services.treatment_catalog import outcomes_for_disease
+            record = PatientRecord.objects.filter(person=attrs['person']).first()
+            options = outcomes_for_disease(record.disease if record else '')
+            aliases = {key: item['value'] for item in options for key in (item['code'], item['value'], item['label'])}
+            value = attrs['outcome']
+            if value not in aliases:
+                # Preserve legacy values on a no-op edit; new selections must
+                # belong to the patient's disease-specific catalog.
+                if not Observation.objects.filter(person=attrs['person'],
+                    observation_source_value=f"LOT-{attrs['line_number']}-outcome",
+                    value_as_string=value, is_erroneous=False).exists():
+                    raise serializers.ValidationError({'outcome': 'Select an outcome for this disease.'})
+            else:
+                attrs['outcome'] = aliases[value]
         return attrs
 
 
@@ -1493,3 +1614,51 @@ class FieldFormulaSerializer(serializers.ModelSerializer):
         if not result.valid:
             raise serializers.ValidationError(result.errors)
         return value
+
+
+class PrologSurveySerializer(serializers.Serializer):
+    """A PROlog instrument, in the shape `/surveys/` used to return.
+
+    `id` is the version's primary key and `name` its slug, so a reader keyed on
+    those keeps working; `pages` is gone, because a PROlog definition is a
+    validated document rather than a bag of inputs, and `definition` carries it
+    whole for anyone who wants it.
+    """
+
+    id = serializers.IntegerField(read_only=True)
+    name = serializers.CharField(source='survey.slug', read_only=True)
+    slug = serializers.CharField(source='survey.slug', read_only=True)
+    version = serializers.CharField(read_only=True)
+    status = serializers.CharField(read_only=True)
+    title = serializers.SerializerMethodField()
+    definition = serializers.JSONField(read_only=True)
+
+    def get_title(self, obj):
+        definition = obj.definition or {}
+        titles = definition.get('title') or {}
+        return titles.get(definition.get('default_language', 'en')) or obj.survey.slug
+
+
+class PrologSurveyResponseSerializer(serializers.Serializer):
+    """One PROlog response and its answers.
+
+    `person` is the participant it is bound to, so a reader that filtered the
+    retired endpoint by person still recognises it. `values` is the answers as a
+    question-key map, which is the shape the retired feature returned — it is
+    derived here, not stored.
+    """
+
+    id = serializers.UUIDField(read_only=True)
+    person = serializers.IntegerField(source='participant_id', read_only=True)
+    survey = serializers.CharField(source='survey_version.survey.slug', read_only=True)
+    survey_version = serializers.CharField(source='survey_version.version', read_only=True)
+    language = serializers.CharField(read_only=True)
+    status = serializers.CharField(read_only=True)
+    started_at = serializers.DateTimeField(read_only=True)
+    completed_at = serializers.DateTimeField(source='submitted_at', read_only=True)
+    values = serializers.SerializerMethodField()
+
+    def get_values(self, obj):
+        # `.all()` on purpose: it reads the viewset's prefetch cache, where a
+        # filtered queryset would issue a query per row.
+        return {a.question_key: a.value for a in obj.answers.all()}

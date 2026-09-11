@@ -90,6 +90,18 @@ LAB_FIELD_ALIAS_TO_CANONICAL = {
     'ldh':                  'ldh_u_l',
 }
 
+# Additional LOINC tests that are clinically equivalent to a PatientRecord
+# field, but whose primary write-through owner is another legacy field.  These
+# are deliberately separate from LAB_FIELD_ALIAS_TO_CANONICAL: that dictionary
+# routes writes, whereas this one permits a curator to record the equivalent
+# concept on a second read-model field without creating a second write path.
+LAB_FIELD_CONCEPT_ALIASES = {
+    # 1952-1 "Beta-2-Microglobulin [Mass/volume] in Serum or Plasma" is the
+    # broadly used serum assay.  ``beta2_microglobulin`` owns its legacy lab
+    # write-through; this CLL-facing field may also be curated against it.
+    'serum_beta2_microglobulin_level': {'1952-1'},
+}
+
 # Common unit options for fields where multiple units are used in US clinical
 # practice. The first entry is the US default. Used by the mapping UI to
 # render a unit dropdown.
@@ -229,6 +241,7 @@ THERAPY_LINE_FIELDS = frozenset(
 # remap_generic_lab_fallback for the repair.
 CONCEPT_GENERIC_LAB       = 0         # No matching concept (OMOP CDM sentinel)
 CONCEPT_LAB_TYPE          = 32856     # Lab (measurement type)
+CONCEPT_PATIENT_REPORTED_TYPE = 32865 # Patient self-report (measurement type)
 CONCEPT_EHR_TYPE          = 32817     # EHR (condition type)
 CONCEPT_TREATMENT_REGIMEN = 32531     # Treatment Regimen (episode concept)
 CONCEPT_DRUG_EXPOSURE_FIELD = 1147094  # drug_exposure_id field concept (EpisodeEvent)
@@ -319,7 +332,7 @@ WEARABLE_ARTIFACT_BOUNDS = {
 # Do not reintroduce a fallback here. The previous code used 32883 ('Survey')
 # and fell back to 32856 ('Lab'), mislabelling every wearable row's provenance
 # (#441).
-WEARABLE_TYPE_CONCEPT_ID = 32865
+WEARABLE_TYPE_CONCEPT_ID = CONCEPT_PATIENT_REPORTED_TYPE
 
 # Minimum valid days required to emit a metric (else field stays None)
 WEARABLE_MIN_VALID_DAYS = 7
@@ -334,15 +347,14 @@ def resolve_wearable_mappings(device_type):
 
     For Garmin uploads, the SCCM source_code IS the metric_key (e.g., 'steps').
 
-    Falls back to the hard-coded WEARABLE_CONCEPT_CODE dict for any metric_key
-    that has no approved SCCM row, so the ingest continues to work during the
-    transition or if the seeder hasn't been run.
+    There is intentionally no code-to-concept fallback. An absent SCCM row is
+    a mapping/configuration gap, not permission for the importer to revive a
+    second, invisible mapping registry in Python.
 
     Returns:
         dict mapping metric_key → Concept (or None if unresolvable)
     """
     from omop_core.models import SourceCodeConceptMapping
-    from omop_core.services.concept_cache import concept_by_vocab as _cc_by_vocab
 
     source_vocab = 'Apple' if device_type == 'apple' else 'Garmin'
 
@@ -369,13 +381,6 @@ def resolve_wearable_mappings(device_type):
         for row in approved:
             if row.target_concept:
                 db_mappings[row.source_code] = row.target_concept
-
-    # Fall back to hard-coded dict for any metric not in the DB.
-    for metric_key, concept_code in WEARABLE_CONCEPT_CODE.items():
-        if metric_key not in db_mappings:
-            concept = _cc_by_vocab(WEARABLE_CONCEPT_VOCAB[metric_key], concept_code)
-            if concept:
-                db_mappings[metric_key] = concept
 
     return db_mappings
 
@@ -461,8 +466,9 @@ DERIVED_FIELD_TO_CODE = {
     'nodes_stage':                   ('21906-3',   'LOINC',  '_get_staging_data'),
     'stage':                         ('21908-9',   'LOINC',  '_get_staging_data'),
     'tumor_stage':                   ('21905-5',   'LOINC',  '_get_staging_data'),
-    # CLL — _get_cll_data. 21889-1 is 'Size Tumor'; a lymph-node row carries
-    # qualifier_source_value='lymph-node' to separate it from tumor_size.
+    # CLL — legacy import fallback only. New edits use Cancer Modifier
+    # 36769292 (Dimension of Largest Lymph Node) in write_descriptor.py;
+    # qualified 21889-1 rows remain readable for historical data.
     'largest_lymph_node_size':       ('21889-1',   'LOINC',  '_get_cll_data'),
     # Social — _get_social_data
     # #596 corrected _get_social_data: 408729009 had been writing to
@@ -617,12 +623,14 @@ SUGGESTED_FIELD_CODES: dict[str, tuple[str, str]] = {
     'dlbcl_transformation_date':     ('91860004',  'SNOMED'),  # Richter / transformation
     'transformed_to_dlbcl':          ('91860004',  'SNOMED'),  # Richter / transformation
     'plasma_cell_leukemia':          ('47082-2',   'LOINC'),   # Plasma cells in bone marrow
-    'largest_lymph_node_size':       ('21889-1',   'LOINC'),   # Size of primary tumor
     'spleen_size':                   ('16294009',  'SNOMED'),  # Splenomegaly
     'flipi_score_options':           ('444723004', 'SNOMED'),  # FLIPI
 
     # Genomics / molecular
-    'genetic_mutations':             ('55232-3',   'LOINC'),   # Genetic analysis summary panel
+    # Athena 45876022: "Gene mutations tested for".  This is the discrete
+    # result term used for a patient's mutation list; 55232-3 is only a
+    # document-level analysis summary and cannot represent selectable results.
+    'genetic_mutations':             ('36908-2',   'LOINC'),
     'molecular_markers':             ('55232-3',   'LOINC'),   # Genetic analysis summary panel
     'cytogenic_markers':             ('D002869',   'MeSH'),    # Chromosome Aberrations (#803)
     'protein_expressions':           ('85337-4',   'LOINC'),   # Gene expression panel

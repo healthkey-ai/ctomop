@@ -1,3 +1,4 @@
+import IndividualSuggestCandidates from "./IndividualSuggestCandidates";
 import SuggestCandidates, { type CandidateActivity } from "./SuggestCandidates";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
@@ -454,6 +455,8 @@ export default function CodeMappingPage() {
   const [pages, setPages] = useState<Partial<Record<MappingSection, number>>>({});
   const loadSequence = useRef(0);
   const dialogRequest = useRef(0);
+  const dialogChoice = useRef<number | null>(null);
+  const [individualSuggestion, setIndividualSuggestion] = useState<{ request: number; activity: CandidateActivity[]; running: boolean } | null>(null);
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [rows, setRows] = useState<CodeMappingRow[]>([]);
   const [reference, setReference] = useState<Reference>(emptyReference);
@@ -808,7 +811,8 @@ export default function CodeMappingPage() {
 
   const setField = (field: keyof MappingForm, value: string) => {
     if (field.startsWith("source_") || field.startsWith("destination_")) setSuggestionMessage("");
-    if (["source_code", "source_vocabulary_id", "source_code_description"].includes(field)) {
+    if (field.startsWith("destination_")) dialogChoice.current = dialogRequest.current;
+    if (["source_code", "source_vocabulary_id", "source_code_description", "omop_table"].includes(field)) {
       dialogRequest.current += 1;
       setSearchingConcepts(false);
       setCheckingUmls(false);
@@ -843,6 +847,7 @@ export default function CodeMappingPage() {
 
   /** Apply a concept to the form: id, name, code, vocabulary, class, standard flag. */
   const applyConcept = (concept: ConceptResult, adoptDomain = false) => {
+    dialogChoice.current = dialogRequest.current;
     setSuggestionMessage("");
     setForm((prev) => {
       // A concept only supplies the domain when the curator has not chosen one;
@@ -933,23 +938,57 @@ export default function CodeMappingPage() {
   const suggestCurrentCode = async () => {
     setSuggestionMessage("");
     const request = ++dialogRequest.current;
+    dialogChoice.current = null;
+    setIndividualSuggestion({ request, activity: [], running: true });
     setCheckingUmls(false);
     setError("");
     setSearchingConcepts(true);
     try {
       const enabled = Object.entries(strategies).filter(([, on]) => on).map(([name]) => name);
-      const { data } = await api.post("/v1/code-mappings/suggest-one/", {
+      const { data: started } = await api.post<SuggestRunProgress>("/v1/code-mappings/suggest-one/", {
         source_code: form.source_code, source_vocabulary_id: form.source_vocabulary_id,
         source_code_description: form.source_code_description, omop_table: form.omop_table,
-        strategies: enabled,
+        strategies: enabled, async: true,
       });
+      let current = started;
+      const deadline = Date.now() + SUGGEST_POLL_TIMEOUT_MS;
+      let failures = 0;
+      while (request === dialogRequest.current) {
+        setIndividualSuggestion({ request, activity: current.activity ?? [], running: current.state === "queued" || current.state === "running" });
+        if (current.state !== "queued" && current.state !== "running") break;
+        if (Date.now() > deadline) throw new Error("Suggestion timed out");
+        await new Promise(resolve => setTimeout(resolve, SUGGEST_POLL_INTERVAL_MS));
+        if (request !== dialogRequest.current) return;
+        try {
+          const { data } = await api.get<SuggestRunProgress>(`/v1/code-mappings/suggest-runs/${started.run_id}/`, {
+            params: { include_activity: "1" },
+          });
+          current = data;
+          failures = 0;
+        } catch (error) {
+          if (++failures > SUGGEST_POLL_MAX_FAILURES) throw error;
+        }
+      }
       if (request !== dialogRequest.current) return;
-      if (data.suggested) {
-        applyConcept(data.suggested);
-        setSuggestionMessage(`Suggested via ${data.strategy_used || "waterfall"}.`);
-      } else setError(data.note || "No suggestion found.");
-    } catch { if (request === dialogRequest.current) setError("Failed to suggest a destination concept."); }
-    finally { if (request === dialogRequest.current) setSearchingConcepts(false); }
+      if (current.state === "failure") {
+        setError(current.error || "Failed to suggest a destination concept.");
+        return;
+      }
+      const result = current.activity?.filter(event => event.stage === "result").at(-1);
+      if (result?.suggested && dialogChoice.current !== request) {
+        applyConcept(result.suggested as ConceptResult);
+        setSuggestionMessage("Winner filled in. You can choose another candidate before saving.");
+      } else if (!result?.suggested && dialogChoice.current !== request) {
+        setSuggestionMessage("No winner selected. You can choose a candidate or search below.");
+      }
+    } catch {
+      if (request === dialogRequest.current) setError("Failed to suggest a destination concept. Any candidates already shown are still selectable.");
+    } finally {
+      if (request === dialogRequest.current) {
+        setSearchingConcepts(false);
+        setIndividualSuggestion(current => current?.request === request ? { ...current, running: false } : current);
+      }
+    }
   };
 
   const checkUmls = async () => {
@@ -1974,6 +2013,13 @@ export default function CodeMappingPage() {
                       </button>
                     </div>
                   </div>
+                  {individualSuggestion?.request === dialogRequest.current && <IndividualSuggestCandidates
+                    activity={individualSuggestion.activity} running={individualSuggestion.running}
+                    selectedId={form.destination_concept_id}
+                    onSelect={candidate => {
+                      applyConcept(candidate as ConceptResult);
+                      setSuggestionMessage("Candidate selected. Save the mapping to keep your choice.");
+                    }} />}
                   <div className="flex gap-2">
                     <div className="relative flex-1">
                       <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={15} />

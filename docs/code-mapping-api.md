@@ -138,3 +138,20 @@ with `destination_concept_id` and `status: "proposed"`. The mapping still awaits
 review. Its original suggested target remains available for accuracy tracking;
 approving an alternative records an overridden suggestion. Candidate selection
 is disabled while the run is writing and for preview-only results.
+
+### Individual mapping preview
+
+The mapping dialog posts to `/api/v1/code-mappings/suggest-one/` with `async: true`
+to obtain a preview run ID and initial activity. It polls the existing run URL
+with `include_activity=1` and displays candidate stages immediately below Suggest,
+above the destination search box. Clicking a candidate fills the unsaved form
+while remaining searches continue. The final winner only fills the form if the
+curator has not already chosen or entered a destination. Closing the dialog or
+changing the source invalidates its outstanding responses.
+
+Preview runs do not write mappings, review outcomes, or suggestion provenance.
+The normal mapping submit action saves the chosen destination. Preview runs are
+excluded from the latest batch-run link. Requests without `async: true` retain
+the synchronous response, which now also includes the complete candidate pool.
+As with batch runs, live polling requires the queued dispatcher; inline execution
+returns all completed stages in the initial response.

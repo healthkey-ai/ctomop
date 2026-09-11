@@ -625,6 +625,58 @@ class TestSuggestAPIStrategies:
         assert response.status_code == 202
         assert fake.calls[0][1]['strategies'] == strategies
 
+    def test_individual_preview_queues_and_never_changes_the_mapping(self, monkeypatch, measurement_concept):
+        from omop_core.models import SuggestRun
+        from omop_core.services.suggest_jobs import execute_run
+        mapping = queue_row('DIALOG', target_concept=measurement_concept)
+        before = SourceCodeConceptMapping.objects.filter(pk=mapping.pk).values().get()
+        batch = SuggestRun.objects.create(state='success')
+        hit = {
+            'concept_id': measurement_concept.pk, 'concept_name': measurement_concept.concept_name,
+            'concept_code': measurement_concept.concept_code, 'vocabulary_id': 'LOINC',
+            'retrieval': 'umls', 'umls_score': 1,
+        }
+        monkeypatch.setattr('omop_core.mapping.suggestions.umls_candidates', lambda *args: ([hit], 'C123'))
+        def lexical(*args, **kwargs):
+            run = SuggestRun.objects.exclude(pk=batch.pk).get()
+            response = self.client.get(f'/api/v1/code-mappings/suggest-runs/{run.pk}/?include_activity=1')
+            assert response.data['state'] == 'running'
+            assert next(event for event in response.data['activity'] if event['stage'] == 'candidates')['candidates'] == [hit]
+            return []
+        monkeypatch.setattr('omop_core.mapping.suggestions.lexical_candidates', lexical)
+        monkeypatch.setattr('omop_core.mapping.suggestions.semantic_candidates', lambda *args: [])
+        with use_suggest_dispatcher(FakeSuggestDispatcher()) as dispatcher:
+            response = self.client.post('/api/v1/code-mappings/suggest-one/', {
+                'source_code': 'DIALOG', 'omop_table': 'measurement', 'async': True,
+            }, format='json')
+        assert response.status_code == 202
+        assert response.data['state'] == 'queued'
+        execute_run(*dispatcher.calls[0])
+        run = SuggestRun.objects.get(pk=response.data['run_id'])
+        assert run.state == 'success'
+        assert [event['strategy'] for event in run.activity if event['stage'] == 'candidates'] == ['umls', 'lexical', 'semantic']
+        assert run.activity[-1]['suggested']['concept_id'] == measurement_concept.pk
+        assert run.activity[-1]['dry_run'] is True
+        assert run.destinations == 0
+        assert SourceCodeConceptMapping.objects.filter(pk=mapping.pk).values().get() == before
+        assert self.client.get('/api/v1/code-mappings/suggest-runs/latest/').data['run_id'] == str(batch.pk)
+
+    def test_individual_preview_failure_retains_candidates(self, monkeypatch):
+        from omop_core.models import SuggestRun
+        def fail(*args, activity, **kwargs):
+            activity({'stage': 'candidates', 'strategy': 'umls', 'candidates': [{'concept_id': 123}]})
+            raise RuntimeError('retrieval failed')
+        monkeypatch.setattr('omop_core.mapping.suggestions.suggest_one_mapping', fail)
+        with use_suggest_dispatcher(InlineSuggestDispatcher()):
+            response = self.client.post('/api/v1/code-mappings/suggest-one/', {
+                'source_code': 'DIALOG', 'omop_table': 'measurement', 'async': True,
+            }, format='json')
+        assert response.status_code == 202
+        assert response.data['state'] == 'failure'
+        assert response.data['activity'][0]['candidates'] == [{'concept_id': 123}]
+        assert response.data['error'] == 'retrieval failed'
+        assert SuggestRun.objects.get(pk=response.data['run_id']).done == 0
+
     def test_suggest_one_accepts_semantic_without_other_retrievers(self):
         response = self.client.post(
             '/api/v1/code-mappings/suggest-one/',

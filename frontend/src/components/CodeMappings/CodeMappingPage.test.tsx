@@ -506,6 +506,66 @@ describe("CodeMappingPage", () => {
       return await screen.findByText("Edit Mapping");
     };
 
+    it("shows individual candidates above search and preserves an early choice when the winner arrives", async () => {
+      await openDialog();
+      const alternative = { ...loincHit, concept_id: 555, concept_name: "Early lexical candidate", concept_code: "555" };
+      const semantic = { ...loincHit, concept_id: 556, concept_name: "Later semantic candidate", concept_code: "556", vector_distance: 0.125 };
+      const activity = [
+        { stage: "candidates", strategy: "umls", candidates: [loincHit] },
+        { stage: "candidates", strategy: "lexical", candidates: [alternative] },
+      ];
+      mockPost.mockResolvedValue({ data: suggestRun({ state: "running", activity }) });
+      const originalGet = mockGet.getMockImplementation()!;
+      mockGet.mockImplementation((url: string) => url.includes("/suggest-runs/")
+        ? Promise.resolve({ data: suggestRun({ activity: [...activity,
+          { stage: "candidates", strategy: "semantic", candidates: [semantic] },
+          { stage: "result", suggested: loincHit, candidates: [loincHit, alternative, semantic] },
+        ] }) }) : originalGet(url));
+      const dialog = within(screen.getByRole("dialog"));
+      const suggest = dialog.getByRole("button", { name: "Suggest", exact: true });
+      fireEvent.click(suggest);
+      const section = await dialog.findByRole("region", { name: "Individual suggestion candidates" });
+      expect(suggest.compareDocumentPosition(section) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(section.compareDocumentPosition(dialog.getByLabelText("Search destination concepts")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(within(section).getByRole("status")).toHaveTextContent("Searching");
+      fireEvent.click(within(section).getByRole("button", { name: /Early lexical candidate/ }));
+      expect(dialog.getByLabelText("Destination Concept ID")).toHaveValue(555);
+      expect(mockPatch).not.toHaveBeenCalled();
+      expect(await within(section).findByText("Distance 0.1250", {}, { timeout: 3000 })).toBeInTheDocument();
+      expect(within(section).getByText(`Winner: ${loincHit.concept_name}`)).toBeInTheDocument();
+      expect(dialog.getByLabelText("Destination Concept ID")).toHaveValue(555);
+      expect(mockPost).toHaveBeenCalledWith("/v1/code-mappings/suggest-one/", expect.objectContaining({ async: true }));
+      fireEvent.click(within(section).getByRole("button", { name: /Later semantic candidate/ }));
+      expect(dialog.getByLabelText("Destination Concept ID")).toHaveValue(556);
+      fireEvent.click(dialog.getByRole("button", { name: "Update Mapping" }));
+      await waitFor(() => expect(mockPatch).toHaveBeenCalledWith("/v1/code-mappings/7/", expect.objectContaining({ destination_concept_id: 556 })));
+    });
+
+    it("displays inline individual results and fills the winner when nothing was selected", async () => {
+      await openDialog();
+      mockPost.mockResolvedValue({ data: suggestRun({ activity: [
+        { stage: "candidates", strategy: "umls", candidates: [loincHit] },
+        { stage: "result", suggested: loincHit, candidates: [loincHit] },
+      ] }) });
+      fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Suggest", exact: true }));
+      await waitFor(() => expect(screen.getByLabelText("Destination Concept ID")).toHaveValue(loincHit.concept_id));
+      const section = screen.getByRole("region", { name: "Individual suggestion candidates" });
+      expect(within(section).getByText("Winner")).toBeInTheDocument();
+      expect(mockPatch).not.toHaveBeenCalled();
+    });
+
+    it("hides old individual candidates and ignores the winner after the source changes", async () => {
+      await openDialog();
+      mockPost.mockResolvedValue({ data: suggestRun({ state: "running", activity: [
+        { stage: "candidates", strategy: "umls", candidates: [loincHit] },
+      ] }) });
+      fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Suggest", exact: true }));
+      await screen.findByRole("region", { name: "Individual suggestion candidates" });
+      fireEvent.change(screen.getByLabelText("Source Code Value"), { target: { value: "CHANGED" } });
+      expect(screen.queryByRole("region", { name: "Individual suggestion candidates" })).not.toBeInTheDocument();
+      expect(screen.getByLabelText("Destination Concept ID")).toHaveValue(proposedRow.destination_concept_id);
+    });
+
     it("highlights imported alternatives and saves the curator's selected destination", async () => {
       renderPage([{ ...proposedRow, destination_count: 3 }]);
       const originalGet = mockGet.getMockImplementation()!;
@@ -1280,7 +1340,7 @@ describe("mapping dialog request isolation", () => {
   it("clears a previous code's no-match message when opening another code", async () => {
     renderPage([first, second]);
     fireEvent.click(await screen.findByText("Z94.81"));
-    mockPost.mockResolvedValueOnce({ data: { suggested: null, note: "No suitable concept: Z94.81" } });
+    mockPost.mockResolvedValueOnce({ data: suggestRun({ activity: [{ stage: "result", suggested: null, note: "No suitable concept: Z94.81" }] }) });
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Suggest" }));
     expect(await screen.findByText("No suitable concept: Z94.81")).toBeInTheDocument();
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
@@ -1291,15 +1351,15 @@ describe("mapping dialog request isolation", () => {
   it("shows the suggestion method only in the dialog and clears it for another code", async () => {
     renderPage([first, second]);
     fireEvent.click(await screen.findByText("Z94.81"));
-    mockPost.mockResolvedValueOnce({ data: { suggested: loincHit, strategy_used: "lexical" } });
+    mockPost.mockResolvedValueOnce({ data: suggestRun({ activity: [{ stage: "result", suggested: loincHit, strategy_used: "lexical" }] }) });
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Suggest" }));
-    const message = await screen.findByText("Suggested via lexical.");
+    const message = await screen.findByText("Winner filled in. You can choose another candidate before saving.");
     expect(screen.getByRole("dialog")).toContainElement(message);
-    expect(screen.getAllByText("Suggested via lexical.")).toHaveLength(1);
+    expect(screen.getAllByText("Winner filled in. You can choose another candidate before saving.")).toHaveLength(1);
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
-    expect(screen.queryByText("Suggested via lexical.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Winner filled in. You can choose another candidate before saving.")).not.toBeInTheDocument();
     fireEvent.click(screen.getByText("Z12.11"));
-    expect(screen.queryByText("Suggested via lexical.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Winner filled in. You can choose another candidate before saving.")).not.toBeInTheDocument();
   });
 
   it.each([false, true])("ignores a late suggestion for a closed dialog (destination=%s)", async (found) => {

@@ -10400,7 +10400,7 @@ def code_mapping_latest_suggest_run(request):
     if not _can_manage_field_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'},
                         status=status.HTTP_403_FORBIDDEN)
-    run = SuggestRun.objects.only('id').order_by('-created_at', '-id').first()
+    run = SuggestRun.objects.exclude(selection__contains={'mode': 'individual'}).only('id').order_by('-created_at', '-id').first()
     return Response({'run_id': str(run.id) if run else None})
 
 
@@ -10444,9 +10444,29 @@ def code_mapping_suggest_one(request):
     if not 1 <= lexical_limit <= LEXICAL_LIMIT_MAX:
         return Response({'lexical_limit': f'Must be between 1 and {LEXICAL_LIMIT_MAX}.'},
                         status=status.HTTP_400_BAD_REQUEST)
-    return Response(suggest_one_mapping(source_code, str(request.data.get('source_vocabulary_id') or ''), omop_table,
-        source_description=str(request.data.get('source_code_description') or ''), strategies=strategies,
-        lexical_limit=lexical_limit))
+    params = {
+        'source_code': source_code,
+        'source_vocabulary_id': str(request.data.get('source_vocabulary_id') or ''),
+        'omop_table': omop_table,
+        'source_description': str(request.data.get('source_code_description') or ''),
+        'strategies': strategies,
+        'lexical_limit': lexical_limit,
+    }
+    if request.data.get('async') is True:
+        from omop_core.services.suggest_jobs import get_dispatcher
+        run = SuggestRun.objects.create(
+            source_vocabulary_id=params['source_vocabulary_id'], total=1,
+            model_version=SUGGESTION_MODEL_VERSION, created_by=request.user,
+            selection={
+                'mode': 'individual', 'dry_run': True, 'limit': 1,
+                'order': 'The source code currently open in the mapping dialog.',
+                'strategies': strategies, 'source_vocabulary_id': params['source_vocabulary_id'],
+            },
+        )
+        get_dispatcher().dispatch(run, {'preview': params})
+        run.refresh_from_db()
+        return Response(_serialize_suggest_run(run, include_activity=True), status=status.HTTP_202_ACCEPTED)
+    return Response(suggest_one_mapping(**params))
 
 
 @api_view(['POST'])

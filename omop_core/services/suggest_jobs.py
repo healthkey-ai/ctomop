@@ -156,12 +156,40 @@ def use_dispatcher(dispatcher: SuggestDispatcher) -> Iterator[SuggestDispatcher]
         _override = previous
 
 
+def execute_preview(run_id: str, params: dict) -> None:
+    """Retrieve a dialog's candidates without changing any mapping."""
+    from copy import deepcopy
+    from omop_core.mapping.suggestions import suggest_one_mapping
+
+    runs = SuggestRun.objects.filter(pk=run_id)
+    if not runs.exists():
+        return
+    runs.update(state=SuggestRun.RUNNING)
+    events = []
+
+    def activity(event):
+        events.append({'at': timezone.now().isoformat(), **deepcopy(event)})
+        runs.update(activity=events, retrieved=int(event['stage'] in ('ranking', 'result')))
+
+    try:
+        result = suggest_one_mapping(**params['preview'], activity=activity)
+        activity({'stage': 'result', **params['preview'], **result, 'dry_run': True, 'updated': False})
+        runs.update(state=SuggestRun.SUCCESS, done=1, retrieved=1, finished_at=timezone.now())
+    except Exception as exc:  # noqa: BLE001 - retain partial candidates on failure
+        activity({'stage': 'failure', 'note': str(exc)[:2000]})
+        runs.update(state=SuggestRun.FAILURE, error=str(exc)[:2000], finished_at=timezone.now())
+
+
 def execute_run(run_id: str, params: dict) -> None:
     """Do the work for one SuggestRun and record how it went.
 
     Never raises: a failure belongs on the row, where the page is already
     looking, rather than in a worker log the curator cannot see.
     """
+    if 'preview' in params:
+        execute_preview(run_id, params)
+        return
+
     from omop_core.mapping.suggestions import (
         SUGGESTION_MODEL_VERSION, suggest_mappings, suggestable_queryset,
     )

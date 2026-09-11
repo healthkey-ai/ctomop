@@ -5359,7 +5359,7 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
         })
 
     @action(detail=True, methods=['post'], url_path='refresh',
-            permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
+            permission_classes=[EtlWritePermission, PatientSelfScopePermission])
     def refresh(self, request: Request, pk: str | None = None) -> Response:
         """Queue a re-derivation of this person's PatientRecord.
 

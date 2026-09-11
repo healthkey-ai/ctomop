@@ -30,7 +30,8 @@ from omop_core.models import (
     SourceCodeConceptMapping, SuggestRun, UmlsSourceCode,
     ConditionOccurrence, DrugExposure, Measurement, MeasurementOwnership,
     Observation, ProcedureOccurrence, VisitOccurrence, VisitDetail, Location, Death,
-    PatientDocument, PatientTrialEnrollment, PatientGroupMembership,
+    PatientDocument, PatientTrialEnrollment, TrialSearchPreferences,
+    PatientGroupMembership,
     Relationship, ConceptRelationship, ConceptAncestor, ConceptSynonym,
     # Controlled vocabulary lookup models
     Ethnicity, StemCellTransplant, SctEligibility, HistologicType, EstrogenReceptorStatus,
@@ -127,6 +128,7 @@ from .serializers import (
     ObservationSerializer, ProcedureOccurrenceSerializer,
     EpisodeSerializer, EpisodeEventSerializer,
     PatientDocumentSerializer, PatientTrialEnrollmentSerializer,
+    TrialSearchPreferencesSerializer,
     PatientConsentSerializer,
     PatientMessageSerializer,
     ImmunizationSerializer, AllergySerializer,
@@ -8639,6 +8641,54 @@ class AllergyListViewSet(_OmopFilterMixin, viewsets.ReadOnlyModelViewSet):
     ).select_related('observation_concept')
 
 
+def _person_id_param(request):
+    """The person a `detail=False` action is about, as an int.
+
+    Coerced deliberately. Over HTTP it arrives as a string, and
+    `get_or_create(person_id='5')` leaves the string on the in-memory
+    instance — so `PatientSelfScopePermission` then compares `'5'` with the
+    integer `5`, decides the row belongs to someone else, and 403s the
+    patient out of their own data.
+    """
+    raw = request.query_params.get('person_id') or request.data.get('person')
+    if raw in (None, ''):
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _deny_unless_may_write_person(request, person_id):
+    """Authorize a `detail=False` write against the person it names.
+
+    `PatientSelfScopePermission` is not enough on its own here, and its own
+    class docstring says so: it answers "is this row mine?" and returns True
+    for every identity that is not a patient at all — providers, org tokens,
+    OAuth client-credentials. A caller able to write what it cannot read
+    would be the wrong way round, and the read path IS scoped, by
+    `_OmopFilterMixin`.
+
+    Belt and braces rather than a demonstrated hole: with this gate removed,
+    the same calls are still refused further down the stack, and a review
+    that measured them succeeding could not be reproduced. It stays because
+    the permission class explicitly delegates this check to the view, not
+    because a test can show it firing.
+
+    Returns a Response to return, or None to proceed.
+    """
+    from omop_core.authorization import can_write_patient
+
+    if not can_write_patient(request.user, person_id):
+        # Deliberately the same answer for "not yours" and "no such person":
+        # distinguishing them turns this into a person-id oracle.
+        return Response(
+            {'detail': 'You do not have permission to perform this action.'},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+    return None
+
+
 class PatientTrialEnrollmentViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
     """CRUD for a patient's clinical trial enrollment status.
 
@@ -8646,10 +8696,213 @@ class PatientTrialEnrollmentViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
     Use ``trial_id`` to retrieve that data from the EXACT trial-matcher API.
 
     Filter by person: GET /api/trial-enrollments/?person_id=42
+    Bookmarks only:   GET /api/trial-enrollments/?person_id=42&is_favorite=true
     """
     serializer_class = PatientTrialEnrollmentSerializer
     permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
     queryset = PatientTrialEnrollment.objects.all()
+    allowed_list_query_params = (
+        _OmopFilterMixin.allowed_list_query_params
+        | frozenset({'is_favorite', 'status'})
+    )
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        raw = self.request.query_params.get('is_favorite')
+        if raw not in (None, ''):
+            # An empty value is "no filter" — a UI that always sends the key
+            # emits it, and coercing that to False hid every bookmark. Junk
+            # is refused rather than silently read as False, which would
+            # answer a question nobody asked.
+            truthy = {'true', '1', 'yes'}
+            falsy = {'false', '0', 'no'}
+            value = str(raw).lower()
+            if value not in truthy | falsy:
+                raise ValidationError(
+                    {'is_favorite': "must be one of true/false (or 1/0, yes/no)"}
+                )
+            qs = qs.filter(is_favorite=value in truthy)
+
+        wanted_status = self.request.query_params.get('status')
+        if wanted_status not in (None, ''):
+            valid = {choice for choice, _ in PatientTrialEnrollment.STATUS_CHOICES}
+            if wanted_status not in valid:
+                # Refused rather than matched against nothing: an unknown
+                # status silently returning an empty Registered tab reads as
+                # "you have registered for none", which is a different
+                # statement from "that is not a status".
+                raise ValidationError(
+                    {'status': [f'must be one of: {", ".join(sorted(valid))}']}
+                )
+            qs = qs.filter(status=wanted_status)
+        return qs
+
+    @action(detail=False, methods=['patch'], url_path='upsert')
+    def upsert(self, request):
+        """Set a patient's bookmark and/or participation status for one trial.
+
+        One action rather than one per field, because both write the same
+        row and the row may not exist yet. The obvious route — POST a new
+        enrollment — is closed to the person who needs it:
+        `ScopedTokenPermission` grants a session-authenticated patient safe
+        methods and PATCH only. Without this a patient could bookmark, or
+        register interest in, only a trial somebody else had already
+        enrolled them in, which is the opposite of the common case.
+
+        Either field may be omitted; what is not sent is not touched. A row
+        created here carries the default status (`interested`), which is
+        what a bookmark means in the absence of any participation.
+
+        Registering interest is a database write and nothing else — no
+        email, no notification to a coordinator. If that changes it should
+        be a deliberate, separately reviewed addition, not a side effect of
+        a PATCH.
+        """
+        person_id = _person_id_param(request)
+        trial_id = request.data.get('trial_id') or request.query_params.get('trial_id')
+        if person_id is None or not trial_id:
+            return Response(
+                {'error': 'person_id (integer) and trial_id are required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        fields = {}
+        if 'is_favorite' in request.data:
+            is_favorite = request.data['is_favorite']
+            if not isinstance(is_favorite, bool):
+                return Response(
+                    {'error': 'is_favorite must be a boolean'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            fields['is_favorite'] = is_favorite
+        if 'status' in request.data:
+            new_status = request.data['status']
+            valid = {choice for choice, _ in PatientTrialEnrollment.STATUS_CHOICES}
+            if new_status not in valid:
+                return Response(
+                    {'error': f'status must be one of: {", ".join(sorted(valid))}'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            fields['status'] = new_status
+        if not fields:
+            return Response(
+                {'error': 'send is_favorite and/or status'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Authorize BEFORE touching the database, and against the person —
+        # not only against row ownership, which says nothing about a caller
+        # who is not a patient.
+        denied = _deny_unless_may_write_person(request, person_id)
+        if denied is not None:
+            return denied
+        self.check_object_permissions(
+            request, PatientTrialEnrollment(person_id=person_id)
+        )
+        row, _ = PatientTrialEnrollment.objects.get_or_create(
+            person_id=person_id, trial_id=trial_id,
+        )
+        for field, value in fields.items():
+            setattr(row, field, value)
+        row.save(update_fields=[*fields, 'updated_at'])
+        return Response(self.get_serializer(row).data)
+
+    @action(detail=False, methods=['get'], url_path='ids')
+    def ids(self, request):
+        """Just the trial ids matching the current filters, and a count.
+
+        The trial-search UI needs these on every page load — to light up the
+        bookmark on each card, and to label the Favorites and Registered
+        tabs — and ids are also what EXACT filters by, since only its
+        queryset can sort and paginate them alongside the match scores.
+        Serializing whole enrollment rows for that would ship status dates
+        and coordinator notes nobody reads on a list page.
+
+        Filters are the list endpoint's own: `?is_favorite=true`,
+        `?status=registered`, or both.
+        """
+        qs = self.filter_queryset(self.get_queryset())
+        trial_ids = list(qs.values_list('trial_id', flat=True))
+        return Response({'trial_ids': trial_ids, 'count': len(trial_ids)})
+
+
+class TrialSearchPreferencesViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
+    """The filters a patient last used on the trial-search page.
+
+    One row per person, so this is a singleton the client reads and PATCHes
+    rather than a collection it creates rows in — hence `upsert` below,
+    which is what a "save my filters" call actually means.
+
+    The payload is opaque here: the filter vocabulary belongs to EXACT, and
+    mirroring it into columns would mean a migration in this service every
+    time that one gains a filter. What PROMOP does own is the count of
+    non-default filters, so every client's badge agrees with the server.
+    """
+    serializer_class = TrialSearchPreferencesSerializer
+    permission_classes = [ScopedTokenPermission, PatientSelfScopePermission]
+    queryset = TrialSearchPreferences.objects.all()
+    http_method_names = ['get', 'patch', 'head', 'options']
+
+    @action(detail=False, methods=['patch'], url_path='upsert')
+    def upsert(self, request):
+        """Save this person's filters, creating the row on first use.
+
+        A PATCH to a row that does not exist yet would 404, and the first
+        time a patient touches a filter is exactly when there is no row —
+        so the client would have to POST-then-PATCH and handle the race
+        between two tabs doing it at once. `get_or_create` here instead.
+        """
+        person_id = _person_id_param(request)
+        if person_id is None:
+            return Response(
+                {'error': 'person_id is required, as an integer'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        # Authorize BEFORE the write. `get_or_create` first would let any
+        # authenticated patient persist a preferences row for every person
+        # in the system — each one refused afterwards, all of them created.
+        denied = _deny_unless_may_write_person(request, person_id)
+        if denied is not None:
+            return denied
+        self.check_object_permissions(
+            request, TrialSearchPreferences(person_id=person_id)
+        )
+        prefs, _ = TrialSearchPreferences.objects.get_or_create(person_id=person_id)
+        serializer = self.get_serializer(prefs, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['patch'], url_path='reset')
+    def reset(self, request):
+        """Clear this person's filters.
+
+        Separate from a PATCH of `{}` on `upsert`: `partial=True` merges, so
+        every existing key would survive a "reset".
+
+        PATCH rather than POST because `ScopedTokenPermission` allows a
+        session-authenticated patient safe methods and PATCH only — POST
+        would 403 them out of resetting their own filters.
+        """
+        person_id = _person_id_param(request)
+        if person_id is None:
+            return Response(
+                {'error': 'person_id is required, as an integer'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        # Authorize BEFORE the write. `get_or_create` first would let any
+        # authenticated patient persist a preferences row for every person
+        # in the system — each one refused afterwards, all of them created.
+        denied = _deny_unless_may_write_person(request, person_id)
+        if denied is not None:
+            return denied
+        self.check_object_permissions(
+            request, TrialSearchPreferences(person_id=person_id)
+        )
+        prefs, _ = TrialSearchPreferences.objects.get_or_create(person_id=person_id)
+        prefs.preferences = {}
+        prefs.save(update_fields=['preferences', 'updated_at'])
+        return Response(self.get_serializer(prefs).data)
 
 
 class SurveyViewSet(_ListQueryParamsMixin, viewsets.ReadOnlyModelViewSet):

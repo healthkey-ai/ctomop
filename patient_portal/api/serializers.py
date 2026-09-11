@@ -5,7 +5,7 @@ from patient_portal.models import Identity, PatientConsent, PatientMessage
 from omop_core.models import (
     PatientRecord, Concept, FieldConceptMapping, FieldSynonym, Person,
     ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
-    PatientDocument, PatientTrialEnrollment, ProvenanceRecord,
+    PatientDocument, PatientTrialEnrollment, TrialSearchPreferences, ProvenanceRecord,
     StemCellTransplant, SctEligibility, PostTransformationOutcome,
     Organization, OrgTrust, OrgInvitation, GroupAccess,
     InterchangeAgreement,
@@ -1049,7 +1049,49 @@ class PatientDocumentSerializer(serializers.ModelSerializer):
 class PatientTrialEnrollmentSerializer(serializers.ModelSerializer):
     class Meta:
         model = PatientTrialEnrollment
-        fields = ['id', 'person', 'trial_id', 'nct_id', 'status']
+        fields = ['id', 'person', 'trial_id', 'nct_id', 'status', 'is_favorite']
+
+    def validate_person(self, value):
+        """`person` may be set at creation and never moved afterwards.
+
+        Object-level permission inspects the row as it stands BEFORE the
+        update, so a patient PATCHing `{'person': <someone else>}` on a row
+        that is legitimately theirs passes every check — and plants an
+        enrollment, with its status, nct_id and coordinator notes, on
+        another patient's chart. They then lose sight of it while that
+        patient and their providers gain it.
+        """
+        if self.instance is not None and value != self.instance.person:
+            raise serializers.ValidationError(
+                'person cannot be changed on an existing enrollment.'
+            )
+        return value
+
+
+class TrialSearchPreferencesSerializer(serializers.ModelSerializer):
+    # Computed on the model so every client agrees on what "a filter the
+    # patient set" means — the trial-search UI paints this number on its
+    # Filters button, and a count computed client-side drifts from the one
+    # the server would compute.
+    non_default_filter_count = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = TrialSearchPreferences
+        fields = ['person', 'preferences', 'non_default_filter_count', 'updated_at']
+        read_only_fields = ['person', 'updated_at']
+
+    def validate_preferences(self, value):
+        """A JSONField accepts any JSON, including a list or a bare string.
+
+        Stored, those serialize back through `non_default_filter_count`,
+        which iterates `.items()` — so one PATCH of `[]` would 500 every
+        later read of that row, not just the write.
+        """
+        if not isinstance(value, dict):
+            raise serializers.ValidationError(
+                'preferences must be a JSON object of filter name to value.'
+            )
+        return value
 
 
 class ProvenanceRecordSerializer(serializers.ModelSerializer):

@@ -3938,6 +3938,16 @@ class PatientTrialEnrollment(models.Model):
         null=True,
         help_text="Free-text notes from coordinating clinician",
     )
+    is_favorite = models.BooleanField(
+        default=False,
+        help_text=(
+            "Patient bookmarked this trial. Deliberately a field and not a "
+            "sixth `status`: the statuses describe participation, and a "
+            "bookmark is orthogonal to it — a patient can save a trial they "
+            "will never register for, and register for one they never saved. "
+            "As a status the two could not be true at once."
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -3945,9 +3955,81 @@ class PatientTrialEnrollment(models.Model):
         db_table = 'patient_trial_enrollment'
         unique_together = [('person', 'trial_id')]
         ordering = ['-status_date', '-created_at']
+        indexes = [
+            # The favorites list is read on every trial-search page load to
+            # label the cards and fill the Favorites tab, always for one
+            # person and almost always only the bookmarked rows.
+            models.Index(
+                fields=['person', 'is_favorite'],
+                name='pte_person_favorite_idx',
+            ),
+        ]
 
     def __str__(self):
         return f"Person {self.person_id} — trial {self.trial_id} ({self.status})"
+
+
+class TrialSearchPreferences(models.Model):
+    """The filters a patient last used on the trial-search page.
+
+    One row per person. The payload is opaque here on purpose: the filter
+    vocabulary belongs to EXACT (`study_preferences_from_query_params`), and
+    mirroring it into columns would mean a migration every time that service
+    gains a filter. PROMOP stores what the UI asked it to store, scoped to
+    the person, and answers how many of those filters are non-default so the
+    UI's "Filters (N)" badge cannot drift from the server's own count.
+    """
+
+    person = models.OneToOneField(
+        Person,
+        on_delete=models.CASCADE,
+        related_name='trial_search_preferences',
+        help_text="The patient whose search these preferences belong to.",
+    )
+    preferences = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=(
+            "Opaque filter payload, camelCase as EXACT's query params spell "
+            "it (searchTitle, trialType, phase, …). Not validated against a "
+            "schema here — see the class docstring."
+        ),
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'trial_search_preferences'
+        verbose_name_plural = 'trial search preferences'
+
+    def __str__(self):
+        return f"Trial search preferences for person {self.person_id}"
+
+    @property
+    def non_default_filter_count(self) -> int:
+        """How many filters the patient actually set.
+
+        Counted here rather than in the UI so every client agrees. Empty
+        string, null and false are "unset" — a cleared text input hands back
+        `""` before anything normalizes it, and an unticked checkbox is
+        `false`. A zero distance counts as unset too: EXACT gates on
+        `if study_info.distance:`, so zero applies no limit at all.
+        """
+        stored = self.preferences
+        if not isinstance(stored, dict):
+            # The serializer rejects a non-object payload, but a row written
+            # before that landed — or from a shell — must not make every
+            # read of it raise.
+            return 0
+        return sum(
+            1
+            for key, value in stored.items()
+            # `sort` and `type` are the sort control and the tab, not
+            # filters; counting them would tick the badge up when the reader
+            # switches tab.
+            if key not in ('sort', 'type')
+            and value not in (None, '', False, 0)
+        )
 
 
 class Institution(models.Model):

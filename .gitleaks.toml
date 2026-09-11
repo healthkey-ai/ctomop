@@ -57,4 +57,5 @@ paths = [
   '''.*\.(test|itest)\.tsx?$''',
   '''.*/__tests__/.*''',
   '''omop_core/data/.*\.json$''',
+  '''docs/genomics_handoff\.md$''',
 ]

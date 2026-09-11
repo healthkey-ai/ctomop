@@ -35,9 +35,9 @@ services:
       - key: CELERY_BROKER_URL
         sync: false
 
-      # A full Athena release is a deployment prerequisite. start.sh applies
-      # the schema through 0200, loads this archive, then applies the remaining
-      # migrations (including the HK-Labs LOINC mapping seed at 0201).
+      # Used once when migration 0201 is pending and any of its target LOINC
+      # concepts are absent. The bounded bootstrap scans the archive but inserts
+      # only those concepts; full vocabulary loads are separate maintenance.
       - key: ATHENA_VOCABULARY_GDRIVE_URL
         sync: false
 

@@ -33,9 +33,9 @@ not a routine fast-forward.
 
 ### Important migration invariant
 
-`0201_seed_hklabs_sccm` creates approved HK-Labs-to-LOINC mappings.  Its target
-LOINC concepts must already exist.  For production-like validation and the
-production deployment, the required order is:
+`0201_seed_hklabs_sccm` creates approved HK-Labs-to-LOINC mappings. Its target
+LOINC concepts must already exist. For production-like validation, the required
+order is:
 
 1. migrate `omop_core` through `0200`;
 2. load a full, in-scope Athena vocabulary bundle (including LOINC); and
@@ -43,6 +43,13 @@ production deployment, the required order is:
 
 Never use `seed_omop_concepts` as a substitute for the full Athena bundle in a
 deployed or release-validation database.
+
+Render web startup cannot perform the full load within its 15-minute port-bind
+deadline. `prepare_production_database` therefore checks the exact LOINC targets
+for 0201, loads only missing targets from the approved Athena archive, verifies
+the complete set, and then migrates. Run the full Athena load separately as
+release maintenance; subsequent web deploys skip the bootstrap once 0201 is
+recorded.
 
 ### Working-tree safety checkpoint
 

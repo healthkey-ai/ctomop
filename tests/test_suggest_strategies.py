@@ -4,7 +4,7 @@ Covers:
 - UMLS CUI-bridge lookup (`umls_candidates`)
 - Vector reranking of a retrieved shortlist (`vector_rerank`)
 - Which queue rows a run is allowed to touch (`suggestable_mappings`)
-- Pipeline orchestration (UMLS early exit, strategy filtering)
+- Pipeline orchestration (UMLS winner, progressive retrieval, strategy filtering)
 - API endpoint parameter validation
 """
 import pytest
@@ -720,6 +720,59 @@ class TestSuggestRunLifecycle:
         busy.target_concept = None
         busy.save()
         assert self.client.get(path).data['activity'] == log['activity']
+
+    def test_candidates_are_persisted_before_next_stage_and_inline_response_includes_them(
+        self, monkeypatch, measurement_concept,
+    ):
+        from omop_core.models import SuggestRun
+        mapping = queue_row('LIVE')
+        hit = {
+            'concept_id': measurement_concept.pk,
+            'concept_name': measurement_concept.concept_name,
+            'concept_code': measurement_concept.concept_code,
+            'vocabulary_id': 'LOINC', 'retrieval': 'umls', 'umls_score': 1,
+        }
+        monkeypatch.setattr('omop_core.mapping.suggestions.umls_candidates', lambda *args: ([hit], 'C123'))
+
+        def lexical(*args, **kwargs):
+            events = SuggestRun.objects.latest('created_at').activity
+            candidate_events = [event for event in events if event['stage'] == 'candidates']
+            assert [event['strategy'] for event in candidate_events] == ['umls']
+            assert candidate_events[0]['candidates'] == [hit]
+            assert candidate_events[0]['mapping_id'] == mapping.pk
+            return []
+
+        def semantic(*args, **kwargs):
+            events = SuggestRun.objects.latest('created_at').activity
+            assert [event['strategy'] for event in events if event['stage'] == 'candidates'] == ['umls', 'lexical']
+            return [{**hit, 'retrieval': 'semantic', 'semantic_score': 0.9, 'vector_distance': 0.1}]
+
+        monkeypatch.setattr('omop_core.mapping.suggestions.lexical_candidates', lexical)
+        monkeypatch.setattr('omop_core.mapping.suggestions.semantic_candidates', semantic)
+        with use_suggest_dispatcher(InlineSuggestDispatcher()):
+            response = self._post(strategies=['umls', 'lexical', 'semantic'], include_activity=True)
+        assert response.data['state'] == 'success'
+        events = response.data['activity']
+        assert [event['strategy'] for event in events if event['stage'] == 'candidates'] == ['umls', 'lexical', 'semantic']
+        ranked = next(event for event in events if event['stage'] == 'ranked')
+        assert ranked['suggested']['concept_id'] == measurement_concept.pk
+        assert ranked['candidates'][0]['vector_distance'] == 0.1
+        # The UMLS event stays an immutable snapshot of the first retrieval.
+        assert 'vector_distance' not in next(event for event in events if event['stage'] == 'candidates')['candidates'][0]
+        alternative = ConceptFactory(domain=measurement_concept.domain, standard_concept='S')
+        response = self.client.patch(f'/api/v1/code-mappings/{mapping.pk}/',
+                                    {'destination_concept_id': alternative.pk, 'status': 'proposed'}, format='json')
+        assert response.status_code == 200
+        mapping.refresh_from_db()
+        assert mapping.target_concept_id == alternative.pk
+        assert mapping.suggested_target_concept_id == measurement_concept.pk
+        assert mapping.status == 'proposed'
+        assert mapping.suggestion_outcome == ''
+        response = self.client.patch(f'/api/v1/code-mappings/{mapping.pk}/', {'status': 'approved'}, format='json')
+        assert response.status_code == 200
+        mapping.refresh_from_db()
+        assert mapping.suggestion_outcome == 'overridden'
+
 
     def test_failed_log_preserves_current_source_and_error(self, monkeypatch):
         queue_row('BROKEN')

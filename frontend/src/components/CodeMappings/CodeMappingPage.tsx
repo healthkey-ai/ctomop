@@ -1,3 +1,4 @@
+import SuggestCandidates, { type CandidateActivity } from "./SuggestCandidates";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { ArrowLeft, Check, ChevronDown, ChevronRight, Pencil, Plus, Search, Sparkles, Trash2, X } from "lucide-react";
@@ -243,6 +244,7 @@ const SUGGEST_POLL_TIMEOUT_MS = 20 * 60 * 1000;
 
 /** Progress of one queued Suggest run, as /suggest-runs/<id>/ reports it. */
 type SuggestRunProgress = {
+  activity?: CandidateActivity[];
   run_id: string;
   state: "queued" | "running" | "success" | "failure";
   total: number;
@@ -1111,6 +1113,7 @@ export default function CodeMappingPage() {
           limit: suggestionLimit,
           strategies: activeStrategies,
           replace: effectiveReplace,
+          include_activity: true,
         },
       );
       suggestRunRef.current = started.run_id;
@@ -1167,7 +1170,7 @@ export default function CodeMappingPage() {
       if (suggestRunRef.current !== started.run_id) return current;  // superseded or unmounted
       try {
         const { data } = await api.get<SuggestRunProgress>(
-          `/v1/code-mappings/suggest-runs/${started.run_id}/`,
+          `/v1/code-mappings/suggest-runs/${started.run_id}/`, { params: { include_activity: "1" } },
         );
         failures = 0;
         current = data;
@@ -1566,6 +1569,11 @@ export default function CodeMappingPage() {
           </section>
         </div>
 
+        {suggestRun && <SuggestCandidates key={suggestRun.run_id}
+          activity={suggestRun.activity ?? []}
+          finished={suggestRun.state === "success" || suggestRun.state === "failure"}
+          onSaved={() => { void refreshCurrent.current(); }} />}
+
         {!suggestRun && latestRunId && (
           <div className="mb-4 text-sm">
             <Link to={`/code-mappings/suggest-runs/${latestRunId}`} target="_blank" rel="noopener noreferrer"
@@ -1952,7 +1960,7 @@ export default function CodeMappingPage() {
                             <input type="checkbox" checked={strategies[key]} onChange={(e) => setStrategies((prev) => ({ ...prev, [key]: e.target.checked }))} />
                             {STRATEGY_LABELS[key]}
                           </label>
-                          <HelpTip tip={key === "umls" ? "Bridge the code to an equivalent concept through UMLS. A single match is used as-is." : key === "lexical" ? "Retrieve candidate destinations by matching names and synonyms." : "Find candidate destinations by meaning, including concepts whose names and synonyms do not match the source wording."} />
+                          <HelpTip tip={key === "umls" ? "Bridge the code to an equivalent concept through UMLS. A unique match wins after the other enabled searches finish." : key === "lexical" ? "Retrieve candidate destinations by matching names and synonyms." : "Find candidate destinations by meaning, including concepts whose names and synonyms do not match the source wording."} />
                         </div>
                       ))}
                       <button

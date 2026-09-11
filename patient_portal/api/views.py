@@ -10367,7 +10367,9 @@ def code_mapping_suggest(request):
     )
     dispatcher.dispatch(run, params)
     run.refresh_from_db()
-    return Response(_serialize_suggest_run(run), status=status.HTTP_202_ACCEPTED)
+    return Response(_serialize_suggest_run(
+        run, include_activity=request.data.get('include_activity') is True,
+    ), status=status.HTTP_202_ACCEPTED)
 
 
 def _serialize_suggest_run(run, *, include_activity=False):

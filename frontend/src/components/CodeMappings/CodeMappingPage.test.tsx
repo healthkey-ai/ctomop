@@ -1163,12 +1163,12 @@ describe("CodeMappingPage", () => {
       // The run is queued and a code costs seconds, so a curator has to be able
       // to tell a working run from a stuck one.
       mockPost.mockResolvedValue({
-        data: suggestRun({ state: "running", total: 4, retrieved: 1, done: 0 }),
+        data: { ...suggestRun({ state: "running", total: 4, retrieved: 1, done: 0 }), activity: [{ stage: "candidates", mapping_id: 7, source_code: "LIVE", strategy: "umls", candidates: [{ concept_id: 1, concept_name: "UMLS candidate", concept_code: "A", vocabulary_id: "SNOMED" }] }] },
       });
       mockGet.mockImplementation((url: string) => {
         if (url.startsWith("/v1/code-mappings/suggest-runs/")) {
           return Promise.resolve({
-            data: suggestRun({ state: "success", total: 4, done: 4, destinations: 4 }),
+            data: { ...suggestRun({ state: "success", total: 4, done: 4, destinations: 4 }), activity: [{ stage: "candidates", mapping_id: 7, source_code: "LIVE", strategy: "semantic", candidates: [{ concept_id: 2, concept_name: "Semantic candidate", concept_code: "B", vocabulary_id: "SNOMED", vector_distance: 0.25 }] }] },
           });
         }
         if (url === "/v1/code-mappings/") return Promise.resolve({ data: [proposedRow] });
@@ -1187,11 +1187,16 @@ describe("CodeMappingPage", () => {
       await waitFor(() =>
         expect(screen.getByTestId("suggest-progress"))
           .toHaveTextContent("Searching for candidates… 1 of 4"));
+      expect(screen.getByText(/UMLS candidate/)).toBeInTheDocument();
       // Then it polls to completion.
       await waitFor(() =>
         expect(screen.getByTestId("suggest-progress"))
           .toHaveTextContent("Done — wrote 4 new destination(s) across 4 code(s)."),
         { timeout: 4000 });
+      expect(screen.getByText(/Semantic candidate/)).toBeInTheDocument();
+      expect(screen.getByText("Distance 0.2500")).toBeInTheDocument();
+      expect(mockGet).toHaveBeenCalledWith(expect.stringContaining("/suggest-runs/"), { params: { include_activity: "1" } });
+      expect(mockPost).toHaveBeenCalledWith("/v1/code-mappings/suggest/", expect.objectContaining({ include_activity: true }));
     });
 
     it("says how many remain so the curator knows to run it again", async () => {

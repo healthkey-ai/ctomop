@@ -25,7 +25,7 @@ that from the source text would overwrite a better answer with a worse one.
 Retrieval then ranking, and the order within retrieval is the point:
 
 **1. UMLS.** CUI bridging is a curated NLM equivalency, so a single standard
-concept ends the pipeline with no model call at all.
+concept wins without a model call, after all enabled searches expose alternatives.
 
 **2. Lexical, for the candidate subset.** The GIN trigram indexes narrow via the
 ``%`` operator; ``similarity()`` then scores only the survivors. Scoring first
@@ -360,6 +360,7 @@ def semantic_candidates(source_value, domain_id, limit=CANDIDATE_LIMIT):
         'domain_id': row['concept__domain_id'],
         # Separate from vector_score: retrieving neighbours is not reranking.
         'semantic_score': round(1 - row['distance'], 4),
+        'vector_distance': round(row['distance'], 6),
         'retrieval': STRATEGY_SEMANTIC,
     } for row in sorted(rows, key=lambda r: (r['distance'], r['concept_id']))]
 
@@ -887,14 +888,18 @@ def rank_candidates(source_value, candidates, source_description='', *, source_c
 
 
 def retrieval_pool(*, source_code, source_vocabulary_id, source_text, domain_id,
-                   strategies, lexical_limit=CANDIDATE_LIMIT):  # noqa: C901
+                   strategies, lexical_limit=CANDIDATE_LIMIT, on_candidates=None):  # noqa: C901
     """Candidates for one source code, in the order the ranker should see them.
 
     Returns ``(candidates, umls_cui, definitive)``.  ``definitive`` means UMLS
     bridged the code to exactly one standard concept: an NLM-curated
-    equivalency, so the pipeline stops there and spends no model call.
+    equivalency. Other enabled searches still run to expose alternatives.
     """
-    candidates, umls_cui = [], None
+    candidates, umls_cui, definitive = [], None, False
+
+    def report(strategy, hits):
+        if on_candidates is not None:
+            on_candidates(strategy, [dict(hit) for hit in hits])
 
     # ICD-10 source systems do not determine the destination OMOP domain.
     # Other inputs (such as labs) retain their domain constraint.
@@ -915,30 +920,31 @@ def retrieval_pool(*, source_code, source_vocabulary_id, source_text, domain_id,
 
     if STRATEGY_UMLS in strategies:
         umls_hits, umls_cui = umls_candidates(source_code, source_vocabulary_id, domain_id)
-        if len(umls_hits) == 1:
-            return umls_hits, umls_cui, True
+        definitive = len(umls_hits) == 1
         candidates = list(umls_hits)
+        report(STRATEGY_UMLS, umls_hits)
 
     if STRATEGY_LEXICAL in strategies:
         seen = {c['concept_id'] for c in candidates}
         # UMLS hits stay ahead of lexical ones and are never displaced by a
         # lexical duplicate: a curated equivalency outranks a string overlap,
         # and its umls_score is the evidence the ranker's prompt shows.
-        candidates += [
-            hit for hit in lexical_candidates(
-                source_text or source_code, domain_id, limit=lexical_limit,
-            )
-            if hit['concept_id'] not in seen
-        ]
+        lexical_hits = lexical_candidates(source_text or source_code, domain_id, limit=lexical_limit)
+        report(STRATEGY_LEXICAL, lexical_hits)
+        candidates += [hit for hit in lexical_hits if hit['concept_id'] not in seen]
 
     if STRATEGY_SEMANTIC in strategies:
         # Always search when enabled, even if lexical returned plausible hits:
         # the correct concept can still be absent from that shortlist.
         by_id = {c['concept_id']: c for c in candidates}
-        for hit in semantic_candidates(source_text or source_code, domain_id):
+        semantic_hits = semantic_candidates(source_text or source_code, domain_id)
+        report(STRATEGY_SEMANTIC, semantic_hits)
+        for hit in semantic_hits:
             existing = by_id.get(hit['concept_id'])
             if existing is not None:
                 existing['semantic_score'] = hit['semantic_score']
+                if 'vector_distance' in hit:
+                    existing['vector_distance'] = hit['vector_distance']
             else:
                 candidates.append(hit)
                 by_id[hit['concept_id']] = hit
@@ -960,11 +966,11 @@ def retrieval_pool(*, source_code, source_vocabulary_id, source_text, domain_id,
         # and lexical fallback precedence instead of comparing unlike scores.
         candidates = umls_tier + lexical_tier + semantic_tier
 
-    return candidates, umls_cui, False
+    return candidates, umls_cui, definitive
 
 
 def _prepare(*, source_code, source_vocabulary_id, source_text, domain_id,
-             strategies, lexical_limit, source_context=None):
+             strategies, lexical_limit, source_context=None, on_candidates=None):
     """Everything for one source code that needs the database, and nothing more.
 
     Split out so the ranking that follows is pure network work and can be run
@@ -973,7 +979,7 @@ def _prepare(*, source_code, source_vocabulary_id, source_text, domain_id,
     candidates, umls_cui, definitive = retrieval_pool(
         source_code=source_code, source_vocabulary_id=source_vocabulary_id,
         source_text=source_text, domain_id=domain_id,
-        strategies=strategies, lexical_limit=lexical_limit,
+        strategies=strategies, lexical_limit=lexical_limit, on_candidates=on_candidates,
     )
     if source_context is None:
         source_context = build_source_context(
@@ -1228,7 +1234,7 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
     *strategies* controls the pipeline, which is not a waterfall of independent
     tiers but one retrieval and one ranking:
 
-    - ``umls`` — CUI bridge.  A single standard concept ends it with no model call.
+    - ``umls`` — CUI bridge. A unique match wins after other searches finish.
     - ``lexical`` — GIN trigram, the best *lexical_limit* survivors.
     - ``semantic`` — up to ten cosine neighbours, even when lexical has hits.
     - ``vectors`` — reorders those survivors by embedding similarity.
@@ -1296,6 +1302,9 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
             domain_id=mapping.domain_id or (fallback[1] if fallback else ''),
             strategies=strategies,
             lexical_limit=lexical_limit,
+            on_candidates=lambda strategy, candidates: emit(
+                'candidates', **source(mapping), strategy=strategy, candidates=candidates,
+            ),
             source_context=build_source_context(
                 source_code=mapping.source_code, vocabulary_id=mapping.source_vocabulary_id,
                 description=mapping.source_code_description, source_concept=source_concept,
@@ -1318,7 +1327,7 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
 
     def ranked(job):
         emit('ranked', **source(job['mapping']), suggested=job['chosen'],
-             note=job['note'], strategy_used=job['strategy_used'])
+             note=job['note'], strategy_used=job['strategy_used'], candidates=job['candidates'])
 
     rank_and_expand_jobs(jobs, on_ranked=ranked)
     report('writing', 0)

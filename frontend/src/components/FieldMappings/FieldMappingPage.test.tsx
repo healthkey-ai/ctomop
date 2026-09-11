@@ -223,6 +223,17 @@ const renderPage = () =>
   );
 
 describe("FieldMappingPage", () => {
+  it('exposes priority and nested Genomics mappings in their own category', async () => {
+    mockGet.mockImplementation((url: string) => Promise.resolve({ data: url === '/v1/field-mappings/'
+      ? ['genomics_brca1', 'genetic_mutations.origin'].map(field_name => ({
+        ...MOCK_DESCRIPTORS[0], field_name, tab: 'genomics',
+      })) : {} }));
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: /Genomics/ }));
+    expect(await screen.findByText('genomics_brca1')).toBeInTheDocument();
+    expect(screen.getByText('genetic_mutations.origin')).toBeInTheDocument();
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     mockUseAuth.mockReturnValue({ currentUser: { is_staff: true, is_org_admin: false } });

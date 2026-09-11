@@ -15,10 +15,10 @@ import AdvanceDirectives from "./AdvanceDirectives";
 import PatientMessages from "./PatientMessages";
 import GeneralTab from "@/components/PatientInfo/tabs/GeneralTab";
 import DiseaseTab from "@/components/PatientInfo/tabs/DiseaseTab";
-import GenomicsTab from "@/components/PatientInfo/tabs/GenomicsTab";
 import TreatmentTab from "@/components/PatientInfo/tabs/TreatmentTab";
 import BloodTab from "@/components/PatientInfo/tabs/BloodTab";
 import LabsTab from "@/components/PatientInfo/tabs/LabsTab";
+import GenomicsTab from "@/components/PatientInfo/tabs/GenomicsTab";
 import BehaviorTab from "@/components/PatientInfo/tabs/BehaviorTab";
 import WearableTab from "@/components/PatientInfo/tabs/WearableTab";
 import PatientOmopTab from "./PatientOmopTab";
@@ -529,6 +529,7 @@ export default function PatientDetail({
     scheduleAutoSave(updated, editedNameRef.current);
   }, [scheduleAutoSave]);
 
+
   const handleNameChange = useCallback((name: string) => {
     setEditedName(name);
     scheduleAutoSave(pendingDataRef.current?.info ?? editedInfoRef.current, name);
@@ -657,7 +658,7 @@ export default function PatientDetail({
 
   const tabDescriptions: Record<number, string> = {
     0: "Keep patient details up to date for accurate personalisation.",
-    1: "Disease-specific clinical information.",
+    1: "Disease selection, staging, and disease-specific clinical information.",
     2: "Therapy history, treatment lines, and planned therapies.",
     3: "Blood counts and differential.",
     4: "Chemistry, liver function, coagulation, cardiac and tumour markers.",

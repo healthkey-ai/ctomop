@@ -71,8 +71,9 @@ class Command(BaseCommand):
         )
         missing = sorted(required - remaining)
         if missing:
-            raise CommandError(
-                'Cannot apply migration 0201; required LOINC concepts are missing: '
+            self.stdout.write(self.style.WARNING(
+                'Athena does not contain these historical LOINC concepts; '
+                'migration 0201 will leave their mappings proposed: '
                 + ', '.join(missing)
-            )
+            ))
         call_command('migrate', interactive=False, verbosity=options['verbosity'])

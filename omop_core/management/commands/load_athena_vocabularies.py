@@ -632,11 +632,12 @@ class Command(BaseCommand):
         )
         missing = sorted(required - loaded)
         if missing:
-            raise CommandError(
-                'Athena archive is missing LOINC concepts required by migration 0201: '
-                + ', '.join(missing)
+            self._log(
+                '  Athena archive omits historical LOINC concepts; mappings will '
+                'remain proposed: ' + ', '.join(missing)
             )
-        self._log(f'  verified all {len(required):,} migration-required LOINC concepts')
+        else:
+            self._log(f'  verified all {len(required):,} migration-required LOINC concepts')
 
     def _open(self, filename):
         if self._gcs_bucket:

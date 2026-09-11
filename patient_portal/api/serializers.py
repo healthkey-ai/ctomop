@@ -1230,7 +1230,7 @@ class FieldConceptMappingSerializer(serializers.ModelSerializer):
         model = FieldConceptMapping
         fields = [
             'id', 'field_name', 'concept', 'vocabulary_id', 'concept_code',
-            'unit', 'omop_table', 'status', 'reviewer',
+            'unit', 'omop_table', 'status', 'provenance', 'reviewer',
             'reviewed_at', 'notes', 'created_at', 'updated_at',
             # What turns an approved mapping into a writable field. Without a
             # source_value derivation cannot find the row the editor writes, so
@@ -1238,7 +1238,7 @@ class FieldConceptMappingSerializer(serializers.ModelSerializer):
             'source_value', 'value_kind', 'type_concept_id',
             'value_vocabulary', 'multiple', 'makes_field_writable',
         ]
-        read_only_fields = ['id', 'reviewer', 'reviewed_at', 'created_at', 'updated_at']
+        read_only_fields = ['provenance', 'id', 'reviewer', 'reviewed_at', 'created_at', 'updated_at']
 
     def validate_concept_code(self, value):
         if not value:
@@ -1297,6 +1297,7 @@ class FieldConceptMappingSerializer(serializers.ModelSerializer):
         return attrs
 
     def create(self, validated_data):
+        validated_data['provenance'] = 'curator'
         request = self.context.get('request')
         if validated_data.get('status') == 'approved' and request:
             validated_data['reviewer'] = request.user
@@ -1304,6 +1305,16 @@ class FieldConceptMappingSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
 
     def update(self, instance, validated_data):
+        # Approval alone does not change who supplied the recipe. A manual
+        # correction does, even if its author leaves the approval status alone.
+        recipe_fields = {
+            'field_name', 'concept', 'vocabulary_id', 'concept_code', 'omop_table',
+            'source_value', 'unit', 'value_kind', 'type_concept_id',
+            'value_vocabulary', 'multiple',
+        }
+        if any(key in validated_data and validated_data[key] != getattr(instance, key)
+               for key in recipe_fields):
+            validated_data['provenance'] = 'curator'
         request = self.context.get('request')
         if validated_data.get('status') == 'approved' and instance.status != 'approved' and request:
             validated_data['reviewer'] = request.user
@@ -1399,6 +1410,7 @@ class CustomPatientFieldCreateSerializer(serializers.Serializer):
         field_formula = None
         with transaction.atomic():
             mapping = FieldConceptMapping.objects.create(
+                provenance='curator',
                 field_name=validated_data['field_name'],
                 concept=concept,
                 vocabulary_id=concept.vocabulary_id,

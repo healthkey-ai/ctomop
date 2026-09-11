@@ -3565,6 +3565,11 @@ class FieldConceptMapping(models.Model):
         ('approved', 'Approved'),
         ('rejected', 'Rejected'),
     ]
+    provenance = models.CharField(
+        max_length=20, blank=True, default='', db_default='',
+        choices=[('system_generated', 'System Generated'), ('curator', 'Curator')],
+        help_text='Who supplied the current mapping recipe; blank for unrecorded legacy origins.',
+    )
     field_name = models.CharField(max_length=100, unique=True, db_index=True)
     concept = models.ForeignKey(
         Concept, on_delete=models.PROTECT, null=True, blank=True,

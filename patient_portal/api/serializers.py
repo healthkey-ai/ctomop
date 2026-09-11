@@ -399,9 +399,11 @@ class PatientRecordSerializer(serializers.ModelSerializer):
     def validate_death_date(self, value):
         if value and value > localdate():
             raise serializers.ValidationError('Death date cannot be in the future.')
-        dob = getattr(self.instance, 'date_of_birth', None)
-        if value and dob and value < dob:
-            raise serializers.ValidationError('Death date cannot precede date of birth.')
+        return value
+
+    def validate_date_of_birth(self, value):
+        if value and value > localdate():
+            raise serializers.ValidationError('Date of birth cannot be in the future.')
         return value
 
     def validate_treatment_refractory_status(self, value):
@@ -818,6 +820,15 @@ class PatientRecordSerializer(serializers.ModelSerializer):
         return value
 
     def validate(self, data):
+        dob = data.get(
+            'date_of_birth', getattr(self.instance, 'date_of_birth', None))
+        death = data.get(
+            'death_date', getattr(self.instance, 'death_date', None))
+        if death and dob and death < dob:
+            raise serializers.ValidationError({
+                'death_date': 'Death date cannot precede date of birth.',
+            })
+
         # Cross-field: transformation date/outcome require the flag, on both
         # create and PATCH (fall back to the stored value for partial updates).
         transformed = data.get(

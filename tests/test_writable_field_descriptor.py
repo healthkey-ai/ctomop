@@ -421,20 +421,23 @@ class TestProfileFields:
         assert entry['target'] == 'patient_record'
         assert entry['projection_target'] == 'person'
 
-    def test_a_fill_if_empty_field_is_not_reported_writable(self):
-        """The endpoint populates a blank and silently leaves a value alone, so a
-        box that looked editable would succeed and change nothing.
-
-        gender/race/ethnicity used to be in this category. They are now fully
-        correctable; date_of_birth deliberately is not — overwriting a recorded
-        birth date is a different decision.
-        """
+    def test_date_of_birth_is_correctable_via_patient_record(self):
         entry = build_writable_field_descriptor()['date_of_birth']
 
         assert entry['kind'] == 'direct'
-        assert entry['writable'] is False
-        assert entry['fill_if_empty'] is True
-        assert 'never overwrites' in entry['reason']
+        assert entry['writable'] is True
+        assert entry['target'] == 'patient_record'
+        assert entry['projection_target'] == 'person'
+        assert 'fill_if_empty' not in entry
+
+    def test_no_direct_field_is_falsely_read_only(self):
+        direct = {
+            field: entry for field, entry in build_writable_field_descriptor().items()
+            if entry['kind'] == 'direct' and not entry.get('curated')
+        }
+
+        assert direct
+        assert not [field for field, entry in direct.items() if not entry['writable']]
 
 
 class TestWearableAggregates:

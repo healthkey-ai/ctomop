@@ -88,10 +88,9 @@ export default function GeneralTab({
     <div>
       {!loading && (
         <p className="mb-4 text-xs text-muted-foreground">
-          Demographics are stored on the patient record; vitals and performance
-          scores are stored as OMOP measurements, so editing one records a result
-          dated below and re-derives the record. A field without an editable box
-          explains why underneath it.
+          Edits are saved to the patient record first. Where a mapping exists,
+          vitals and performance scores are also projected to dated OMOP
+          measurements. Computed fields explain why they are read-only.
         </p>
       )}
 
@@ -103,7 +102,6 @@ export default function GeneralTab({
           </div>
 
           {field('Date of Birth', 'date_of_birth', 'date')}
-          {field('Death Date', 'death_date', 'date')}
 
           <div className="space-y-1.5">
             <label className="text-sm font-medium text-portal-text-primary">Age</label>
@@ -206,6 +204,12 @@ export default function GeneralTab({
           {field('Systolic Blood Pressure (mmHg)', 'systolic_blood_pressure', 'number')}
           {field('Diastolic Blood Pressure (mmHg)', 'diastolic_blood_pressure', 'number')}
           {field('Heart Rate (bpm)', 'heartrate', 'number')}
+        </div>
+      </Section>
+
+      <Section title="End of Life">
+        <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
+          {field('Death Date', 'death_date', 'date')}
         </div>
       </Section>
     </div>

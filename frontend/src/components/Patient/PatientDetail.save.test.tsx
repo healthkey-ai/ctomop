@@ -33,6 +33,10 @@ vi.mock('@/hooks/useVocabulary', () => ({
 import api from '@/api/axios';
 
 const DESCRIPTORS = {
+  date_of_birth: {
+    kind: 'direct', writable: true, target: 'patient_record',
+    projection_target: 'person', value_kind: 'date',
+  },
   anc_thousand_per_ul: {
     kind: 'direct', writable: true, target: 'patient_record',
     value_kind: 'number',
@@ -60,6 +64,7 @@ const DESCRIPTORS = {
 const PATIENT = {
   person_id: 261,
   patient_name: 'Alishia Tawny Howell',
+  date_of_birth: '1970-01-01',
   anc_thousand_per_ul: 3.1,
   absolute_neutrophile_count: '3.10',
   hemoglobin_g_dl: 12.5,
@@ -112,6 +117,14 @@ function patchBody() {
 }
 
 describe('PatientDetail save — the edit, not the record', () => {
+  it('routes a date-of-birth correction through the PatientRecord PATCH', async () => {
+    await renderAndLoad();
+    await editAndSave('1970-01-01', '1971-02-03');
+
+    await waitFor(() => expect(api.patch).toHaveBeenCalled());
+    expect(patchBody()).toEqual({ date_of_birth: '1971-02-03' });
+  });
+
   it('routes a clinical edit to the PatientRecord PATCH', async () => {
     await renderAndLoad();
     await openBloodTab();

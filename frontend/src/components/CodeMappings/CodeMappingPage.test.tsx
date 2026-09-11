@@ -2,6 +2,7 @@ import { render, screen, fireEvent, waitFor, within } from "@testing-library/rea
 import { MemoryRouter } from "react-router-dom";
 import { vi, describe, it, expect, beforeEach } from "vitest";
 import CodeMappingPage from "./CodeMappingPage";
+import CodeMappingAccuracyPage from "./CodeMappingAccuracyPage";
 
 const mockGet = vi.fn();
 const mockPost = vi.fn();
@@ -1337,14 +1338,14 @@ describe("server mapping pages", () => {
   });
 });
 
-describe("Uncoded review counters and refresh", () => {
+describe("Overall review counters and refresh", () => {
   const metrics = { approved: 0, accepted: 0, rejected: 0, overridden: 0, reviewed: 0, precision: null, recall: null, f1: null, model_version: "v0.2" };
   beforeEach(() => { mockGet.mockReset(); mockPatch.mockReset(); });
 
-  it("shows Uncoded reviews across models instead of the newest model's zeroes", async () => {
+  it("shows overall reviews across models regardless of the selected vocabulary", async () => {
     mockGet.mockImplementation((url: string) => Promise.resolve({ data: url.includes("accuracy") ? {
-      overall: { ...metrics, review_totals: { approved: 99, rejected: 99, overridden: 99 } },
-      by_source_vocabulary: { "": { ...metrics, review_totals: { approved: 6, rejected: 2, overridden: 3 } } },
+      overall: { ...metrics, review_totals: { approved: 6, rejected: 2, overridden: 3 } },
+      by_source_vocabulary: { "": { ...metrics, review_totals: { approved: 99, rejected: 99, overridden: 99 } } },
     } : url.includes("reference") ? reference : [proposedRow] }));
     render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
     const section = await screen.findByRole("region", { name: "Suggestion accuracy" });
@@ -1364,21 +1365,29 @@ describe("Uncoded review counters and refresh", () => {
   it("scores precision, recall and F1 over every model rather than the newest reviewed one", async () => {
     // v0.3 alone would read 100%; all models together are 2 of 4 accepted.
     const latestReviewed = { ...metrics, model_version: "v0.3", reviewed: 1, approved: 1, precision: 1, recall: 1, f1: 1 };
-    const allModels = { ...metrics, model_versions: 2, reviewed: 4, approved: 2, rejected: 1, overridden: 1, precision: 0.5, recall: 2 / 3, f1: 0.5 };
+    const allModels = { ...metrics, model_versions: 2, suggestions: 4, reviewed: 4, approved: 2, rejected: 1, overridden: 1, precision: 0.5, recall: 2 / 3, f1: 4 / 7 };
     mockGet.mockImplementation((url: string) => Promise.resolve({ data: url.includes("accuracy") ? {
-      overall: metrics,
-      by_source_vocabulary: { "": { ...metrics, model_version: "v0.3", latest_reviewed: latestReviewed, all_models: allModels } },
+      overall: url.includes("dashboard") ? allModels : { ...metrics, all_models: allModels },
+      models: [latestReviewed, { ...metrics, model_version: "v0.2" }],
+      by_source_vocabulary: { "": { ...latestReviewed, all_models: { ...latestReviewed, model_versions: 1 } } },
     } : url.includes("reference") ? reference : [proposedRow] }));
     render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
     const section = await screen.findByRole("region", { name: "Suggestion accuracy" });
     expect(await within(section).findByText("Precision")).toBeInTheDocument();
     expect(within(section).getByText("Precision").parentElement).toHaveTextContent("50.0%");
     expect(within(section).getByText("Recall").parentElement).toHaveTextContent("66.7%");
-    expect(within(section).getByText("F1").parentElement).toHaveTextContent("50.0%");
+    expect(within(section).getByText("F1").parentElement).toHaveTextContent("57.1%");
     expect(within(section).getByText("Approved").parentElement).toHaveTextContent("2");
     expect(within(section).getByText("Rejected").parentElement).toHaveTextContent("1");
     expect(within(section).getByText("Other destination").parentElement).toHaveTextContent("1");
     expect(within(section).queryByText(/model reviews/)).not.toBeInTheDocument();
+    const labels = ["Approved", "Rejected", "Other destination", "Precision", "Recall", "F1"];
+    const displayed = labels.map(label => within(section).getByText(label).parentElement?.lastElementChild?.textContent);
+    fireEvent.click(screen.getByRole("tab", { name: /Overall/ }));
+    expect(labels.map(label => within(section).getByText(label).parentElement?.lastElementChild?.textContent)).toEqual(displayed);
+    render(<MemoryRouter><CodeMappingAccuracyPage /></MemoryRouter>);
+    const historyRow = (await screen.findByText("All models (2)")).closest("tr")!;
+    expect(within(historyRow).getAllByRole("cell").slice(2).map(cell => cell.textContent)).toEqual(displayed);
   });
 
   it("shows dashes rather than one model's score when the API predates all_models", async () => {
@@ -1387,9 +1396,8 @@ describe("Uncoded review counters and refresh", () => {
     // with nothing left on the strip to explain it.
     const latestReviewed = { ...metrics, model_version: "v0.2", reviewed: 2, approved: 2, precision: 1, recall: 1, f1: 1 };
     mockGet.mockImplementation((url: string) => Promise.resolve({ data: url.includes("accuracy") ? {
-      overall: metrics,
-      by_source_vocabulary: { "": { ...metrics, model_version: "v0.3", latest_reviewed: latestReviewed,
-        review_totals: { approved: 5, rejected: 1, overridden: 0 } } },
+      overall: { ...metrics, latest_reviewed: latestReviewed, review_totals: { approved: 5, rejected: 1, overridden: 0 } },
+      by_source_vocabulary: {},
     } : url.includes("reference") ? reference : [proposedRow] }));
     render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
     const section = await screen.findByRole("region", { name: "Suggestion accuracy" });
@@ -1407,9 +1415,7 @@ describe("Uncoded review counters and refresh", () => {
         return loads === 1 ? Promise.resolve({ data: [proposedRow] }) : new Promise(() => {});
       }
       if (url.includes("reference")) return Promise.resolve({ data: reference });
-      return Promise.resolve({ data: { overall: metrics, by_source_vocabulary: {
-        "": { ...metrics, review_totals: { approved: loads > 1 ? 1 : 0, rejected: 0, overridden: 0 } },
-      } } });
+      return Promise.resolve({ data: { overall: { ...metrics, review_totals: { approved: loads > 1 ? 1 : 0, rejected: 0, overridden: 0 } }, by_source_vocabulary: {} } });
     });
     mockPatch.mockResolvedValue({ data: { ...proposedRow, status: "approved" } });
     render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
@@ -1420,16 +1426,15 @@ describe("Uncoded review counters and refresh", () => {
     expect(mockGet.mock.calls.filter(([url]) => url === "/v1/code-mappings/reference/")).toHaveLength(1);
   });
 
-  it("does not display other vocabularies' reviews for an Uncoded tab without suggestions", async () => {
+  it("shows overall reviews even when the selected vocabulary has no suggestions", async () => {
     mockGet.mockImplementation((url: string) => Promise.resolve({ data: url.includes("accuracy") ? {
       overall: { ...metrics, approved: 99, review_totals: { approved: 99, rejected: 0, overridden: 0 } },
       by_source_vocabulary: {},
     } : url.includes("reference") ? reference : [proposedRow] }));
     render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
     const section = await screen.findByRole("region", { name: "Suggestion accuracy" });
-    expect(within(section).getByText("Approved").parentElement).toHaveTextContent("0");
-    // Metrics are scoped like the counts beside them, so they read as dashes
-    // rather than borrowing the overall model's score.
+    expect(within(section).getByText("Approved").parentElement).toHaveTextContent("99");
+    // Older API responses still cannot supply cross-version scores.
     expect(within(section).getAllByText("—")).toHaveLength(3);
   });
 });

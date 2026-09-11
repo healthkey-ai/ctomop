@@ -10,6 +10,27 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Detect async changes
+    runs-on: ubuntu-latest
+    outputs:
+      async: ${{ steps.filter.outputs.async }}
+    steps:
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            async:
+              - 'ctomop/**'
+              - 'omop_core/**'
+              - 'patient_portal/**'
+              - 'tests/test_celery_e2e.py'
+              - 'requirements.txt'
+              - 'pytest.ini'
+              - 'docker-compose.yml'
+              - 'render.yaml'
+              - '.github/workflows/ci.yml'
+
   backend:
     name: Backend tests
     runs-on: ubuntu-latest
@@ -89,6 +110,8 @@ jobs:
 
   e2e:
     name: Async derivation e2e
+    needs: changes
+    if: needs.changes.outputs.async == 'true'
     runs-on: ubuntu-latest
 
     services:

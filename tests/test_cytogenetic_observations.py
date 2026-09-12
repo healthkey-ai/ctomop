@@ -264,3 +264,14 @@ def test_long_legacy_note_remains_readable_while_supported_selections_are_coded(
         observation_source_value=SOURCE_PREFIX + 't(4;14)', value_as_string='t(4;14)').exists()
     save(editor, ['t(4;14)'])
     assert refresh_patient_record(record.person).cytogenetic_markers == 't(4;14)'
+
+
+def test_validation_does_not_expose_parser_exception_details(editor):
+    record, client = editor
+    with patch('omop_core.services.cytogenetics.selections',
+               side_effect=ValueError('private parser details')):
+        response = client.patch(f'/api/patient-info/{record.person_id}/',
+                                {FIELD: ['t(4;14)']}, format='json')
+    assert response.status_code == 400
+    assert response.data[FIELD] == ['Select recognized cytogenetic markers.']
+    assert 'private parser details' not in str(response.data)

@@ -368,8 +368,8 @@ class CytogeneticMarkersField(serializers.Field):
         from omop_core.services.cytogenetics import selections, VALUES
         try:
             selected = selections(value)
-        except ValueError as exc:
-            raise serializers.ValidationError(str(exc)) from exc
+        except ValueError:
+            raise serializers.ValidationError('Select recognized cytogenetic markers.') from None
         allowed = set(VALUES) | set(FieldChoice.objects.filter(field_name='cytogenetic_markers')
                       .values_list('display', flat=True))
         # Legacy imported text may be echoed by autosave. Preserve it without

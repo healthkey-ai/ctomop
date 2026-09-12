@@ -1,4 +1,9 @@
-# Cytogenetic marker summary coding
+# Legacy cytogenetic marker summary coding
+
+The per-selection standard Observation mappings added by #1208 are documented in
+[cytogenetic-markers.md](cytogenetic-markers.md). The description below covers the
+legacy aggregate recipe, which remains readable for existing data and curator
+recipes.
 
 `cytogenetic_markers` retains canonical selection tokens for PatientRecord and
 matching. It is a local multi-marker summary, not a genetic variant status.

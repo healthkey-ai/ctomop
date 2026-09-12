@@ -357,7 +357,31 @@ def _derived_wearable_fields():
     )
 
 
+class CytogeneticMarkersField(serializers.Field):
+    """Accept multiselect arrays and preserve compatibility with text clients."""
+
+    def to_representation(self, value):
+        from omop_core.services.cytogenetics import selections
+        return ', '.join(selections(value)) if value is not None else None
+
+    def to_internal_value(self, value):
+        from omop_core.services.cytogenetics import selections, VALUES
+        try:
+            selected = selections(value)
+        except ValueError:
+            raise serializers.ValidationError('Select recognized cytogenetic markers.') from None
+        allowed = set(VALUES) | set(FieldChoice.objects.filter(field_name='cytogenetic_markers')
+                      .values_list('display', flat=True))
+        # Legacy imported text may be echoed by autosave. Preserve it without
+        # pretending it has an approved concept mapping.
+        existing = selections(getattr(self.parent.instance, 'cytogenetic_markers', None))
+        if set(selected) - allowed - set(existing):
+            raise serializers.ValidationError('Select recognized cytogenetic markers.')
+        return ', '.join(selected)
+
+
 class PatientRecordSerializer(serializers.ModelSerializer):
+    cytogenetic_markers = CytogeneticMarkersField(required=False, allow_null=True)
     person_id = serializers.IntegerField(source='person.person_id', read_only=True)
     patient_name = serializers.SerializerMethodField()
     name = serializers.SerializerMethodField()
@@ -834,16 +858,6 @@ class PatientRecordSerializer(serializers.ModelSerializer):
                 f"Allowed: {sorted(allowed)}"
             )
         return value
-
-    def validate_cytogenetic_markers(self, value):
-        """Store the same canonical tokens used by FHIR refresh and matching."""
-        from omop_core.services.cytogenetics import normalise_cytogenetic_markers
-        try:
-            return normalise_cytogenetic_markers(value, strict=True)
-        except ValueError:
-            raise serializers.ValidationError(
-                'Unrecognized cytogenetic marker selection.'
-            ) from None
 
     def validate(self, data):
         dob = data.get(

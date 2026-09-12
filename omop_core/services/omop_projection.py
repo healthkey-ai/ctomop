@@ -98,7 +98,7 @@ def curated_values_from_snapshot(snapshot):
     # not need and that would exceed the full-refresh query budget.
     mappings = FieldConceptMapping.objects.filter(
         status='approved', field_name__in=readable_fields,
-    ).exclude(value_kind='json').values(
+    ).exclude(value_kind='json').exclude(field_name='cytogenetic_markers', vocabulary_id='SNOMED', concept_code='107675007').values(
         'field_name', 'omop_table', 'concept_id', 'concept__concept_code', 'source_value',
     )
     for mapping in mappings:
@@ -163,7 +163,8 @@ def project_field_to_omop(mapping) -> int:
     return count
 
 
-def project_single_value(person, field_name, value, projection, *, acknowledge_existing=False):
+def project_single_value(person, field_name, value, projection, *, acknowledge_existing=False,
+                         after_pk=None):
     """Update a matching non-erroneous fact today, or create today's fact.
 
     Matching includes the concept and source key. Earlier dates are history and
@@ -172,7 +173,16 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
 
     Normally returns whether a fact changed. Direct saves can acknowledge an
     identical existing fact too, so it is not mistaken for a failed projection.
+    Collection edits can supply after_pk to keep corrections newer than an
+    aggregate import that superseded earlier individual rows on the same day.
     """
+    if field_name == 'cytogenetic_markers' and 'choice_projections' in projection:
+        from omop_core.services.cytogenetics import project_selections
+        try:
+            return project_selections(person, value, projection)
+        except Exception:
+            logger.warning('Cytogenetic projection failed; edit remains pending')
+            return False
     target = projection.get('omop_table')
     concept_id = projection.get('concept_id')
     source_value = projection.get('source_value')
@@ -188,10 +198,13 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
     try:
         with transaction.atomic():
             Person.objects.select_for_update().get(pk=person.pk)
-            instance = model.objects.filter(
+            candidates = model.objects.filter(
                 person=person, is_erroneous=False,
                 **{concept_field: concept_id, src_field: source_value, date_field: today},
-            ).order_by('-' + pk_field).first()
+            )
+            if after_pk is not None:
+                candidates = candidates.filter(pk__gt=after_pk)
+            instance = candidates.order_by('-' + pk_field).first()
             existing = instance is not None
             if instance is None:
                 instance = model(**{

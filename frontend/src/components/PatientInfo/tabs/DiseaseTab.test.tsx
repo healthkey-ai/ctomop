@@ -644,3 +644,31 @@ describe('DiseaseTab — shared staging and biomarkers', () => {
     expect(screen.getByDisplayValue('12')).toBeInTheDocument();
   });
 });
+
+describe('DiseaseTab — cytogenetic marker multiselect', () => {
+  beforeEach(async () => {
+    __resetWritableFieldsCache();
+    (globalThis as Record<string, unknown>).__DESCRIPTORS__ = {
+      ...DESCRIPTORS,
+      cytogenetic_markers: {
+        ...observation('cytogenetic:', 'string', true),
+        options: [{ value: 't(4;14)' }, { value: 't(11;14)' }, { value: '1q21 amplification' }],
+      },
+    };
+    await fetchWritableFields();
+    setupVocabMock();
+  });
+
+  it('adds and removes individual choices without discarding other selections', () => {
+    const onChange = vi.fn();
+    const { rerender } = render(<DiseaseTab {...BASE_PROPS}
+      formData={{ cytogenetic_markers: 't(4;14)' }} onChange={onChange} />);
+    expect(screen.getByText('Cytogenetic Markers')).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('ms-opt-t(11;14)'));
+    expect(onChange).toHaveBeenLastCalledWith('cytogenetic_markers', 't(4;14), t(11;14)');
+    rerender(<DiseaseTab {...BASE_PROPS}
+      formData={{ cytogenetic_markers: 't(4;14), t(11;14)' }} onChange={onChange} />);
+    fireEvent.click(screen.getByTestId('ms-opt-t(4;14)'));
+    expect(onChange).toHaveBeenLastCalledWith('cytogenetic_markers', 't(11;14)');
+  });
+});

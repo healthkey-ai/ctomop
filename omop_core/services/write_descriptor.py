@@ -450,6 +450,10 @@ def _curated_writes(choice_options=None):
         elif choice_options and row.field_name in choice_options:
             entry['options'] = choice_options[row.field_name]
             entry['multiple'] = row.multiple
+        if (row.field_name == 'cytogenetic_markers' and row.multiple
+                and row.vocabulary_id == 'SNOMED' and row.concept_code == '107675007'):
+            from omop_core.services.cytogenetics import descriptor as cytogenetic_descriptor
+            entry = cytogenetic_descriptor(mapping_approved=True)
         entries[row.field_name] = entry
     return entries
 

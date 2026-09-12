@@ -27,6 +27,11 @@ NOTE ID sequence used by both storage paths.
 Pending-edit field names are migrated too, preserving protection for patient
 edits that have not yet been projected into OMOP.
 Migration 0229 joins the subsequent genomics/provenance merge from dev.
+Migration 0230 repairs the untouched, unreviewed automatic LOINC 55232-3 panel
+proposal found on staging. The earlier rename preserved that existing row,
+which prevented installation of the approved summary recipe. The repair
+matches its exact legacy metadata and leaves curator drafts, reviewed or
+rejected mappings, and customized recipes alone.
 
 Selections longer than the CDM's 60-character value limit are stored losslessly
 in NOTE. The summary fact holds a `[note:id]` reference. Readback requires the

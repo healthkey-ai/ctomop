@@ -9,17 +9,18 @@ logger = logging.getLogger(__name__)
 LEGACY_FIELD = 'cytogenic_markers'
 FIELD = 'cytogenetic_markers'
 
-# (stored/display value, LOINC result code, code display)
+# These are canonical local result values, not LOINC test identifiers. No
+# standard equivalent has been verified for this multi-marker summary.
 CHOICES = (
-    ('del17p', '72838-3', 'TP53/17p deletion'),
-    ('t(4;14)', '72842-5', 'FGFR3/IGH translocation t(4;14)'),
-    ('t(11;14)', None, ''),
-    ('t(14;16)', '81250-3', 'MAF/IGH translocation t(14;16)'),
-    ('1q_gain', '81249-5', '1q21 gain/amplification'),
-    ('1q_amp', '81249-5', '1q21 amplification (4 or more copies)'),
-    ('hyperdiploidy', '81248-7', 'Hyperdiploidy'),
-    ('del13q', '72840-9', '13q deletion'),
-    ('MYC rearrangement', None, ''),
+    'del17p', 't(4;14)', 't(11;14)', 't(14;16)', '1q_gain', '1q_amp',
+    'hyperdiploidy', 'del13q', 'MYC rearrangement',
+)
+# Incorrect associations shipped in the unmerged version of this migration.
+# Remove only those exact associations if a development DB already has them.
+INVALID_CHOICE_CODES = (
+    ('del17p', '72838-3'), ('t(4;14)', '72842-5'),
+    ('t(14;16)', '81250-3'), ('1q_gain', '81249-5'), ('1q_amp', '81249-5'),
+    ('hyperdiploidy', '81248-7'), ('del13q', '72840-9'),
 )
 
 
@@ -31,61 +32,74 @@ def migrate_and_seed(apps, schema_editor):
     FieldSynonym = apps.get_model('omop_core', 'FieldSynonym')
     Concept = apps.get_model('omop_core', 'Concept')
 
-    for model in (FieldChoice, FieldFormula, FieldSynonym):
-        model.objects.filter(field_name=LEGACY_FIELD).update(field_name=FIELD)
+    using = schema_editor.connection.alias if schema_editor else 'default'
 
-    FieldConceptMapping.objects.filter(
+    for model in (FieldChoice, FieldFormula, FieldSynonym):
+        model.objects.using(using).filter(field_name=LEGACY_FIELD).update(field_name=FIELD)
+
+    FieldConceptMapping.objects.using(using).filter(
         field_name=LEGACY_FIELD,
         vocabulary_id='MeSH',
         concept_code='D002869',
     ).delete()
-    FieldConceptMapping.objects.filter(field_name=LEGACY_FIELD).update(field_name=FIELD)
+    FieldConceptMapping.objects.using(using).filter(field_name=LEGACY_FIELD).update(field_name=FIELD)
 
-    for sort_order, (display, code, code_display) in enumerate(CHOICES):
-        choice, _ = FieldChoice.objects.get_or_create(
-            field_name=FIELD,
-            display=display,
-            defaults={'sort_order': sort_order},
+    for sort_order, display in enumerate(CHOICES):
+        FieldChoice.objects.using(using).get_or_create(
+            field_name=FIELD, display=display, defaults={'sort_order': sort_order},
         )
-        if code:
-            FieldChoiceCode.objects.update_or_create(
-                choice=choice,
-                vocabulary_id='LOINC',
-                code=code,
-                defaults={'display': code_display, 'is_primary': True},
-            )
+    for display, code in INVALID_CHOICE_CODES:
+        FieldChoiceCode.objects.using(using).filter(
+            choice__field_name=FIELD, choice__display=display,
+            vocabulary_id='LOINC', code=code,
+        ).delete()
 
-    question = Concept.objects.filter(
-        vocabulary_id='LOINC', concept_code='69548-6', invalid_reason__isnull=True,
-    ).first()
+    # 69548-6 is a present/absent genetic variant assessment, not a list of
+    # abnormalities. Keep this legacy summary explicitly unmapped and separate
+    # from genetic_mutations.status, whose domain is reconciled by #1204.
+    zero = Concept.objects.using(using).filter(pk=0).first()
     mapping_defaults = {
-        'concept': question,
-        'vocabulary_id': 'LOINC',
-        'concept_code': '69548-6',
+        'concept': zero,
+        'vocabulary_id': '',
+        'concept_code': '',
         'omop_table': 'observation',
         'source_value': 'mm-cytogenetic-markers',
         'value_kind': 'string',
         'multiple': True,
-        'status': 'approved' if question else 'proposed',
+        'status': 'approved' if zero else 'proposed',
         'notes': (
-            'PatientRecord-first projection for a canonical comma-separated '
-            'cytogenetic marker list (#1047/#1050/#1051).'
+            'Canonical cytogenetic marker summary; no verified standard equivalent. '
+            'OMOP concept 0 with local source mm-cytogenetic-markers. '
+            'Do not map to LOINC 69548-6 (finding status; #1204).'
         ),
     }
-    FieldConceptMapping.objects.update_or_create(
+    mapping, created = FieldConceptMapping.objects.using(using).get_or_create(
         field_name=FIELD, defaults=mapping_defaults,
     )
-    if question is None:
-        logger.warning(
-            'LOINC:69548-6 missing; cytogenetic markers remain direct-only '
-            'until the mapping is resolved and approved.'
-        )
+    if not created and (
+        mapping.vocabulary_id == 'LOINC' and mapping.concept_code == '69548-6'
+        and mapping.source_value == 'mm-cytogenetic-markers'
+    ):
+        FieldConceptMapping.objects.using(using).filter(pk=mapping.pk).update(**mapping_defaults)
+    if zero is None:
+        logger.warning('OMOP concept 0 missing; cytogenetic summary remains direct-only.')
+
+    # Repair facts written by the old development seed without touching the
+    # separate, correctly coded finding-status rows introduced by #1204.
+    if zero is not None:
+        Observation = apps.get_model('omop_core', 'Observation')
+        Observation.objects.using(using).filter(
+            observation_source_value='mm-cytogenetic-markers',
+            observation_concept__vocabulary_id='LOINC',
+            observation_concept__concept_code='69548-6',
+        ).update(observation_concept=zero)
 
 
 def reverse_metadata(apps, schema_editor):
+    using = schema_editor.connection.alias
     for model_name in ('FieldChoice', 'FieldFormula', 'FieldSynonym', 'FieldConceptMapping'):
         model = apps.get_model('omop_core', model_name)
-        model.objects.filter(field_name=FIELD).update(field_name=LEGACY_FIELD)
+        model.objects.using(using).filter(field_name=FIELD).update(field_name=LEGACY_FIELD)
 
 
 def _rebuild_view(old_output, new_output, table_column):

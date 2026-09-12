@@ -53,9 +53,10 @@ def approved_mapping(field_name):
 
 def mapped_concept(mapping):
     if mapping.concept_id and mapping.concept.standard_concept == 'S':
-        if mapping.concept.domain_id.lower() != mapping.omop_table:
-            raise ValidationError({mapping.field_name: 'The approved concept domain does not match its OMOP table.'})
-        return mapping.concept_id, mapping.concept_id
+        if mapping.concept.domain_id.lower() == mapping.omop_table:
+            return mapping.concept_id, mapping.concept_id
+        # Domain drifted in a newer Athena release — fall through to LOINC
+        # resolution which handles mismatches gracefully (concept 0 + source).
     if mapping.vocabulary_id == 'LOINC' and mapping.concept_code:
         concept, source, domain = _resolve(mapping.concept_code, mapping.omop_table.title())
         return (concept if domain.lower() == mapping.omop_table else 0), source
@@ -197,6 +198,12 @@ def _event_concept():
         invalid_reason__isnull=True,
     ).first()
     if concept is None:
+        # Athena CDM vocabulary uses CDM### codes with the table.column as the name.
+        concept = Concept.objects.filter(
+            vocabulary_id='CDM', concept_name='measurement.measurement_id',
+            standard_concept='S', invalid_reason__isnull=True,
+        ).first()
+    if concept is None:
         raise ValidationError({'variant': 'Load the OMOP CDM vocabulary (measurement.measurement_id) before saving variants.'})
     return concept.pk
 
@@ -301,7 +308,7 @@ def _find(person, variant_id):
 
 @transaction.atomic
 @suppress_patient_record_refresh()
-def save_variant(person, payload, variant_id=None, type_concept_id=32817):
+def save_variant(person, payload, variant_id=None, type_concept_id=32817, skip_refresh=False):
     PatientRecord.objects.select_for_update().get(person=person)
     previous = _find(person, variant_id) if variant_id is not None else None
     data = normalize_variant(payload, previous)
@@ -399,14 +406,15 @@ def save_variant(person, payload, variant_id=None, type_concept_id=32817):
             stored_text, _ = _store_text(str(value), person, data['test_date'], type_concept_id, parent.pk)
             attrs['value_as_string'] = stored_text
         model.objects.create(**attrs)
-    from omop_core.services.patient_record_service import refresh_patient_record
-    refresh_patient_record(person)
+    if not skip_refresh:
+        from omop_core.services.patient_record_service import refresh_patient_record
+        refresh_patient_record(person)
     return _find(person, parent.pk)
 
 
 @transaction.atomic
 @suppress_patient_record_refresh()
-def delete_variant(person, variant_id):
+def delete_variant(person, variant_id, skip_refresh=False):
     PatientRecord.objects.select_for_update().get(person=person)
     previous = _find(person, variant_id)
     marker = marker_for_variant(previous)
@@ -416,8 +424,9 @@ def delete_variant(person, variant_id):
         rows.update(is_erroneous=True, erroneous_reason='Removed in Genomics editor')
     Measurement.objects.filter(person=person, pk=variant_id).update(
         is_erroneous=True, erroneous_reason='Removed in Genomics editor')
-    from omop_core.services.patient_record_service import refresh_patient_record
-    refresh_patient_record(person)
+    if not skip_refresh:
+        from omop_core.services.patient_record_service import refresh_patient_record
+        refresh_patient_record(person)
 
 
 @transaction.atomic

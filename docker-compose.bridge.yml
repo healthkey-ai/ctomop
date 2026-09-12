@@ -56,6 +56,7 @@ services:
       FIREBASE_SKIP_REVOCATION_CHECK: "True"
       # Shared with hk-labs so its lab-results sync is accepted.
       SERVICE_AUTH_TOKEN: ${CTOMOP_SERVICE_TOKEN:-local-bridge-service-token}
+      SERVICE_AUTH_SCOPES: "patient/*.read patient/*.write"
     ports: !override
       - "${PROMOP_HOST_PORT:-9200}:8000"
     volumes: !override

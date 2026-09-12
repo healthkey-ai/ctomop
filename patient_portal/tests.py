@@ -18514,7 +18514,8 @@ class BulkOmopWriteTest(TestCase):
             content_type=ct, object_id__in=resp.data['ids'])
         self.assertEqual(prov.count(), 4)
         self.assertEqual({p.source for p in prov}, {'EHR_SYNC'})
-        self.assertEqual({p.source_user_id for p in prov}, {'etl-run-7'})
+        self.assertEqual({p.source_user_id for p in prov},
+                         {f'{self.service_identity.issuer}|{self.service_identity.sub}'})
         self.assertEqual(
             {p.target_patient_id for p in prov}, {str(self.person.person_id)})
 
@@ -19036,7 +19037,7 @@ class BulkOmopUpsertTest(TestCase):
                 content_type=ct,
                 object_id=first.data['measurement_id'],
                 source='EHR_SYNC',
-                source_user_id='etl-retry-1',
+                source_user_id=f'{self.service_identity.issuer}|{self.service_identity.sub}',
             ).count(),
             1,
         )

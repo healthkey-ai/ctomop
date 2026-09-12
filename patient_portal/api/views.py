@@ -407,7 +407,6 @@ def _extract_provenance(request):
         or request.META.get('HTTP_X_PROVENANCE_USER_ID', '')
     )
     if is_service_token(request):
-        source = source or 'EHR_SYNC'
         source_user_id = f"{request.user.issuer}|{request.user.sub}"
     modification_reason = body.get('modification_reason')
     return source, source_user_id, modification_reason

@@ -71,3 +71,19 @@ Local tests use isolated PostgreSQL, Redis, and a real Celery worker to verify
 100-code Suggest runs and patient derivation without external model API calls.
 
 Render reference: https://render.com/docs/blueprint-spec
+
+
+## Security configuration
+
+`DEBUG` does not select security defaults. Render web and worker processes are
+recognized through Render's environment markers, including `RENDER=true` on
+workers. From the **web** service shell, run:
+
+```bash
+python manage.py check --deploy --fail-level ERROR
+```
+
+`patient_portal.I001` reports effective security controls without printing
+credentials or identity-service URLs. See [security settings](security-settings.md)
+for explicit overrides and local HTTP setup. Build commands retain their startup
+exemption; `check --deploy` validates runtime configuration before migrations.

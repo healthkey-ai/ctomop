@@ -43,6 +43,11 @@ services:
     environment:
       DATABASE_URL: postgresql://promop:promop_local@db:5432/promop
       DEBUG: "True"
+      ENVIRONMENT: local
+      SESSION_COOKIE_SECURE: "false"
+      CSRF_COOKIE_SECURE: "false"
+      SECURE_HSTS_SECONDS: "0"
+      ALLOWED_REDIRECT_URI_SCHEMES: https,http
       SECRET_KEY: local-bridge-promop
       ALLOWED_HOSTS: localhost,127.0.0.1,promop_web
       # The browser calls this API directly from ONE's dev server origin.

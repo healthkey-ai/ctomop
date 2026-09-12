@@ -33,8 +33,27 @@ FRONTEND_ROOT = resolve_frontend_root(BASE_DIR, os.environ.get('WHITENOISE_ROOT'
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-your-default-key-change-this')
 
-# SECURITY WARNING: don't run with debug turned on in production!
+# DEBUG controls diagnostics, not the security defaults below.
 DEBUG = os.environ.get('DEBUG', 'False') == 'True'
+
+
+def _env_bool(name, default=False):
+    return os.environ.get(name, str(default)).strip().lower() in ('1', 'true', 'yes')
+
+
+def _env_list(name, default=''):
+    return [value.strip() for value in os.environ.get(name, default).split(',') if value.strip()]
+
+
+# Render workers lack a public URL, but receive RENDER=true. Other platforms
+# must declare ENVIRONMENT; a local value cannot override Render detection.
+ENVIRONMENT = os.environ.get('ENVIRONMENT', 'local').strip().lower()
+IS_DEPLOYED = bool(
+    _env_bool('RENDER')
+    or os.environ.get('RENDER_EXTERNAL_URL', '').strip()
+    or os.environ.get('RENDER_EXTERNAL_HOSTNAME', '').strip()
+    or ENVIRONMENT not in ('local', 'development', 'dev', 'test')
+)
 
 # Render supplies its public hostname even when a Blueprint sync leaves the
 # dashboard-managed ALLOWED_HOSTS unset. Keep custom domains and allow the
@@ -47,10 +66,9 @@ ALLOWED_HOSTS = [
 _render_hostname = os.environ.get('RENDER_EXTERNAL_HOSTNAME', '').strip()
 if _render_hostname and _render_hostname not in ALLOWED_HOSTS:
     ALLOWED_HOSTS.append(_render_hostname)
-if DEBUG:
-    ALLOWED_HOSTS = ['*']
 
-if not DEBUG:
+# Preserve validation for unmarked legacy production processes too.
+if IS_DEPLOYED or not DEBUG:
     import sys as _sys
     # Skip the production guard for management commands that must run before the
     # app server is fully initialised (migrate, test, collectstatic, check, etc.)
@@ -71,7 +89,7 @@ if not DEBUG:
     if not _running_mgmt:
         from django.core.exceptions import ImproperlyConfigured
         _config_errors = []
-        if SECRET_KEY.startswith('django-insecure-'):
+        if not SECRET_KEY.strip() or SECRET_KEY.startswith('django-insecure-'):
             _config_errors.append(
                 'SECRET_KEY must be set to a strong random value (current value is the insecure default)'
             )
@@ -84,7 +102,7 @@ if not DEBUG:
                 'ALLOWED_HOSTS must be set to your domain(s), e.g. "app.example.com" '
                 '(or RENDER_EXTERNAL_HOSTNAME must be supplied by Render)'
             )
-        if not _running_worker and not os.environ.get('CORS_ALLOWED_ORIGINS'):
+        if not _running_worker and not _env_list('CORS_ALLOWED_ORIGINS'):
             _config_errors.append(
                 'CORS_ALLOWED_ORIGINS must be set to your frontend origin(s), '
                 'e.g. "https://app.example.com"'
@@ -333,17 +351,10 @@ if FRONTEND_ROOT:
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-# CORS settings
-if DEBUG:
-    CORS_ALLOW_ALL_ORIGINS = True
-else:
-    CORS_ALLOW_ALL_ORIGINS = False
-    CORS_ALLOWED_ORIGINS = [
-        origin.strip()
-        for origin in os.environ.get('CORS_ALLOWED_ORIGINS', '').split(',')
-        if origin.strip()
-    ]
-CORS_ALLOW_CREDENTIALS = True
+# CORS settings: permissive access requires an explicit operator choice.
+CORS_ALLOW_ALL_ORIGINS = _env_bool('CORS_ALLOW_ALL_ORIGINS')
+CORS_ALLOWED_ORIGINS = _env_list('CORS_ALLOWED_ORIGINS')
+CORS_ALLOW_CREDENTIALS = _env_bool('CORS_ALLOW_CREDENTIALS', True)
 CORS_EXPOSE_HEADERS = (
     'Link',
     'X-Total-Count',
@@ -369,7 +380,7 @@ PARTNER_AUTH_PROVIDERS = [
 # back to introspection.
 PHR_ISSUER = os.environ.get("PHR_ISSUER", "healthkey-phr")
 PHR_BASE_URL = os.environ.get(
-    "PHR_BASE_URL", "http://127.0.0.1:9000" if DEBUG else ""
+    "PHR_BASE_URL", ""
 ).rstrip("/")
 PHR_JWKS_URL = os.environ.get(
     "PHR_JWKS_URL", f"{PHR_BASE_URL}/api/v1/auth/jwks/" if PHR_BASE_URL else ""
@@ -383,14 +394,13 @@ PHR_JWKS_CACHE_TTL = int(os.environ.get("PHR_JWKS_CACHE_TTL", "3600"))
 # Both verification paths in patient_portal/api/providers/phr.py treat an unset
 # value as "not configured" and reject every PHR token — fail CLOSED, not open.
 # This is deliberate: a wrong or missing audience must never be silently
-# accepted. Operational consequence: PHR_AUDIENCE must be set in the Render and
-# GCP environments before this change reaches those environments, or every PHR
-# federation login will fail with no other code change required to break it.
-PHR_AUDIENCE = os.environ.get("PHR_AUDIENCE", "promop-api" if DEBUG else "")
+# accepted. Set PHR_AUDIENCE explicitly in every environment using federation,
+# including local development.
+PHR_AUDIENCE = os.environ.get("PHR_AUDIENCE", "")
 
-FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID", "promop-test" if DEBUG else "")
+FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID", "")
 FIREBASE_SKIP_REVOCATION_CHECK = os.environ.get(
-    "FIREBASE_SKIP_REVOCATION_CHECK", "true" if DEBUG else "false"
+    "FIREBASE_SKIP_REVOCATION_CHECK", "false"
 ).lower() in ("1", "true")
 
 AUTH_TOKEN_CACHE_TTL = int(os.environ.get("AUTH_TOKEN_CACHE_TTL", "60"))
@@ -414,7 +424,8 @@ _auth_classes = [
     'oauth2_provider.contrib.rest_framework.OAuth2Authentication',
     'patient_portal.api.authentication.CsrfExemptSessionAuthentication',
 ]
-if DEBUG:
+ENABLE_BASIC_AUTH = _env_bool('ENABLE_BASIC_AUTH')
+if ENABLE_BASIC_AUTH:
     _auth_classes += [
         'rest_framework.authentication.BasicAuthentication',
     ]
@@ -494,8 +505,7 @@ OAUTH2_PROVIDER = {
     'REFRESH_TOKEN_EXPIRE_SECONDS': 86400 * 30,
     # Require PKCE for all public (SPA) clients
     'PKCE_REQUIRED': True,
-    # Allow http for local dev; https enforced in production via ALLOWED_REDIRECT_URI_SCHEMES
-    'ALLOWED_REDIRECT_URI_SCHEMES': ['https', 'http'],
+    'ALLOWED_REDIRECT_URI_SCHEMES': _env_list('ALLOWED_REDIRECT_URI_SCHEMES', 'https'),
     # client_credentials enables service-to-service auth for any API client
     # (hospital systems, foundations, platform services) without a user session
     'ALLOWED_GRANT_TYPES': [
@@ -509,19 +519,21 @@ OAUTH2_PROVIDER = {
 SOCIAL_AUTH_GOOGLE_OAUTH2_KEY = os.environ.get('SOCIAL_AUTH_GOOGLE_OAUTH2_KEY')
 SOCIAL_AUTH_GOOGLE_OAUTH2_SECRET = os.environ.get('SOCIAL_AUTH_GOOGLE_OAUTH2_SECRET')
 
-# Security settings for production
-if not DEBUG:
-    # Don't force SSL redirect - Render handles SSL at load balancer
-    SECURE_SSL_REDIRECT = False
-    SESSION_COOKIE_SECURE = True
-    CSRF_COOKIE_SECURE = True
-    SECURE_HSTS_SECONDS = 31536000          # 1 year
-    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
-    SECURE_HSTS_PRELOAD = True
-    SECURE_BROWSER_XSS_FILTER = True
-    SECURE_CONTENT_TYPE_NOSNIFF = True
-    X_FRAME_OPTIONS = 'DENY'
-    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+# Render redirects HTTP at its edge; deployments without that must opt in.
+SECURE_SSL_REDIRECT = _env_bool('SECURE_SSL_REDIRECT')
+SESSION_COOKIE_SECURE = _env_bool('SESSION_COOKIE_SECURE', True)
+CSRF_COOKIE_SECURE = _env_bool('CSRF_COOKIE_SECURE', True)
+SECURE_HSTS_SECONDS = int(os.environ.get('SECURE_HSTS_SECONDS', '31536000'))
+SECURE_HSTS_INCLUDE_SUBDOMAINS = _env_bool('SECURE_HSTS_INCLUDE_SUBDOMAINS', True)
+SECURE_HSTS_PRELOAD = _env_bool('SECURE_HSTS_PRELOAD', True)
+SECURE_CONTENT_TYPE_NOSNIFF = _env_bool('SECURE_CONTENT_TYPE_NOSNIFF', True)
+X_FRAME_OPTIONS = os.environ.get('X_FRAME_OPTIONS', 'DENY')
+# Only trust this header behind a proxy that strips client-supplied values.
+# Render supplies such a proxy; direct/local servers default to no trust.
+TRUST_PROXY_SSL_HEADER = _env_bool('TRUST_PROXY_SSL_HEADER', bool(
+    _env_bool('RENDER') or _render_hostname or os.environ.get('RENDER_EXTERNAL_URL')
+))
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https') if TRUST_PROXY_SSL_HEADER else None
 
 
 # Add trusted origins for CSRF. Django checks the Origin header on admin POSTs,

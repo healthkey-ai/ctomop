@@ -1,17 +1,19 @@
+import json
+
 from django.conf import settings
-from django.core.checks import Error, Tags, Warning, register
+from django.core.checks import Error, Info, Tags, Warning, register
 
 
 @register(Tags.security, deploy=True)
 def production_key_separation_check(app_configs, **kwargs):
-    """Require independent audit/export signing keys outside DEBUG.
+    """Require independent audit/export signing keys on deployments.
 
     Audit-event tamper evidence and FHIR-export signatures are independent
     controls. Falling back to SECRET_KEY is acceptable for local development, but
     production needs key separation so rotating the Django signing key does not
     also rewrite the trust basis for audit and interchange evidence.
     """
-    if getattr(settings, 'DEBUG', False):
+    if settings.DEBUG and not settings.IS_DEPLOYED:
         return []
 
     errors = []
@@ -108,7 +110,7 @@ def throttle_cache_is_shared_check(app_configs, **kwargs):
     the only bound on an unauthenticated caller minting Person rows through the
     survey runner.
     """
-    if getattr(settings, 'DEBUG', False):
+    if settings.DEBUG and not settings.IS_DEPLOYED:
         return []
     backend = settings.CACHES.get('default', {}).get('BACKEND', '')
     if 'locmem' not in backend.lower():
@@ -123,3 +125,47 @@ def throttle_cache_is_shared_check(app_configs, **kwargs):
         ),
         id='patient_portal.W005',
     )]
+
+
+@register(Tags.security, deploy=True)
+def security_posture_check(app_configs, **kwargs):
+    """Report an allowlist of effective controls, never credentials or URLs."""
+    posture = {
+        name: getattr(settings, name)
+        for name in (
+            'DEBUG', 'IS_DEPLOYED', 'CORS_ALLOW_ALL_ORIGINS',
+            'CORS_ALLOW_CREDENTIALS', 'FIREBASE_SKIP_REVOCATION_CHECK',
+            'SESSION_COOKIE_SECURE', 'CSRF_COOKIE_SECURE', 'SECURE_SSL_REDIRECT',
+            'SECURE_HSTS_SECONDS', 'SECURE_HSTS_INCLUDE_SUBDOMAINS',
+            'SECURE_HSTS_PRELOAD', 'SECURE_CONTENT_TYPE_NOSNIFF',
+            'X_FRAME_OPTIONS', 'SECURE_PROXY_SSL_HEADER',
+        )
+    }
+    posture['ALLOWED_HOSTS_CONFIGURED'] = bool(settings.ALLOWED_HOSTS)
+    posture['WILDCARD_HOSTS'] = '*' in settings.ALLOWED_HOSTS
+    posture['CORS_ALLOWED_ORIGINS_CONFIGURED'] = bool(settings.CORS_ALLOWED_ORIGINS)
+    posture['BASIC_AUTH_ENABLED'] = (
+        'rest_framework.authentication.BasicAuthentication'
+        in settings.REST_FRAMEWORK['DEFAULT_AUTHENTICATION_CLASSES']
+    )
+    posture['ALLOWED_REDIRECT_URI_SCHEMES'] = settings.OAUTH2_PROVIDER['ALLOWED_REDIRECT_URI_SCHEMES']
+    for name in ('PHR_AUDIENCE', 'PHR_BASE_URL', 'FIREBASE_PROJECT_ID'):
+        posture[f'{name}_CONFIGURED'] = bool(getattr(settings, name))
+    issues = [Info(
+        'Effective security posture: ' + json.dumps(posture, sort_keys=True),
+        id='patient_portal.I001',
+    )]
+    for enabled, label in (
+        (posture['WILDCARD_HOSTS'], 'Wildcard ALLOWED_HOSTS'),
+        (settings.CORS_ALLOW_ALL_ORIGINS, 'All-origin CORS'),
+        (posture['BASIC_AUTH_ENABLED'], 'HTTP Basic authentication'),
+        (settings.FIREBASE_SKIP_REVOCATION_CHECK, 'Skipped Firebase revocation checks'),
+        ('http' in posture['ALLOWED_REDIRECT_URI_SCHEMES'], 'HTTP OAuth redirects'),
+    ):
+        if enabled:
+            issues.append(Warning(
+                f'{label} is explicitly enabled.',
+                hint='Review this security override before deploying.',
+                id='patient_portal.W006',
+            ))
+    return issues

@@ -22,7 +22,7 @@ def parse_service_tokens(raw):
     return value
 
 
-def service_credentials(config, legacy_token="", legacy_scopes="patient/*.read"):
+def service_credentials(config, legacy_token=None, legacy_scopes="patient/*.read"):
     """Return validated (secret, credential) pairs, including the legacy grant."""
     if not isinstance(config, dict):
         raise ImproperlyConfigured("SERVICE_AUTH_TOKENS must be a JSON object.")
@@ -39,7 +39,7 @@ def service_credentials(config, legacy_token="", legacy_scopes="patient/*.read")
                 or any(c.isspace() for c in secret) or not isinstance(scope, str)):
             raise ImproperlyConfigured("Service tokens must be nonempty ASCII secrets with string scopes.")
         entries.append((secret, ServiceCredential(service_id, scope)))
-    if legacy_token.strip():
+    if legacy_token and legacy_token.strip():
         if "hk-labs-sync" in config:
             raise ImproperlyConfigured("Disable SERVICE_AUTH_TOKEN before configuring hk-labs-sync.")
         entries.append((legacy_token.strip(), ServiceCredential("hk-labs-sync", legacy_scopes)))

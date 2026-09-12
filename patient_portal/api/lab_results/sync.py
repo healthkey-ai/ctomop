@@ -181,7 +181,7 @@ class SyncView(APIView):
         is_on_behalf_of = bool(person_id)
 
         reject_machine_actor_claims(request, actor_iss, actor_sub)
-        actor_identity = request.user if request.user.is_authenticated else None
+        actor_identity = request.user if getattr(request.user, 'is_authenticated', False) else None
         actor_iss = getattr(actor_identity, 'issuer', '') or ''
         actor_sub = getattr(actor_identity, 'sub', '') or ''
 

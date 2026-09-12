@@ -1142,6 +1142,14 @@ class OrgScopedSyncRejectionTest(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
         self.assertIn('Person not in your organization', resp.data['detail'])
 
+    def test_userless_org_token_can_import_without_actor_claims(self):
+        token = self._make_token('userless-service-import', user=None)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.token}')
+        resp = self.client.post('/api/lab-results/sync/', self._sync_payload(7001), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        provenance = ProvenanceRecord.objects.get(object_id=resp.data['measurement_ids'][0])
+        self.assertEqual(provenance.source_user_id, '')
+
     def test_userless_org_token_rejects_body_actor(self):
         spoofed_actor = Identity.objects.create_user(email='spoofed-lab@test.com', password='test')
         token = self._make_token('userless-in-org', user=None)

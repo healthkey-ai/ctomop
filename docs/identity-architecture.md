@@ -624,14 +624,14 @@ The complete interim threat model and rollout are in
 
 ### Request Identity
 
-Services communicate via REST APIs. The caller identifies itself and/or the
-target user using the `(issuer, sub)` tuple:
+Services communicate via REST APIs. Authentication establishes the acting
+identity; unsigned body fields never prove an end-user identity:
 
-| Pattern | Payload Fields | Example |
+| Pattern | Credentials and target | Example |
 |---|---|---|
-| Self-service (user acts on own data) | `actor_iss`, `actor_sub` | Patient uploads own labs |
-| On-behalf-of (actor writes for another) | `actor_iss`, `actor_sub`, `person_id` | Navigator uploads for patient |
-| Service-to-service (no user context) | `Authorization: Bearer <service-token>` | Scheduled sync job |
+| Self-service (user acts on own data) | Verified end-user bearer; target resolved from authenticated identity | Patient uploads own labs |
+| On-behalf-of (actor writes for another) | Verified end-user bearer plus `person_id`; patient write access required | Navigator uploads for patient |
+| Service-to-service (no user context) | Individual service bearer plus explicit `person_id`; omit actor fields | Scheduled sync job |
 
 The receiving service always resolves identity locally. No shared database,
 no token exchange, no identity service dependency.
@@ -647,11 +647,11 @@ no token exchange, no identity service dependency.
 
 ## Open Questions
 
-1. **ServiceTokenAuthentication** ... service-to-service auth uses a pre-shared
-   Bearer token mapped to a superuser. Options:
-   - Keep as-is (service tokens are not user identities)
-   - Create a service Identity with `iss="urn:service:<name>"`, `sub="<role>"`
-   - Use OAuth2 client_credentials flow (existing in promop)
+1. **ServiceTokenAuthentication** ... individual configured Bearer tokens map
+   to `issuer="urn:service"`, `sub="<service-id>"` identities with explicit scopes
+   and no staff privileges. OAuth2 client credentials remain available for
+   organization-scoped clients. Admin-managed token lifecycle is a possible
+   follow-up to the current environment-managed configuration.
 
 2. **Shared library scope** ... What goes in `healthkey-identity` vs stays
    per-service? Candidates: Identity model, IdentityManager, TokenProvider

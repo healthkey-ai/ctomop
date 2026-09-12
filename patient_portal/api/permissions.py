@@ -1,5 +1,6 @@
 import logging
 
+from django.conf import settings
 from django.utils import timezone
 from rest_framework.permissions import BasePermission
 
@@ -62,6 +63,8 @@ def get_request_org(request):
 _SAFE_METHODS = frozenset(('GET', 'HEAD', 'OPTIONS'))
 _READ_SCOPES = frozenset(('patient/*.read', 'user/*.read'))
 _WRITE_SCOPES = frozenset(('patient/*.write', 'user/*.write'))
+_ETL_WRITE_SCOPE = 'system/etl.write'
+_ETL_WRITE_METHODS = frozenset(('POST', 'PUT', 'PATCH'))
 # Vocabulary/concept data is reference (system) data, not patient data, so a
 # service consumer may read it with a system/reference scope in addition to the
 # patient/user read scopes. See healthkey-ai/promop#344.
@@ -77,7 +80,7 @@ class ScopedTokenPermission(BasePermission):
 
     Role model for non-OAuth2 auth paths:
 
-      service-token         → full access (trusted backend service)
+      service-token         → SERVICE_AUTH_SCOPES (read-only by default)
       is_staff              → full access
       other authenticated   → safe methods + PATCH only
                               (read + self-edit; POST/DELETE denied)
@@ -95,12 +98,13 @@ class ScopedTokenPermission(BasePermission):
     will allow any authenticated patient to mutate any other patient's data.
     """
 
+    read_scopes = _READ_SCOPES
+
     def has_permission(self, request, view):
         token = request.auth
 
-        # Service-to-service: trusted backend — full access.
-        if token == SERVICE_TOKEN:
-            return True  # hmac already validated in ServiceTokenAuthentication.authenticate()
+        if is_service_token(request):
+            return self.has_scopes(request.method, settings.SERVICE_AUTH_SCOPES)
 
         # Partner-auth (Firebase, SAML) and session-auth: role-based enforcement.
         if token is None or isinstance(token, TokenClaims):
@@ -117,10 +121,12 @@ class ScopedTokenPermission(BasePermission):
         if not hasattr(token, 'scope') or timezone.now() >= token.expires:
             return False
 
-        token_scopes = frozenset(token.scope.split())
+        return self.has_scopes(request.method, token.scope)
 
-        if request.method in _SAFE_METHODS:
-            return bool(token_scopes & _READ_SCOPES)
+    def has_scopes(self, method, scope):
+        token_scopes = frozenset(scope.split())
+        if method in _SAFE_METHODS:
+            return bool(token_scopes & self.read_scopes)
         return bool(token_scopes & _WRITE_SCOPES)
 
 
@@ -128,24 +134,37 @@ class VocabReadPermission(ScopedTokenPermission):
     """Read permission for the vocabulary release + snapshot endpoints.
 
     Vocabulary/concept data is reference (system) data, not patient data, so an
-    OAuth2 consumer may read it with a ``system/*.read`` scope in addition to the
-    patient/user read scopes the base class accepts (#344). All views using this
-    class are GET-only; service-token, staff, and partner/session auth are handled
-    by the base class exactly as before — only the OAuth2 safe-method read-scope
-    set is broadened here.
+    OAuth2 or service consumer may read it with a ``system/*.read`` scope in
+    addition to the patient/user read scopes the base class accepts (#344).
+    All views using this
+    class are GET-only; staff and partner/session auth are handled by the base
+    class. Only the safe-method read-scope set is broadened here.
     """
 
+    read_scopes = _VOCAB_READ_SCOPES
+
+
+def _has_legacy_etl_write_grant(request) -> bool:
+    """Accept the ETL capability only for the three non-delete write verbs.
+
+    SMART ``patient/*.write`` is resource-wide and also authorizes destructive
+    endpoints. The ETL capability is accepted only where an ETL-specific
+    permission class has deliberately been installed.
+    """
+    return (
+        is_service_token(request)
+        and request.method.upper() in _ETL_WRITE_METHODS
+        and _ETL_WRITE_SCOPE in settings.SERVICE_AUTH_SCOPES.split()
+    )
+
+
+class EtlWritePermission(ScopedTokenPermission):
+    """Allow the legacy ETL capability on an explicitly approved endpoint."""
+
     def has_permission(self, request, view):
-        token = request.auth
-        # OAuth2 bearer token on a safe method: accept the broadened read-scope
-        # set. Everything else (service token, staff, partner/session, expired
-        # tokens, non-safe methods) falls through to the base class unchanged.
-        if (token is not None and not isinstance(token, TokenClaims)
-                and hasattr(token, 'scope')
-                and request.method in _SAFE_METHODS
-                and timezone.now() < token.expires):
-            return bool(frozenset(token.scope.split()) & _VOCAB_READ_SCOPES)
-        return super().has_permission(request, view)
+        return _has_legacy_etl_write_grant(request) or super().has_permission(
+            request, view
+        )
 
 
 class LabSyncPermission(ScopedTokenPermission):
@@ -198,6 +217,15 @@ class PatientCrudPermission(ScopedTokenPermission):
                 return True
             return request.method in _PATIENT_CRUD_METHODS
         return super().has_permission(request, view)
+
+
+class EtlPatientCrudPermission(PatientCrudPermission):
+    """Patient CRUD rules plus the narrowly placed legacy ETL capability."""
+
+    def has_permission(self, request, view):
+        return _has_legacy_etl_write_grant(request) or super().has_permission(
+            request, view
+        )
 
 
 class IsStaffPermission(BasePermission):
@@ -295,11 +323,13 @@ class PatientDeletePermission(ScopedTokenPermission):
     """ScopedTokenPermission that also allows DELETE for patient account deletion.
 
     Used on the ``me`` action where patients need to delete their own account.
-    All other methods defer to the standard ScopedTokenPermission rules.
+    The exception applies to session/partner auth; service and OAuth2 tokens
+    must still carry a write scope. Other methods defer to the base rules.
     """
 
     def has_permission(self, request, view):
-        if request.method == 'DELETE':
+        if request.method == 'DELETE' and (
+                request.auth is None or isinstance(request.auth, TokenClaims)):
             return bool(request.user and request.user.is_authenticated)
         return super().has_permission(request, view)
 

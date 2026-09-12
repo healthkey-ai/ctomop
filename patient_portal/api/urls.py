@@ -12,6 +12,7 @@ from .views import (
     PatientDocumentViewSet,
     # Clinical trial enrollment tracker (metadata from EXACT)
     PatientTrialEnrollmentViewSet,
+    TrialSearchPreferencesViewSet,
     # Patient surveys
     # Controlled vocabulary + OMOP concept lookup
     vocabulary_list, concept_lookup,
@@ -52,6 +53,7 @@ router.register(r'documents', PatientDocumentViewSet, basename='documents')
 
 # Clinical trial enrollment status tracker (trial metadata from EXACT)
 router.register(r'trial-enrollments', PatientTrialEnrollmentViewSet, basename='trial-enrollments')
+router.register(r'trial-search-preferences', TrialSearchPreferencesViewSet, basename='trial-search-preferences')
 router.register(r'surveys', SurveyViewSet, basename='surveys')
 router.register(r'survey-responses', PatientSurveyResponseViewSet, basename='survey-responses')
 

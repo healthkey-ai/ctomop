@@ -597,6 +597,29 @@ Patient requests deletion (via host app UI or admin action)
 
 ## Cross-Service Communication
 
+### Shared Service Token Scopes
+
+`SERVICE_AUTH_TOKEN` authenticates the legacy shared bearer credential.
+`SERVICE_AUTH_SCOPES` is a space-separated SMART scope grant enforced by
+`ScopedTokenPermission` and its subclasses. It defaults to read-only
+(`patient/*.read`); an empty grant denies all requests guarded by these
+permissions. Write scopes do not imply read scopes, and `system/*.read` permits
+vocabulary reads only.
+
+The legacy staging ETL additionally uses `system/etl.write`. This is not a broad
+SMART patient-write scope: only ETL-specific permission classes on the approved
+person, clinical import, and code-mapping endpoints accept it, and only for
+POST, PUT, or PATCH. Destructive actions retain the ordinary permission and
+reject it, including bulk-delete actions transported over POST.
+
+This grant applies to every holder of the shared token. It does not restrict
+row-level access or solve caller-asserted identity attribution (#147). Use
+separate OAuth2 service clients for independently scoped and revocable grants.
+The complete interim threat model and rollout are in
+[`bearer_token_security.md`](../bearer_token_security.md).
+
+### Request Identity
+
 Services communicate via REST APIs. The caller identifies itself and/or the
 target user using the `(issuer, sub)` tuple:
 

@@ -1,6 +1,15 @@
 # Multi-Strategy Suggest for Code Mappings — Implementation Plan
 
-**Status:** Implementation complete, awaiting test suite verification + PR
+> **Superseded.** This plan's three-tier waterfall (UMLS → vectors → lexical,
+> each with its own re-ranker call) shipped and was then measured: it cost up to
+> three model calls per code and scanned 1.5M stored vectors per code, 17.8s per
+> code end to end. #1081 replaced it with UMLS → lexical top-N → vector *rerank*
+> → one ranking call, at 3.5s per code, and made the run asynchronous. **The
+> current design is documented in CLAUDE.md under "Code Mapping Suggest".** This
+> file is kept for the UMLS root-source mapping and the embedding-build history,
+> which are still accurate.
+
+**Status:** Superseded by #1081
 **Branch:** `feat/multi-strategy-suggest`
 **Tracking issue:** (not yet filed)
 

@@ -1,9 +1,10 @@
 /**
  * Framework-agnostic mount for PatientInfo (see bridgeClient.ts).
  *
- *     const provider = await loadRemote("labs_results_remote/PatientInfoBridge");
- *     await provider().render({ dom, baseUrl, getToken, ... });
- *     provider().destroy({ moduleName, dom });
+ *     const { default: createProvider } = await loadRemote("labs_results_remote/PatientInfoBridge");
+ *     const provider = createProvider();
+ *     await provider.render({ moduleName, dom, baseUrl, getToken, ... });
+ *     provider.destroy({ moduleName, dom });
  *
  * `./PatientInfo` is unchanged, so React hosts such as ht-phr are unaffected.
  */

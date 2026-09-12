@@ -20,6 +20,7 @@ import UploadCSV from "@/components/Patient/UploadCSV";
 import OrgAdminPage from "@/components/OrgAdmin/OrgAdminPage";
 import FieldMappingPage from "@/components/FieldMappings/FieldMappingPage";
 import CodeMappingPage from "@/components/CodeMappings/CodeMappingPage";
+import SuggestRunLogPage from "@/components/CodeMappings/SuggestRunLogPage";
 import CodeMappingAccuracyPage from "@/components/CodeMappings/CodeMappingAccuracyPage";
 import MappingHubPage from "@/components/MappingHub/MappingHubPage";
 import TherapyMappingPage from "@/components/TherapyMappings/TherapyMappingPage";
@@ -156,6 +157,7 @@ function AppRoutes() {
       <Route path="/mappings" element={mappingAdminRoute(<MappingHubPage />)} />
       <Route path="/field-mappings" element={mappingAdminRoute(<FieldMappingPage />)} />
       <Route path="/code-mappings" element={mappingAdminRoute(<CodeMappingPage />)} />
+      <Route path="/code-mappings/suggest-runs/:runId" element={mappingAdminRoute(<SuggestRunLogPage />)} />
       <Route path="/code-mappings/accuracy" element={mappingAdminRoute(<CodeMappingAccuracyPage />)} />
       <Route path="/therapy-mappings" element={mappingAdminRoute(<TherapyMappingPage />)} />
       <Route

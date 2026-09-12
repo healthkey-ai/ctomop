@@ -406,3 +406,20 @@ Labs with no matching LOINC Concept still land in the `measurement` table (with
 `measurement_concept_id = 0`) and can be retrieved by
 `measurement_source_value`. PatientRecord fields for unmatched labs will be null
 until a matching Concept is loaded.
+
+
+### Code mapping list pagination
+
+The curation screen requests `GET /api/v1/code-mappings/?browse=1` and displays
+100 codes per page in each section (Unmapped, Mapped, and Athena Mapped).
+`page_0`, `page_1`, and `page_2` select each section's page. Sorting and filtering
+happen in the database before pages are loaded.
+
+The plain-list endpoint without `browse=1` preserves its JSON array response,
+but returns at most 100 codes. Use `?page=2` or follow the response's `Link`
+header (`rel="next"` / `rel="prev"`) to traverse results. `X-Total-Count`,
+`X-Page`, and `X-Page-Size` report the filtered count and page metadata.
+Source, search, and status filters apply before pagination. The page size is
+fixed; `page_size` cannot request an unbounded response.
+The four pagination headers are exposed to configured CORS origins so browser
+clients can read navigation and totals across origins.

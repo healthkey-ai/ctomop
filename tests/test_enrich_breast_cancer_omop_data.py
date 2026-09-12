@@ -242,7 +242,7 @@ class TestRefreshesPatientRecord:
         record = PatientRecord.objects.get(person=person)
         assert record.no_tobacco_use_status is not None or record.tobacco_use_details is not None
 
-    def test_missing_therapy_backfill_creates_regimen_concept_and_patient_record_id(self):
+    def test_missing_therapy_backfill_creates_regimen_without_inventing_episode(self):
         person = PersonFactory()
         PatientRecordFactory(person=person, stage='IV')
 
@@ -250,9 +250,10 @@ class TestRefreshesPatientRecord:
 
         record = PatientRecord.objects.get(person=person)
         exposure = DrugExposure.objects.get(person=person)
-        assert record.first_line_therapy_id is not None
-        assert exposure.drug_concept_id == record.first_line_therapy_id
-        assert record.first_line_therapy
+        # Enrichment creates a raw exposure, not a persisted treatment episode.
+        assert exposure.drug_concept_id is not None
+        assert record.first_line_therapy_id is None
+        assert record.first_line_therapy is None
 
         # Issue #450: when the genuine HemOnc concept is not loaded, the
         # regimen must be quarantine-minted under HK-Regimen — never under

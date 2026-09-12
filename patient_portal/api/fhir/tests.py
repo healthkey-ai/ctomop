@@ -3,7 +3,7 @@ from copy import deepcopy
 from decimal import Decimal
 
 from django.db import connection
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -73,6 +73,7 @@ SAMPLE_BUNDLE = {
 }
 
 
+@override_settings(SERVICE_AUTH_SCOPES='patient/*.write')
 class FhirSyncTests(TestCase):
     def setUp(self):
         _ensure_pk_sequences()

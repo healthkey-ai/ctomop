@@ -101,7 +101,7 @@ simply never loaded:
   pairs in bulk, so an ETL pipeline does not need one round-trip per code.
 - **Auto-suggest mappings** — unmapped fields get suggested mappings based on name
   similarity, concept domain, and vocabulary context (#682, #856).
-- **Field mapping transfer** — `copy_field_mappings` management command copies
+- **Field mapping transfer** — `copy_curation` management command copies
   curated mappings between PRomop instances. Matching is by natural key, concept
   FKs are re-resolved by `(vocabulary_id, concept_code)`, and reviewer attribution
   is cleared (#981).

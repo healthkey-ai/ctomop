@@ -5,7 +5,7 @@ from datetime import date
 from decimal import Decimal
 
 from patient_portal.models import Identity, PatientUser
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from rest_framework import status
 from rest_framework.test import APIClient
 
@@ -716,6 +716,7 @@ class LabResultsMutationAuthorizationTest(TestCase):
         self.assertEqual(self.measurement.value_as_number, Decimal('11.0'))
 
 
+@override_settings(SERVICE_AUTH_SCOPES='patient/*.write')
 class SyncOnBehalfOfTest(TestCase):
     """Tests for actor_iss/actor_sub on-behalf-of sync flow.
 
@@ -1339,6 +1340,7 @@ class FirebaseAuthedSyncTest(TestCase):
         self.assertEqual(m.person_id, person2.person_id)
 
 
+@override_settings(SERVICE_AUTH_SCOPES='patient/*.write')
 class ServiceTokenSyncFallbackTest(TestCase):
     """Tests that service-token auth still uses actor_iss/actor_sub from payload."""
 
@@ -1359,7 +1361,7 @@ class ServiceTokenSyncFallbackTest(TestCase):
 
         self.client = APIClient()
         # Production path: hk-labs calls this with a service token (request.auth
-        # == "service-token"), which ScopedTokenPermission grants full access.
+        # == "service-token") with an explicitly configured write scope.
         self.client.force_authenticate(user=self.service_user, token="service-token")
 
     def test_service_token_resolves_person_from_actor_fields(self):

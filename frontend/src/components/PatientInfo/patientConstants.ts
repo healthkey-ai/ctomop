@@ -16,7 +16,7 @@ export const RACE_OPTIONS = [
   'Unknown',
 ];
 export const ETHNICITY_OPTIONS = ['Hispanic or Latino', 'Not Hispanic or Latino', 'Unknown'];
-export const DISEASE_OPTIONS = ['Breast Cancer', 'Follicular Lymphoma', 'Multiple Myeloma', 'Chronic Lymphocytic Leukemia (CLL)', 'Lung Cancer', 'Colon Cancer', 'Other'];
+export const DISEASE_OPTIONS = ['Breast Cancer', 'Follicular Lymphoma', 'Multiple Myeloma', 'Chronic Lymphocytic Leukemia (CLL)', 'Mantle Cell Lymphoma', 'Lung Cancer', 'Colon Cancer', 'Other'];
 export const STAGE_OPTIONS = ['0', 'I', 'IA', 'IB', 'II', 'IIA', 'IIB', 'III', 'IIIA', 'IIIB', 'IIIC', 'IV', 'Unknown'];
 export const HISTOLOGIC_TYPE_OPTIONS = [
   'Unknown',
@@ -394,3 +394,9 @@ export const PLANNED_THERAPIES = [
   'Autologous Stem Cell Transplant', 'Allogeneic Stem Cell Transplant',
   'Radiation Therapy', 'Surgery', 'Clinical Trial', 'Watch and Wait', 'Other',
 ];
+
+// --- Mantle Cell Lymphoma (MCL) ---
+export const MCL_DISEASE_BEHAVIOR_OPTIONS = ['Indolent', 'Aggressive'];
+export const MCL_DISEASE_SUBTYPE_OPTIONS = ['Classic', 'Blastoid', 'Pleomorphic', 'Small cell'];
+export const MCL_MORPHOLOGIC_VARIANT_OPTIONS = ['Classic', 'Blastoid', 'Pleomorphic'];
+export const MCL_STAGE_OPTIONS = ['I', 'II', 'III', 'IV', 'Unknown'];

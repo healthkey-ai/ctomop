@@ -19,6 +19,7 @@ from pathlib import Path
 from django.contrib import admin
 from django.urls import path, include, re_path
 from django.views.generic import TemplateView
+from django.views.decorators.cache import never_cache
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 from rest_framework.permissions import AllowAny
 from patient_portal.api import views
@@ -68,7 +69,7 @@ urlpatterns = [
     # SMART on FHIR discovery
     path('.well-known/smart-configuration', views.smart_configuration, name='smart_configuration'),
     # Serve React app for all other routes
-    re_path(r'^.*$', TemplateView.as_view(template_name='index.html'), name='home'),
+    re_path(r'^.*$', never_cache(TemplateView.as_view(template_name='index.html')), name='home'),
 ]
 
 def runner_urlpatterns(dist):

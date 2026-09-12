@@ -1,5 +1,7 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
+from .concept_mint import mint_destination
+from .supportive_therapies import SupportiveTherapyViewSet, therapy_outcomes
 
 from .views import (
     SurveyViewSet, PatientSurveyResponseViewSet,
@@ -9,15 +11,16 @@ from .views import (
     change_password,
     PersonViewSet,
     derivation_status,
-    ConditionOccurrenceViewSet, DrugExposureViewSet, MeasurementViewSet,
-    ObservationViewSet, ProcedureOccurrenceViewSet, EpisodeViewSet, EpisodeEventViewSet,
+    V1ConditionOccurrenceViewSet, V1DrugExposureViewSet, V1MeasurementViewSet,
+    V1ObservationViewSet, V1ProcedureOccurrenceViewSet, EpisodeViewSet, EpisodeEventViewSet,
     TherapyLineViewSet,
     PatientDocumentViewSet,
     PatientTrialEnrollmentViewSet,
+    TrialSearchPreferencesViewSet,
     ImmunizationListViewSet, AllergyListViewSet,
     PatientConsentViewSet,
     PatientMessageViewSet,
-    vocabulary_list, concept_lookup, concept_search, concept_list,
+    vocabulary_list, concept_lookup, concept_search, concept_candidates, concept_list,
     therapy_regimen_list, therapy_regimen_detail,
     therapy_component_list, therapy_class_list,
     mapping_stats,
@@ -33,6 +36,10 @@ from .views import (
     code_mapping_list, code_mapping_detail, code_mapping_vocabularies,
     code_mapping_reference,
     code_mapping_suggest,
+    code_mapping_suggest_one,
+    code_mapping_suggest_run,
+    code_mapping_latest_suggest_run,
+    code_mapping_check_umls,
     code_mapping_lookup,
     code_mapping_accuracy,
     code_mapping_accuracy_dashboard,
@@ -63,18 +70,20 @@ router = DefaultRouter()
 router.register(r'user', CurrentUserViewSet, basename='v1-user')
 router.register(r'patient-records', PatientRecordV1ViewSet, basename='v1-patient-records')
 router.register(r'persons', PersonViewSet, basename='v1-persons')
-router.register(r'conditions', ConditionOccurrenceViewSet, basename='v1-conditions')
-router.register(r'drug-exposures', DrugExposureViewSet, basename='v1-drug-exposures')
-router.register(r'measurements', MeasurementViewSet, basename='v1-measurements')
-router.register(r'observations', ObservationViewSet, basename='v1-observations')
-router.register(r'procedures', ProcedureOccurrenceViewSet, basename='v1-procedures')
+router.register(r'conditions', V1ConditionOccurrenceViewSet, basename='v1-conditions')
+router.register(r'drug-exposures', V1DrugExposureViewSet, basename='v1-drug-exposures')
+router.register(r'measurements', V1MeasurementViewSet, basename='v1-measurements')
+router.register(r'observations', V1ObservationViewSet, basename='v1-observations')
+router.register(r'procedures', V1ProcedureOccurrenceViewSet, basename='v1-procedures')
 router.register(r'episodes', EpisodeViewSet, basename='v1-episodes')
 router.register(r'episode-events', EpisodeEventViewSet, basename='v1-episode-events')
 # Authoring a line of therapy, which is an Episode grouping drug exposures rather
 # than any single row. See TherapyLineViewSet.
+router.register(r'supportive-therapies', SupportiveTherapyViewSet, basename='v1-supportive-therapies')
 router.register(r'therapy-lines', TherapyLineViewSet, basename='v1-therapy-lines')
 router.register(r'documents', PatientDocumentViewSet, basename='v1-documents')
 router.register(r'trial-enrollments', PatientTrialEnrollmentViewSet, basename='v1-trial-enrollments')
+router.register(r'trial-search-preferences', TrialSearchPreferencesViewSet, basename='v1-trial-search-preferences')
 router.register(r'consents', PatientConsentViewSet, basename='v1-consents')
 router.register(r'messages', PatientMessageViewSet, basename='v1-messages')
 router.register(r'immunizations', ImmunizationListViewSet, basename='v1-immunizations')
@@ -86,6 +95,7 @@ router.register(r'surveys', SurveyViewSet, basename='v1-surveys')
 router.register(r'survey-responses', PatientSurveyResponseViewSet, basename='v1-survey-responses')
 
 urlpatterns = [
+    path('therapy-outcomes/', therapy_outcomes, name='v1-therapy-outcomes'),
     # The surveys the PROlog runner serves, for the portal's Surveys tab.
     path('prolog-surveys/', PrologSurveyListView.as_view(), name='v1-prolog-surveys'),
     path('', include(router.urls)),
@@ -110,6 +120,7 @@ urlpatterns = [
     path('vocabularies/<str:model_name>/', vocabulary_list, name='v1-vocabulary-list'),
     path('concepts/lookup/', concept_lookup, name='v1-concept-lookup'),
     path('concepts/search/', concept_search, name='v1-concept-search'),
+    path('concepts/candidates/', concept_candidates, name='v1-concept-candidates'),
     path('concepts/synonyms/', concept_synonym_search, name='v1-concept-synonym-search'),
     path('concepts/graph/', concept_graph_batch, name='v1-concept-graph-batch'),
     path('concepts/<int:concept_id>/ancestors/', concept_ancestors, name='v1-concept-ancestors'),
@@ -137,8 +148,13 @@ urlpatterns = [
     path('orgs/<slug:slug>/patient-signup/', OrgPatientSignupView.as_view(), name='v1-org-patient-signup'),
     path('field-mappings/', field_mapping_list, name='v1-field-mapping-list'),
     path('code-mappings/', code_mapping_list, name='v1-code-mapping-list'),
+    path('code-mappings/mint-destination/', mint_destination, name='v1-mint-destination'),
     path('code-mappings/reference/', code_mapping_reference, name='v1-code-mapping-reference'),
     path('code-mappings/suggest/', code_mapping_suggest, name='v1-code-mapping-suggest'),
+    path('code-mappings/suggest-one/', code_mapping_suggest_one, name='v1-code-mapping-suggest-one'),
+    path('code-mappings/suggest-runs/latest/', code_mapping_latest_suggest_run, name='v1-code-mapping-latest-suggest-run'),
+    path('code-mappings/suggest-runs/<uuid:run_id>/', code_mapping_suggest_run, name='v1-code-mapping-suggest-run'),
+    path('code-mappings/check-umls/', code_mapping_check_umls, name='v1-code-mapping-check-umls'),
     path('code-mappings/lookup/', code_mapping_lookup, name='v1-code-mapping-lookup'),
     path('code-mappings/accuracy/', code_mapping_accuracy, name='v1-code-mapping-accuracy'),
     path('code-mappings/accuracy/dashboard/', code_mapping_accuracy_dashboard, name='v1-code-mapping-accuracy-dashboard'),

@@ -53,7 +53,7 @@ describe('step 5 fields round trip (live server)', () => {
     expect(after.facility_name).toBe(next);
 
     render(<GeneralTab formData={after} onChange={vi.fn()} editedName="T"
-      onNameChange={vi.fn()} onZipcodeChange={vi.fn()} diseaseType="breast" />);
+      onNameChange={vi.fn()} onZipcodeChange={vi.fn()} />);
     await waitFor(() =>
       expect(screen.getByDisplayValue(next)).toBeInTheDocument(),
     );

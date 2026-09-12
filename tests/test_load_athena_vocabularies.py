@@ -34,6 +34,14 @@ def test_omop_extension_pdl1_measurement_is_in_vocabulary_load_scope():
     )
 
 
+def test_ciel_spleen_size_measurement_is_in_vocabulary_load_scope():
+    """#1000: Athena CIEL 45917997 must be available to field curators."""
+    assert 'CIEL' in VOCAB_SCOPE
+    assert _concept_in_scope(
+        'CIEL', '45917997', 'Measurement', 'Measurement',
+    )
+
+
 def test_umls_options_default_to_automatic_opt_in():
     parser = Command().create_parser('manage.py', 'load_athena_vocabularies')
 
@@ -121,19 +129,17 @@ def test_cache_umls_release_downloads_valid_rrf_archive_and_reuses_it(tmp_path):
     assert len(session.calls) == 1
 
 
-def test_archive_source_extracts_vocabulary_zip(tmp_path):
-    from omop_core.management.commands.load_athena_vocabularies import _extract_vocabulary_archive
+def test_archive_source_streams_nested_vocabulary_zip(tmp_path):
+    from omop_core.management.commands.load_athena_vocabularies import _VocabularyArchive
 
     archive = tmp_path / 'athena.zip'
     with zipfile.ZipFile(archive, 'w') as zf:
         zf.writestr('vocabulary_download/CONCEPT.csv', 'concept_id\tconcept_name\n')
 
-    base = _extract_vocabulary_archive(
-        archive, tmp_path / 'extracted', lambda msg: None
-    )
-
-    assert (tmp_path / 'extracted' / 'vocabulary_download' / 'CONCEPT.csv').exists()
-    assert base == str(tmp_path / 'extracted' / 'vocabulary_download')
+    source = _VocabularyArchive(archive, lambda msg: None)
+    with source.open('CONCEPT.csv') as stream:
+        assert stream.read() == 'concept_id\tconcept_name\n'
+    assert list(tmp_path.iterdir()) == [archive]
 
 
 def test_loader_requires_exactly_one_source():

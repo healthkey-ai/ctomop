@@ -28,24 +28,36 @@ const DESCRIPTORS = {
   // The canonical calcium column, declared writable so the alias regression
   // test below asserts a typeable box rather than a disabled one.
   serum_calcium_mg_dl: {
-    kind: 'editable', writable: true, target: 'measurement',
-    concept_id: 9, code: '17861-6', value_kind: 'number', unit: 'mg/dL',
-    type_concept_id: 32856, source_value: '17861-6',
+    kind: 'direct', writable: true, target: 'patient_record',
+    value_kind: 'number', unit: 'mg/dL',
+    projection: {
+      omop_table: 'measurement', concept_id: 9, code: '17861-6',
+      type_concept_id: 32856, source_value: '17861-6',
+    },
   },
   hemoglobin_g_dl: {
-    kind: 'editable', writable: true, target: 'measurement',
-    concept_id: 1, code: '718-7', value_kind: 'number', unit: 'g/dL',
-    type_concept_id: 32856, source_value: '718-7',
+    kind: 'direct', writable: true, target: 'patient_record',
+    value_kind: 'number', unit: 'g/dL',
+    projection: {
+      omop_table: 'measurement', concept_id: 1, code: '718-7',
+      type_concept_id: 32856, source_value: '718-7',
+    },
   },
   ast_u_l: {
-    kind: 'editable', writable: true, target: 'measurement',
-    concept_id: 2, code: '1742-6', value_kind: 'number',
-    type_concept_id: 32856, source_value: '1742-6',
+    kind: 'direct', writable: true, target: 'patient_record',
+    value_kind: 'number',
+    projection: {
+      omop_table: 'measurement', concept_id: 2, code: '1742-6',
+      type_concept_id: 32856, source_value: '1742-6',
+    },
   },
   egfr_ml_min_173m2: {
-    kind: 'editable', writable: true, target: 'measurement',
-    concept_id: 3, code: '62238-1', value_kind: 'number',
-    type_concept_id: 32856, source_value: '62238-1',
+    kind: 'direct', writable: true, target: 'patient_record',
+    value_kind: 'number',
+    projection: {
+      omop_table: 'measurement', concept_id: 3, code: '62238-1',
+      type_concept_id: 32856, source_value: '62238-1',
+    },
   },
   bone_imaging_result: {
     kind: null, writable: false,

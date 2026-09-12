@@ -612,9 +612,13 @@ person, clinical import, and code-mapping endpoints accept it, and only for
 POST, PUT, or PATCH. Destructive actions retain the ordinary permission and
 reject it, including bulk-delete actions transported over POST.
 
-This grant applies to every holder of the shared token. It does not restrict
-row-level access or solve caller-asserted identity attribution (#147). Use
-separate OAuth2 service clients for independently scoped and revocable grants.
+This legacy grant applies to every holder of the shared token. Named grants in
+`SERVICE_AUTH_TOKENS` provide distinct identities and scopes for each service.
+Service credentials cannot assert a user through `actor_iss`/`actor_sub`; user
+attribution requires end-user authentication. See
+[the service credential migration guide](service-token-migration.md) for token
+generation, caller changes, and rollout ordering. Use organization-linked OAuth2
+service clients when row-level organization isolation is required.
 The complete interim threat model and rollout are in
 [`bearer_token_security.md`](../bearer_token_security.md).
 

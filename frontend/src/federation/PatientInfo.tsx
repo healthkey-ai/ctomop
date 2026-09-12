@@ -76,7 +76,7 @@ function PatientInfoSkeleton() {
   );
 }
 
-function PatientInfoInner({ readOnly, onPatientUpdated }: Pick<PatientInfoProps, "readOnly" | "onPatientUpdated">) {
+function PatientInfoInner({ readOnly, onPatientUpdated, showHeading = true }: Pick<PatientInfoProps, "readOnly" | "onPatientUpdated" | "showHeading">) {
   const { data, isLoading, isError, error } = usePatientInfoMe();
   const patchMutation = usePatchPatientInfo();
 
@@ -249,8 +249,18 @@ function PatientInfoInner({ readOnly, onPatientUpdated }: Pick<PatientInfoProps,
           const zipData = await res.json();
           if (zipData.places?.length > 0) {
             const place = zipData.places[0];
+            // `state` is the full name ("Massachusetts"); `region` maps to OMOP
+            // Location.state, which the CDM caps at two characters, so writing
+            // the full name fails the save with a 400. Take the abbreviation the
+            // lookup already returns, and leave the field alone if it is absent
+            // rather than storing a value the API will refuse.
+            const abbreviation = place["state abbreviation"];
             setEditedInfo((prev) => {
-              const updated = { ...prev, city: place["place name"], region: place["state"] };
+              const updated = {
+                ...prev,
+                city: place["place name"],
+                ...(abbreviation ? { region: abbreviation } : {}),
+              };
               pendingDataRef.current = updated;
               return updated;
             });
@@ -308,7 +318,7 @@ function PatientInfoInner({ readOnly, onPatientUpdated }: Pick<PatientInfoProps,
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-lg font-medium text-foreground/70">Health Profile</h1>
+        {showHeading && <h1 className="text-lg font-medium text-foreground/70">Health Profile</h1>}
         <SaveStatusIndicator status={saveStatus} onRetry={doSave} />
       </div>
 
@@ -387,6 +397,7 @@ export function PatientInfo({
   theme,
   readOnly,
   onPatientUpdated,
+  showHeading,
 }: PatientInfoProps) {
   return (
     <PatientInfoProvider
@@ -396,7 +407,7 @@ export function PatientInfo({
       theme={theme}
       className={className}
     >
-      <PatientInfoInner readOnly={readOnly} onPatientUpdated={onPatientUpdated} />
+      <PatientInfoInner readOnly={readOnly} onPatientUpdated={onPatientUpdated} showHeading={showHeading} />
     </PatientInfoProvider>
   );
 }

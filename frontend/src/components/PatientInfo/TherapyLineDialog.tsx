@@ -314,7 +314,7 @@ export default function TherapyLineDialog({
       aria-modal="true"
       aria-label={editing ? 'Edit a line of therapy' : 'Record a line of therapy'}
     >
-      <div className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-lg border border-border bg-background p-5 shadow-xl">
+      <div className="max-h-[90vh] w-full max-w-[32rem] overflow-y-auto rounded-lg border border-border bg-background p-5 shadow-xl">
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-base font-semibold">
             {editing ? 'Edit line of therapy' : 'Record a line of therapy'}

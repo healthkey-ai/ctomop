@@ -76,7 +76,6 @@ def seed(apps, schema_editor):
 
 class Migration(migrations.Migration):
     dependencies = [
-        ('omop_core', '0224_field_mapping_provenance'),
-        ('omop_core', '0227_seed_genomics_v2_components'),
+        ('omop_core', '0228_merge_20260912_1019'),
     ]
     operations = [migrations.RunPython(seed, migrations.RunPython.noop)]

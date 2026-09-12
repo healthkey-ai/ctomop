@@ -39,7 +39,9 @@ are not substituted into Observation's standard concept column.
 
 For example, selecting `t(4;14)` and `t(11;14)` produces two Observation rows with
 concept 4049480, distinct source keys, and the corresponding marker strings.
-Repeated saves reuse today's rows. Deselecting a marker records a dated clear;
+Repeated saves reuse today's rows. If a same-day aggregate import superseded
+those rows, corrections create newer rows so the import cannot undo the edit.
+Deselecting a marker records a dated clear;
 earlier results remain as history. Full OMOP refreshes read these rows and legacy
 `mm-cytogenetic-markers` aggregate imports, including clears, without resurrecting
 removed selections. Newer individual imported marker observations update the
@@ -48,4 +50,9 @@ matching PatientRecord values.
 Projection is atomic across the selection. If a selected concept is unavailable
 or a row fails, the PatientRecord edit remains pending and protected from stale
 OMOP refreshes. Unrecognized new values are rejected; existing unrecognized
-legacy text is preserved without claiming it has an approved concept mapping.
+legacy text is preserved without claiming it has an individual concept mapping.
+When edits retain or remove unlisted legacy values, a dated Chromosomal
+morphology aggregate replaces the legacy set, followed by a separate coded row
+for each selected supported marker. This lets legacy text be retained or cleared
+without blocking supported selections. The aggregate and individual rows are
+written in one transaction.

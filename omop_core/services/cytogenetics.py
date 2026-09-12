@@ -12,6 +12,7 @@ from django.utils import timezone
 FIELD = 'cytogenic_markers'  # Retain the existing database/API spelling.
 SOURCE_PREFIX = 'cytogenetic:'
 LEGACY_SOURCE = 'mm-cytogenetic-markers'
+LEGACY_CONCEPT_CODE = '107675007'  # Chromosomal morphology, for imported free text.
 VALUES = (
     'del(17p13)', 't(4;14)', 't(11;14)', 't(14;16)', '1q21 gain',
     '1q21 amplification', 'hyperdiploidy', 'del(13q)', 'MYC rearrangement',
@@ -53,8 +54,8 @@ def descriptor():
     preferred = [(choice, next((c for c in choice.codes.all() if c.is_primary), None))
                  for choice in choices]
     concepts = {(c.vocabulary_id, c.concept_code): c for c in Concept.objects.filter(
-        vocabulary_id__in={c.vocabulary_id for _, c in preferred if c},
-        concept_code__in={c.code for _, c in preferred if c},
+        vocabulary_id__in={'SNOMED'} | {c.vocabulary_id for _, c in preferred if c},
+        concept_code__in={LEGACY_CONCEPT_CODE} | {c.code for _, c in preferred if c},
         standard_concept='S', domain_id='Observation', invalid_reason__isnull=True,
         valid_start_date__lte=timezone.localdate(), valid_end_date__gte=timezone.localdate(),
     )}
@@ -74,7 +75,17 @@ def descriptor():
             }
     entry['options'] = options
     if FieldConceptMapping.objects.filter(field_name=FIELD, status='approved', multiple=True).exists():
-        entry['projection'] = {'omop_table': 'observation', 'choice_projections': recipes}
+        entry['projection'] = {
+            'omop_table': 'observation', 'choice_projections': recipes,
+            'choice_values': [choice.display for choice in choices],
+        }
+        legacy_concept = concepts.get(('SNOMED', LEGACY_CONCEPT_CODE))
+        if legacy_concept:
+            entry['projection']['legacy_projection'] = {
+                'omop_table': 'observation', 'concept_id': legacy_concept.pk,
+                'source_value': LEGACY_SOURCE, 'type_concept_id': 32817,
+                'value_kind': 'string',
+            }
     return entry
 
 
@@ -105,7 +116,10 @@ def project_selections(person, value, projection):
 
     selected = selections(value)
     recipes = projection['choice_projections']
-    if any(marker not in recipes for marker in selected):
+    # An unavailable mapping for a curated selection must still fail atomically.
+    # Unlisted historical text is preserved by the aggregate recipe instead.
+    choice_values = set(projection.get('choice_values', recipes))
+    if any(marker in choice_values and marker not in recipes for marker in selected):
         return False
     with transaction.atomic():
         Person.objects.select_for_update().get(pk=person.pk)
@@ -114,12 +128,31 @@ def project_selections(person, value, projection):
             | Q(observation_source_value=LEGACY_SOURCE)))
         previous = values_from_rows(rows)
         removed = set(previous) - set(selected)
-        if any(marker not in recipes for marker in removed):
-            return False
+        today = timezone.localdate()
+        after_pk = max((row.pk for row in rows if row.observation_date == today
+                        and row.observation_source_value == LEGACY_SOURCE), default=None)
+        legacy_selected = [marker for marker in selected if marker not in recipes]
+        if legacy_selected or any(marker not in recipes for marker in removed):
+            legacy_recipe = projection.get('legacy_projection')
+            if not legacy_recipe:
+                return False
+            # Replace the legacy set before reasserting the selected coded
+            # markers. This also clears removed unlisted values without needing
+            # to invent an individual concept mapping for them. The new row
+            # must sort after every same-day row it supersedes.
+            boundary = max((row.pk for row in rows if row.observation_date == today), default=None)
+            if not project_single_value(person, FIELD, ', '.join(legacy_selected) or None,
+                                        legacy_recipe, acknowledge_existing=True, after_pk=boundary):
+                raise ValueError('Cytogenetic legacy projection failed')
+            after_pk = Observation.objects.filter(
+                person=person, is_erroneous=False, observation_date=today,
+                observation_source_value=LEGACY_SOURCE,
+            ).order_by('-observation_id').values_list('pk', flat=True).first()
+            removed = set()  # The replacement aggregate clears the previous set.
         # All selected markers get today's affirmative row. Removed markers get
         # a dated clear; earlier rows remain intact as history.
-        for marker in list(selected) + sorted(removed):
+        for marker in [m for m in selected if m in recipes] + sorted(removed):
             if not project_single_value(person, FIELD, marker if marker in selected else None,
-                                        recipes[marker], acknowledge_existing=True):
+                                        recipes[marker], acknowledge_existing=True, after_pk=after_pk):
                 raise ValueError('Cytogenetic projection failed')
     return True

@@ -23,7 +23,7 @@ pytestmark = pytest.mark.django_db
 @pytest.fixture
 def editor(settings):
     settings.CELERY_BROKER_URL = ''
-    migration = import_module('omop_core.migrations.0228_cytogenetic_marker_choices')
+    migration = import_module('omop_core.migrations.0229_cytogenetic_marker_choices')
     with connection.schema_editor() as schema_editor:
         migration.seed(apps, schema_editor)
     record = PatientRecordFactory()
@@ -134,7 +134,7 @@ def test_partial_failure_rolls_back_every_marker_and_preserves_edit(editor):
 
 
 def test_descriptor_exposes_all_codes_and_migration_is_idempotent(editor):
-    migration = import_module('omop_core.migrations.0228_cytogenetic_marker_choices')
+    migration = import_module('omop_core.migrations.0229_cytogenetic_marker_choices')
     with connection.schema_editor() as schema_editor:
         migration.seed(apps, schema_editor)
     entry = descriptor()
@@ -150,3 +150,87 @@ def test_invalid_selections_are_rejected(editor, value):
     response = client.patch(f'/api/patient-info/{record.person_id}/', {FIELD: value}, format='json')
     assert response.status_code == 400
     assert not Observation.objects.filter(person=record.person).exists()
+
+
+def test_same_day_legacy_import_then_clear_does_not_restore_marker(editor):
+    record, _ = editor
+    save(editor, ['t(4;14)'])
+    existing = Observation.objects.get(person=record.person)
+    with suppress_patient_record_refresh():
+        ObservationFactory(observation_id=existing.pk + 10000, person=record.person,
+            observation_concept=Concept.objects.get(concept_code='107675007', vocabulary_id='SNOMED'),
+            observation_date=timezone.localdate(), observation_source_value='mm-cytogenetic-markers',
+            value_as_string='t(4;14)')
+    save(editor, [])
+    assert record.cytogenic_markers == ''
+    assert FIELD not in record.user_edited_fields
+    assert refresh_patient_record(record.person).cytogenic_markers == ''
+
+
+def test_legacy_unmapped_marker_does_not_block_new_mapped_selection(editor):
+    record, _ = editor
+    with suppress_patient_record_refresh():
+        ObservationFactory(person=record.person,
+            observation_concept=Concept.objects.get(concept_code='107675007', vocabulary_id='SNOMED'),
+            observation_date=timezone.localdate(), observation_source_value='mm-cytogenetic-markers',
+            value_as_string='del(1p)')
+    refresh_patient_record(record.person)
+    save(editor, ['t(4;14)'])
+    assert Observation.objects.filter(person=record.person,
+        observation_source_value=SOURCE_PREFIX + 't(4;14)', value_as_string='t(4;14)').exists()
+
+
+def test_same_day_reselection_overrides_a_later_empty_legacy_import(editor):
+    record, _ = editor
+    save(editor, ['t(4;14)'])
+    existing = Observation.objects.get(person=record.person)
+    with suppress_patient_record_refresh():
+        ObservationFactory(observation_id=existing.pk + 10000, person=record.person,
+            observation_concept=Concept.objects.get(concept_code='107675007', vocabulary_id='SNOMED'),
+            observation_date=timezone.localdate(), observation_source_value='mm-cytogenetic-markers',
+            value_as_string='')
+    assert not refresh_patient_record(record.person).cytogenic_markers
+    save(editor, ['t(4;14)'])
+    assert refresh_patient_record(record.person).cytogenic_markers == 't(4;14)'
+    count = Observation.objects.filter(person=record.person).count()
+    save(editor, ['t(4;14)'])
+    assert Observation.objects.filter(person=record.person).count() == count
+
+
+@pytest.mark.parametrize('selected', [[], ['t(4;14)'], ['del(1p)', 't(4;14)']])
+def test_legacy_unknown_values_can_be_removed_or_retained_with_coded_selections(editor, selected):
+    record, _ = editor
+    with suppress_patient_record_refresh():
+        imported = ObservationFactory(person=record.person,
+            observation_concept=Concept.objects.get(concept_code='107675007', vocabulary_id='SNOMED'),
+            observation_date=timezone.localdate() - timedelta(days=1),
+            observation_source_value='mm-cytogenetic-markers', value_as_string='del(1p),del17p')
+    refresh_patient_record(record.person)
+    save(editor, selected)
+    assert set(refresh_patient_record(record.person).cytogenic_markers.split(', ')) - {''} == set(selected)
+    assert FIELD not in record.user_edited_fields
+    imported.refresh_from_db()
+    assert imported.value_as_string == 'del(1p),del17p'
+    assert Observation.objects.filter(person=record.person,
+        observation_source_value=SOURCE_PREFIX + 't(4;14)', value_as_string='t(4;14)').exists() == ('t(4;14)' in selected)
+
+
+def test_failed_marker_write_rolls_back_legacy_replacement(editor):
+    from omop_core.services.omop_projection import project_single_value
+    record, _ = editor
+    with suppress_patient_record_refresh():
+        ObservationFactory(person=record.person,
+            observation_concept=Concept.objects.get(concept_code='107675007', vocabulary_id='SNOMED'),
+            observation_date=timezone.localdate(), observation_source_value='mm-cytogenetic-markers',
+            value_as_string='del(1p)')
+    refresh_patient_record(record.person)
+    def fail_marker(person, field, value, recipe, **kwargs):
+        if recipe.get('source_value') == SOURCE_PREFIX + 't(4;14)':
+            return False
+        return project_single_value(person, field, value, recipe, **kwargs)
+    with patch('omop_core.services.omop_projection.project_single_value', side_effect=fail_marker):
+        save(editor, ['t(4;14)'])
+    assert Observation.objects.filter(person=record.person).count() == 1
+    assert Observation.objects.get(person=record.person).value_as_string == 'del(1p)'
+    assert FIELD in record.user_edited_fields
+    assert refresh_patient_record(record.person).cytogenic_markers == 't(4;14)'

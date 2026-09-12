@@ -40,8 +40,10 @@ class WebhookSubscriptionSerializer(serializers.ModelSerializer):
     def validate_url(self, value):
         try:
             resolve_webhook_url(value)
-        except ValueError as exc:
-            raise serializers.ValidationError(str(exc)) from None
+        except ValueError:
+            raise serializers.ValidationError(
+                'Webhook URL must resolve only to public HTTPS addresses on port 443.'
+            ) from None
         return value
 
     def validate_organization(self, value):

@@ -76,10 +76,11 @@ const TAB_LABELS: Record<string, string> = {
   treatment: "Treatment",
   blood: "Blood",
   labs: "Labs",
+  genomics: "Genomics",
   behavior: "Behavior",
 };
 
-const TAB_ORDER = ["general", "disease", "treatment", "blood", "labs", "behavior"];
+const TAB_ORDER = ["general", "disease", "treatment", "blood", "labs", "genomics", "behavior"];
 
 const STATUS_BADGE: Record<string, string> = {
   proposed: "bg-yellow-100 text-yellow-800",

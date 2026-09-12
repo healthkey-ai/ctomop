@@ -116,7 +116,7 @@ import re
 from decimal import Decimal, InvalidOperation
 from io import StringIO
 from .permissions import (
-    EtlPatientCrudPermission, EtlWritePermission, PatientCrudPermission,
+    EtlPatientCrudPermission, EtlWritePermission, PatientCrudPermission, GenomicsCrudPermission,
     PatientDeletePermission, PatientSelfScopePermission, ScopedTokenPermission,
     VocabReadPermission, get_request_org, is_service_token,
 )
@@ -140,63 +140,10 @@ from django.views.decorators.http import require_http_methods
 logger = logging.getLogger(__name__)
 
 
-_GENETIC_MUTATION_CODE = '36908-2'
-_GENETIC_MUTATION_SOURCE_PREFIX = 'promop-genetic-mutation:'
-_MUTATION_ORIGIN_CONCEPTS = {'germline': 255395001, 'somatic': 255461003}
-_MUTATION_INTERPRETATION_CONCEPTS = {
-    'pathogenic': 30166007, 'benign': 10828004, 'vus': 42425007,
-}
-
-
 def _write_genetic_mutations(person, mutations):
-    """Replace clinician-authored mutations with canonical OMOP Measurements."""
-    if not isinstance(mutations, list):
-        raise ValidationError({'genetic_mutations': 'Expected a list of mutations.'})
+    from omop_core.services.genomics import replace_variants
+    replace_variants(person, mutations)
 
-    question = Concept.objects.filter(
-        vocabulary_id='LOINC', concept_code=_GENETIC_MUTATION_CODE,
-    ).first()
-    type_concept = Concept.objects.filter(
-        concept_id=CONCEPT_PATIENT_REPORTED_TYPE,
-    ).first()
-    if question is None or type_concept is None:
-        raise ValidationError({'genetic_mutations': 'Required OMOP vocabulary concepts are unavailable.'})
-    concepts_by_id = Concept.objects.in_bulk(
-        set(_MUTATION_ORIGIN_CONCEPTS.values()) | set(_MUTATION_INTERPRETATION_CONCEPTS.values()),
-        field_name='concept_id',
-    )
-
-    rows = []
-    for mutation in mutations:
-        if not isinstance(mutation, dict):
-            raise ValidationError({'genetic_mutations': 'Each mutation must be an object.'})
-        gene = str(mutation.get('gene') or '').strip().upper()
-        variant = str(mutation.get('mutation') or mutation.get('variant') or '').strip()
-        if not gene or not variant:
-            raise ValidationError({'genetic_mutations': 'Each mutation requires gene and mutation.'})
-        test_date = parse_date(str(mutation.get('test_date') or '')) or localdate()
-        origin = str(mutation.get('origin') or '').strip().lower()
-        interpretation = str(mutation.get('interpretation') or '').strip().lower()
-        rows.append(Measurement(
-            measurement_id=next_pk(Measurement, 'measurement_id'),
-            person=person,
-            measurement_concept=question,
-            measurement_date=test_date,
-            measurement_type_concept=type_concept,
-            value_as_string=variant[:60],
-            measurement_source_value=_GENETIC_MUTATION_CODE,
-            qualifier_source_value=gene[:50],
-            value_source_value=_GENETIC_MUTATION_SOURCE_PREFIX + gene,
-            qualifier_concept=concepts_by_id.get(_MUTATION_ORIGIN_CONCEPTS.get(origin)),
-            value_as_concept=concepts_by_id.get(_MUTATION_INTERPRETATION_CONCEPTS.get(interpretation)),
-        ))
-
-    Measurement.objects.filter(
-        person=person,
-        value_source_value__startswith=_GENETIC_MUTATION_SOURCE_PREFIX,
-    ).delete()
-    Measurement.objects.bulk_create(rows)
-    refresh_patient_record(person)
 
 class PatientRecordPagination(PageNumberPagination):
     page_size = 25
@@ -1069,6 +1016,59 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
     _STAFF_ONLY_FIELDS = frozenset({'validated', 'validated_by', 'validation_date'})
 
+    def _genomics_access(self, request, pk):
+        person, record, error = self._resolve_patient_with_auth(request, pk)
+        if error is not None:
+            return None, error
+        if request.method != 'GET' and not is_service_token(request):
+            from omop_core.authorization import can_write_patient
+            org = get_request_org(request)
+            if org is None and not can_write_patient(request.user, person.person_id):
+                return None, Response({'detail': 'You have read-only access to this patient.'}, status=403)
+        return person, None
+
+    @action(detail=True, methods=['get', 'post'], url_path='genomics', permission_classes=[GenomicsCrudPermission, PatientSelfScopePermission])
+    def genomics(self, request, pk=None):
+        from omop_core.services.genomics import list_variants, save_variant
+        person, error = self._genomics_access(request, pk)
+        if error is not None:
+            return error
+        if request.method == 'GET':
+            return Response(list_variants(person))
+        from omop_core.authorization import get_actor_role
+        type_id = 32865 if get_actor_role(request.user, person.person_id) in ('self', 'representative') else 32817
+        return Response(save_variant(person, request.data, type_concept_id=type_id), status=201)
+
+    @action(detail=True, methods=['get'], url_path='genomics-catalog')
+    def genomics_catalog(self, request, pk=None):
+        from omop_core.models import FieldConceptMapping
+        from omop_core.services.genomics_catalog import catalog, disease_code, markers
+        person, error = self._genomics_access(request, pk)
+        if error is not None:
+            return error
+        record = PatientRecord.objects.get(person=person)
+        disease = request.query_params.get('disease', record.disease)
+        code = disease_code(disease)
+        approved = set(FieldConceptMapping.objects.filter(status='approved').values_list('field_name', flat=True))
+        return Response({'version': catalog()['version'], 'disease': code,
+            'markers': [{**m, 'writable': m['field_name'] in approved} for m in markers() if code in m['diseases']]})
+
+    @action(detail=True, methods=['get', 'patch', 'delete'], url_path=r'genomics/(?P<variant_id>[0-9]+)', permission_classes=[GenomicsCrudPermission, PatientSelfScopePermission])
+    def genomic_variant(self, request, pk=None, variant_id=None):
+        from omop_core.services.genomics import _find, delete_variant, save_variant
+        person, error = self._genomics_access(request, pk)
+        if error is not None:
+            return error
+        variant_id = int(variant_id)
+        if request.method == 'GET':
+            return Response(_find(person, variant_id))
+        if request.method == 'DELETE':
+            delete_variant(person, variant_id)
+            return Response(status=204)
+        from omop_core.authorization import get_actor_role
+        type_id = 32865 if get_actor_role(request.user, person.person_id) in ('self', 'representative') else 32817
+        return Response(save_variant(person, request.data, variant_id, type_concept_id=type_id))
+
     def _patch_record(self, request, person, patient_info):
         """Shared save path after the provider or self-service access check."""
         # patient_name targets Person, not PatientRecord, so it is handled by hand
@@ -1077,6 +1077,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         # the provider UI PATCHes, and leaving the key in the body would 405 the
         # request below as a non-projection-owned field.
         patient_name, patch_data = _pop_patient_name(request.data)
+        from omop_core.services.genomics_catalog import patient_fields
+        priority_edits = {key: patch_data.pop(key) for key in list(patch_data) if key in patient_fields()}
+        priority_edits = {key: value for key, value in priority_edits.items() if value != getattr(patient_info, key)}
 
         # Validation fields are staff-only; patients use /me/confirm/ instead.
         # Silent drop (not 400) because auto-save sends the full GET representation.
@@ -1101,6 +1104,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         # before the vocabulary has been loaded).
         if mutations == PatientRecordSerializer(patient_info).data.get('genetic_mutations'):
             mutations = None
+        if mutations is not None and priority_edits:
+            raise ValidationError({'genetic_mutations': 'Edit either the full list or named priority fields in one request.'})
 
         # Validate language_skills early, before the transaction.
         if language_skills is not None and not isinstance(language_skills, dict):
@@ -1138,6 +1143,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                          and serializer.validated_data[field] is not None))
             }
             _apply_patient_name(person, patient_name)
+            if priority_edits:
+                from omop_core.services.genomics import replace_priority_fields
+                from omop_core.authorization import get_actor_role
+                type_id = 32865 if get_actor_role(request.user, person.person_id) in ('self', 'representative') else 32817
+                replace_priority_fields(person, priority_edits, type_id)
+                patient_info.refresh_from_db()
             if mutations is not None:
                 _write_genetic_mutations(person, mutations)
                 patient_info.refresh_from_db()

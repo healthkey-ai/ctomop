@@ -1,10 +1,7 @@
 import { useVocabulary } from '@/hooks/useVocabulary';
 import { useWritableFields } from '@/hooks/useWritableFields';
-import { Button } from '@/components/shadcn/button';
 import ClinicalField from '../ClinicalField';
 import Section from '../Section';
-import SelectControl from '../controls/SelectControl';
-import { stringsToOptions } from '../utils';
 import {
   STAGE_OPTIONS, HISTOLOGIC_TYPE_OPTIONS,
   MENOPAUSAL_OPTIONS, TUMOR_STAGE_OPTIONS, NODES_STAGE_OPTIONS,
@@ -16,19 +13,15 @@ import {
   MRD_STATUS_OPTIONS, CYTOGENETIC_RISK_OPTIONS,
   BINET_STAGE_OPTIONS, TUMOR_BURDEN_OPTIONS, DISEASE_ACTIVITY_OPTIONS,
   RICHTER_TRANSFORMATION_OPTIONS, PROTEIN_EXPRESSION_OPTIONS,
-  GENE_OPTIONS, MUTATION_OPTIONS, ORIGIN_OPTIONS, INTERPRETATION_OPTIONS,
 } from '../patientConstants';
 
 interface Props {
   formData: Record<string, unknown>;
   onChange: (field: string, value: unknown) => void;
-  onMutationAdd: () => void;
-  onMutationRemove: (index: number) => void;
-  onMutationChange: (index: number, field: string, value: string) => void;
   diseaseType: 'breast' | 'lymphoma' | 'myeloma' | 'cll' | 'mcl' | 'other';
 }
 
-function BreastCancerSection({ formData, onChange, onMutationAdd, onMutationRemove, onMutationChange }: Omit<Props, 'diseaseType'>) {
+function BreastCancerSection({ formData, onChange }: Omit<Props, 'diseaseType'>) {
   // Ask about *this* patient: whether a field may be edited depends on who is
   // asking and whose record it is, not only on whether the field is mapped.
   const personId = (formData?.person_id ?? formData?.person) as number | undefined;
@@ -45,7 +38,6 @@ function BreastCancerSection({ formData, onChange, onMutationAdd, onMutationRemo
   const { options: histologicOptions, source: histologicSource } = useVocabulary('histologic-type', 'title');
 
   const histOptions = histologicOptions.length ? histologicOptions.map((o: { value: string }) => o.value) : HISTOLOGIC_TYPE_OPTIONS;
-  const mutations = (formData?.genetic_mutations || []) as { gene: string; mutation: string; origin: string; interpretation: string }[];
 
   return (
     <>
@@ -105,69 +97,7 @@ function BreastCancerSection({ formData, onChange, onMutationAdd, onMutationRemo
         </div>
       </Section>
 
-      <Section title="Genetic Mutations">
-        <div className="flex items-center justify-between mb-4">
-          <p className="text-sm text-portal-text-secondary">{mutations.length} mutation(s) identified</p>
-          <Button variant="outline" size="sm" onClick={onMutationAdd}>Add Mutation</Button>
-        </div>
 
-        {mutations.map((mutation: { gene: string; mutation: string; origin: string; interpretation: string }, index: number) => (
-          <div key={index} className="mb-4 p-4 border border-portal-border rounded-md">
-            <div className="flex items-center justify-between mb-3">
-              <span className="text-sm font-medium text-portal-text-primary">Mutation {index + 1}</span>
-              <Button variant="ghost" size="sm" onClick={() => onMutationRemove(index)}
-                className="text-red-600 hover:text-red-700 hover:bg-red-50">
-                Remove
-              </Button>
-            </div>
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-              <div className="space-y-1.5">
-                <label className="text-sm font-medium text-portal-text-primary">Gene</label>
-                <SelectControl
-                  value={mutation.gene || ''}
-                  options={stringsToOptions(GENE_OPTIONS)}
-                  treatEmptyOptionAsUnknown={false}
-                  onChange={(v) => onMutationChange(index, 'gene', String(v ?? ''))}
-                />
-              </div>
-              <div className="space-y-1.5">
-                <label className="text-sm font-medium text-portal-text-primary">Mutation</label>
-                <SelectControl
-                  value={mutation.mutation || ''}
-                  options={mutation.gene ? stringsToOptions(MUTATION_OPTIONS[mutation.gene] || []) : []}
-                  disabled={!mutation.gene}
-                  treatEmptyOptionAsUnknown={false}
-                  onChange={(v) => onMutationChange(index, 'mutation', String(v ?? ''))}
-                />
-              </div>
-              <div className="space-y-1.5">
-                <label className="text-sm font-medium text-portal-text-primary">Origin</label>
-                <SelectControl
-                  value={mutation.origin || ''}
-                  options={stringsToOptions(ORIGIN_OPTIONS)}
-                  treatEmptyOptionAsUnknown={false}
-                  onChange={(v) => onMutationChange(index, 'origin', String(v ?? ''))}
-                />
-              </div>
-              <div className="space-y-1.5">
-                <label className="text-sm font-medium text-portal-text-primary">Interpretation</label>
-                <SelectControl
-                  value={mutation.interpretation || ''}
-                  options={stringsToOptions(INTERPRETATION_OPTIONS)}
-                  treatEmptyOptionAsUnknown={false}
-                  onChange={(v) => onMutationChange(index, 'interpretation', String(v ?? ''))}
-                />
-              </div>
-            </div>
-          </div>
-        ))}
-
-        {mutations.length === 0 && (
-          <p className="text-sm text-portal-text-secondary italic text-center py-4">
-            No genetic mutations identified. Click "Add Mutation" to add one.
-          </p>
-        )}
-      </Section>
     </>
   );
 }
@@ -279,12 +209,6 @@ function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChan
           <div className="sm:col-span-2">
             <ClinicalField label="Cytogenetic Markers" name="cytogenetic_markers" descriptor={descriptors.cytogenetic_markers} type="multiselect" value={formData?.cytogenetic_markers} onChange={onChange} />
           </div>
-          <div className="sm:col-span-2">
-            <ClinicalField label="Cytogenetic Abnormalities" name="cytogenetic_abnormalities" descriptor={descriptors.cytogenetic_abnormalities} unknownField type="text" value={formData?.cytogenetic_abnormalities} onChange={onChange} />
-          </div>
-          <div className="sm:col-span-2">
-            <ClinicalField label="Genetic Mutations" name="genetic_mutations" descriptor={descriptors.genetic_mutations} type="text" value={formData?.genetic_mutations} onChange={onChange} />
-          </div>
         </div>
       </Section>
     </>
@@ -325,7 +249,6 @@ function CLLSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange'>
 
       <Section title="Clinical Findings">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <ClinicalField label="TP53 Disruption" name="tp53_disruption" descriptor={descriptors.tp53_disruption} type="boolean" value={formData?.tp53_disruption} onChange={onChange} />
           <ClinicalField label="Bone Marrow Involvement" name="bone_marrow_involvement" descriptor={descriptors.bone_marrow_involvement} type="boolean" value={formData?.bone_marrow_involvement} onChange={onChange} />
           <ClinicalField label="Measurable Disease (IWCLL)" name="measurable_disease_iwcll" descriptor={descriptors.measurable_disease_iwcll} type="boolean" value={formData?.measurable_disease_iwcll} onChange={onChange} />
           <ClinicalField label="Splenomegaly" name="splenomegaly" descriptor={descriptors.splenomegaly} type="boolean" value={formData?.splenomegaly} onChange={onChange} />
@@ -349,12 +272,8 @@ function MCLSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange'>
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <ClinicalField label="Stage" name="stage" descriptor={descriptors.stage} type="select" value={formData?.stage} options={STAGE_OPTIONS} onChange={onChange} />
           <div className="sm:col-span-2">
-            <ClinicalField label="Molecular Markers" name="molecular_markers" descriptor={descriptors.molecular_markers} type="text" value={formData?.molecular_markers} onChange={onChange} />
-          </div>
-          <div className="sm:col-span-2">
             <ClinicalField label="Protein Expressions" name="protein_expressions" descriptor={descriptors.protein_expressions} type="multiselect" value={formData?.protein_expressions} options={PROTEIN_EXPRESSION_OPTIONS} onChange={onChange} />
           </div>
-          <ClinicalField label="TP53 Disruption" name="tp53_disruption" descriptor={descriptors.tp53_disruption} type="boolean" value={formData?.tp53_disruption} onChange={onChange} />
           <ClinicalField label="Ki-67 Proliferation Index (%)" name="ki67_proliferation_index" descriptor={descriptors.ki67_proliferation_index} type="number" value={formData?.ki67_proliferation_index} onChange={onChange} />
         </div>
       </Section>
@@ -430,14 +349,14 @@ function StagingBiomarkersSection({ formData, onChange }: Pick<Props, 'formData'
   );
 }
 
-export default function DiseaseTab({ formData, onChange, onMutationAdd, onMutationRemove, onMutationChange, diseaseType }: Props) {
+export default function DiseaseTab({ formData, onChange, diseaseType }: Props) {
   const personId = (formData?.person_id ?? formData?.person) as number | undefined;
   const { descriptors } = useWritableFields(personId);
   const { source: diseaseSource } = useVocabulary('disease', 'title');
   const diseaseSection = (() => {
     switch (diseaseType) {
       case 'breast':
-        return <BreastCancerSection formData={formData} onChange={onChange} onMutationAdd={onMutationAdd} onMutationRemove={onMutationRemove} onMutationChange={onMutationChange} />;
+        return <BreastCancerSection formData={formData} onChange={onChange} />;
       case 'lymphoma':
         return <LymphomaSection formData={formData} onChange={onChange} />;
       case 'myeloma':

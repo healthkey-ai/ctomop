@@ -5243,14 +5243,15 @@ class RefreshQueryCountTest(TestCase):
             )
 
     def test_query_count_under_budget(self):
-        """refresh_patient_record must not exceed 20 SQL queries."""
+        """refresh_patient_record must not exceed 21 SQL queries."""
         from django.test.utils import CaptureQueriesContext
         with CaptureQueriesContext(connection) as ctx:
             refresh_patient_record(self.person)
         # Budget: ~6 snapshot queries + PatientRecord SELECT FOR UPDATE + save
-        # + a few ancillary lookups (Episode, concept cache, etc.)
+        # + a few ancillary lookups (Episode, concept cache, genomics OMOP
+        # projections, etc.)
         self.assertLessEqual(
-            len(ctx.captured_queries), 20,
+            len(ctx.captured_queries), 21,
             f'Expected ≤20 queries, got {len(ctx.captured_queries)}. '
             f'Query breakdown:\n'
             + '\n'.join(

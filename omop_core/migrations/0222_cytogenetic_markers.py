@@ -24,7 +24,19 @@ INVALID_CHOICE_CODES = (
 )
 
 
+def rename_pending_edits(apps, schema_editor, old_name=LEGACY_FIELD, new_name=FIELD):
+    using = schema_editor.connection.alias if schema_editor else 'default'
+    PatientRecord = apps.get_model('omop_core', 'PatientRecord')
+    records = PatientRecord.objects.using(using).filter(
+        user_edited_fields__contains=[old_name],
+    ).values_list('pk', 'user_edited_fields')
+    for pk, fields in records.iterator():
+        renamed = list(dict.fromkeys(new_name if name == old_name else name for name in fields))
+        PatientRecord.objects.using(using).filter(pk=pk).update(user_edited_fields=renamed)
+
+
 def migrate_and_seed(apps, schema_editor):
+    rename_pending_edits(apps, schema_editor)
     FieldChoice = apps.get_model('omop_core', 'FieldChoice')
     FieldChoiceCode = apps.get_model('omop_core', 'FieldChoiceCode')
     FieldConceptMapping = apps.get_model('omop_core', 'FieldConceptMapping')
@@ -96,6 +108,7 @@ def migrate_and_seed(apps, schema_editor):
 
 
 def reverse_metadata(apps, schema_editor):
+    rename_pending_edits(apps, schema_editor, FIELD, LEGACY_FIELD)
     using = schema_editor.connection.alias
     for model_name in ('FieldChoice', 'FieldFormula', 'FieldSynonym', 'FieldConceptMapping'):
         model = apps.get_model('omop_core', model_name)

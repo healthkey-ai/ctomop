@@ -9,9 +9,12 @@ from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
 
 from omop_core.models import (
-    Concept, FieldChoice, FieldChoiceCode, FieldConceptMapping, Observation, PatientRecord,
+    Concept, FieldChoice, FieldChoiceCode, FieldConceptMapping, Note, Observation, PatientRecord,
 )
-from omop_core.services.cytogenetics import normalise_cytogenetic_markers
+from omop_core.services.cytogenetics import (
+    CANONICAL_CYTOGENETIC_MARKERS, normalise_cytogenetic_markers,
+    read_cytogenetic_summary,
+)
 from omop_core.services.write_descriptor import KIND_DIRECT, build_writable_field_descriptor
 from tests.factories import ConceptFactory, DomainFactory, PatientRecordFactory, VocabularyFactory
 
@@ -205,3 +208,128 @@ def test_seed_preserves_a_curator_supplied_summary_recipe():
     import_module('omop_core.migrations.0222_cytogenetic_markers').migrate_and_seed(apps, None)
     mapping.refresh_from_db()
     assert mapping.concept_id == concept.pk
+
+
+def test_rename_preserves_pending_edit_protection_during_refresh():
+    from omop_core.services.patient_record_service import refresh_patient_record
+
+    _cytogenetic_concept()
+    record = PatientRecordFactory(
+        cytogenetic_markers='del17p',
+        user_edited_fields=['cytogenic_markers', 'disease', 'cytogenetic_markers'],
+    )
+    migration = import_module('omop_core.migrations.0228_merge_cytogenetics_and_genomics')
+    migration.repair_pending_edits(apps, None)
+    migration.repair_pending_edits(apps, None)
+    record.refresh_from_db()
+    assert record.user_edited_fields == ['cytogenetic_markers', 'disease']
+    refresh_patient_record(record.person)
+    record.refresh_from_db()
+    assert record.cytogenetic_markers == 'del17p'
+    assert 'cytogenetic_markers' in record.user_edited_fields
+
+
+@pytest.mark.parametrize('table', ['observation', 'measurement'])
+def test_all_markers_roundtrip_through_note_and_same_day_edits_and_clear(table):
+    from django.utils import timezone
+    from omop_core.models import Measurement
+    from omop_core.services.patient_record_service import refresh_patient_record
+
+    _cytogenetic_concept()
+    mapping = _approved_mapping(Concept.objects.get(pk=0))
+    mapping.omop_table = table
+    mapping.save(update_fields=['omop_table'])
+    record = PatientRecordFactory(disease='multiple myeloma')
+    user = get_user_model().objects.create_user(
+        email='all-markers@example.test', password='test', is_staff=True,
+    )
+    client = APIClient()
+    client.force_authenticate(user=user)
+    full = normalise_cytogenetic_markers(CANONICAL_CYTOGENETIC_MARKERS, strict=True)
+    assert len(full) > 60
+    # Reference length must not assume NOTE IDs have only a few digits.
+    Note.objects.create(
+        note_id=10**15, person=record.person, note_date=timezone.localdate(),
+        note_type_concept_id=0, note_text='unrelated note', note_source_value='unrelated',
+    )
+    model = Observation if table == 'observation' else Measurement
+    note_id = None
+    # The second long value changes only NOTE text, not the reference string.
+    for value in (full, ', '.join(reversed(CANONICAL_CYTOGENETIC_MARKERS)), 'del17p', '', full):
+        response = client.patch(
+            f'/api/patient-info/{record.person_id}/',
+            {'cytogenetic_markers': value}, format='json',
+        )
+        assert response.status_code == 200, response.data
+        record.refresh_from_db()
+        assert record.cytogenetic_markers == value
+        assert 'cytogenetic_markers' not in (record.user_edited_fields or [])
+        fact = model.objects.get(person=record.person, **{f'{table}_source_value': 'mm-cytogenetic-markers'})
+        assert len(fact.value_as_string or '') <= 60
+        if len(value) > 60:
+            assert read_cytogenetic_summary(fact) == value
+            note = Note.objects.get(person=record.person, note_source_value=f'cytogenetics:{table}:{fact.pk}')
+            assert note.note_text == value
+            assert note.pk == note_id if note_id is not None else note.pk > 10**15
+            note_id = note.pk
+        refresh_patient_record(record.person)
+        record.refresh_from_db()
+        assert record.cytogenetic_markers == (value or None)
+
+
+def test_overflow_note_history_survives_later_day_projection():
+    from datetime import date
+    from omop_core.services.omop_projection import project_single_value
+    from omop_core.services.patient_record_service import refresh_patient_record
+
+    _cytogenetic_concept()
+    _approved_mapping(Concept.objects.get(pk=0))
+    record = PatientRecordFactory(disease='multiple myeloma')
+    projection = build_writable_field_descriptor()['cytogenetic_markers']['projection']
+    projection['value_kind'] = 'string'
+    full = normalise_cytogenetic_markers(CANONICAL_CYTOGENETIC_MARKERS)
+    for day, value in [(date(2026, 1, 1), full), (date(2026, 1, 2), 'del17p')]:
+        with patch('omop_core.services.omop_projection.timezone.localdate', return_value=day):
+            assert project_single_value(record.person, 'cytogenetic_markers', value, projection)
+    older = Observation.objects.get(person=record.person, observation_date=date(2026, 1, 1))
+    assert read_cytogenetic_summary(older) == full
+    refresh_patient_record(record.person)
+    record.refresh_from_db()
+    assert record.cytogenetic_markers == 'del17p'
+
+
+def test_note_reference_cannot_read_another_patient_or_fact():
+    from django.utils import timezone
+    from tests.factories import ObservationFactory
+
+    _cytogenetic_concept()
+    own = PatientRecordFactory()
+    other = PatientRecordFactory()
+    fact = ObservationFactory(person=own.person, observation_source_value='mm-cytogenetic-markers')
+    note = Note.objects.create(
+        note_id=99, person=other.person, note_date=timezone.localdate(),
+        note_type_concept_id=0, note_source_value=f'cytogenetics:observation:{fact.pk}',
+        note_text='another patient private text',
+    )
+    fact.value_as_string = f'[note:{note.pk}]'
+    assert read_cytogenetic_summary(fact) == fact.value_as_string
+    note.person = own.person
+    note.note_source_value = f'cytogenetics:measurement:{fact.pk}'
+    note.save()
+    del fact._cytogenetic_summary_text
+    assert read_cytogenetic_summary(fact) == fact.value_as_string
+
+
+def test_failed_fact_write_rolls_back_new_overflow_note():
+    from django.db import DatabaseError
+    from omop_core.services.omop_projection import project_single_value
+
+    _cytogenetic_concept()
+    _approved_mapping(Concept.objects.get(pk=0))
+    record = PatientRecordFactory()
+    projection = build_writable_field_descriptor()['cytogenetic_markers']['projection']
+    projection['value_kind'] = 'string'
+    full = normalise_cytogenetic_markers(CANONICAL_CYTOGENETIC_MARKERS)
+    with patch.object(Observation, 'save', side_effect=DatabaseError('write failed')):
+        assert not project_single_value(record.person, 'cytogenetic_markers', full, projection)
+    assert not Note.objects.filter(person=record.person).exists()

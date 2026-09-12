@@ -20,5 +20,15 @@ does not reuse or modify those mappings. The repair of prior development data
 is restricted to the summary field/choice associations and Observation rows
 with source `mm-cytogenetic-markers` and the previously incorrect 69548-6 code.
 
-The merge migration joins the cytogenetic rename branch to current dev, while
+The merge migrations join the cytogenetic rename branch to current dev, while
 also repairing development databases that already applied the earlier seed.
+Migration 0228 incorporates the landed #1204 genomics changes and creates the
+NOTE ID sequence used by both storage paths.
+Pending-edit field names are migrated too, preserving protection for patient
+edits that have not yet been projected into OMOP.
+
+Selections longer than the CDM's 60-character value limit are stored losslessly
+in NOTE. The summary fact holds a `[note:id]` reference. Readback requires the
+same patient, fact table, and fact ID; same-day edits reuse the NOTE, while
+earlier dated facts retain their own text. NOTE changes and the summary fact
+are saved in one transaction.

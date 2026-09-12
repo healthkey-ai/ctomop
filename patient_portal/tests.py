@@ -24492,12 +24492,11 @@ class VocabScopeAndSuggestedCodesTest(TestCase):
         from omop_core.management.commands.load_athena_vocabularies import VOCAB_SCOPE
         self.assertIn('MeSH', VOCAB_SCOPE)
 
-    def test_cytogenetic_markers_suggested_code(self):
-        """Cytogenetic markers use a standard LOINC question concept (#1047)."""
+    def test_cytogenetic_summary_has_no_unverified_suggested_code(self):
+        """Automatic suggestions must not reintroduce the incorrect status code."""
         from omop_core.services.mappings import SUGGESTED_FIELD_CODES
-        code, vocab = SUGGESTED_FIELD_CODES['cytogenetic_markers']
-        self.assertEqual(code, '69548-6')
-        self.assertEqual(vocab, 'LOINC')
+        self.assertNotIn('cytogenetic_markers', SUGGESTED_FIELD_CODES)
+        self.assertNotIn('cytogenic_markers', SUGGESTED_FIELD_CODES)
 
 
 # =============================================================================

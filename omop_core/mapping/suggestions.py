@@ -188,6 +188,7 @@ DEFAULT_STRATEGIES = [STRATEGY_UMLS, STRATEGY_LEXICAL, STRATEGY_SEMANTIC]
 # Keep explicit requests from older clients compatible; default runs pass the
 # complete retrieval pool straight to the LLM, without redundant reordering.
 ALL_STRATEGIES = [*DEFAULT_STRATEGIES, STRATEGY_VECTORS]
+RANKING_MODEL = 'claude-opus-5'
 
 
 def _find_source_concept(source_vocabulary_id, source_code):
@@ -812,14 +813,28 @@ def rank_candidates(source_value, candidates, source_description='', *, source_c
     if require_model_selection:
         fallback_note = 'Ranking model unavailable; expanded search remains unresolved.'
 
+    def unavailable(reason, detail, *, error=None, response=None):
+        # Never log the key, source text, prompt, raw provider body, or exception
+        # message. SDK exceptions can carry request data. These fields distinguish
+        # configuration, authentication, provider, and response failures safely.
+        status_code = getattr(error, 'status_code', None)
+        request_id = getattr(error, 'request_id', None) or getattr(response, '_request_id', None)
+        logger.warning(
+            'Concept ranking unavailable reason=%s model=%s key_configured=%s '
+            'candidate_count=%s error_class=%s status_code=%s request_id=%s stop_reason=%s',
+            reason, RANKING_MODEL, bool(getattr(settings, 'ANTHROPIC_API_KEY', '')),
+            len(candidates), type(error).__name__ if error else None,
+            status_code, request_id, getattr(response, 'stop_reason', None),
+        )
+        return fallback, f'{fallback_note} Details: {detail}'
+
     if not getattr(settings, 'ANTHROPIC_API_KEY', ''):
-        return fallback, fallback_note
+        return unavailable('missing_api_key', 'ANTHROPIC_API_KEY is not configured in the process performing ranking.')
 
     try:
         import anthropic
-    except ImportError:
-        logger.warning('anthropic SDK not installed; falling back to lexical order.')
-        return fallback, fallback_note
+    except ImportError as exc:
+        return unavailable('sdk_unavailable', 'The Anthropic SDK is not installed.', error=exc)
 
     evidence = {
         'source': source_context or {
@@ -831,7 +846,7 @@ def rank_candidates(source_value, candidates, source_description='', *, source_c
     try:
         client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
         response = client.messages.create(
-            model='claude-opus-5',
+            model=RANKING_MODEL,
             # Thinking tokens count against this. At 1024 the response stopped
             # at max_tokens with no text block, json.loads raised, and the
             # ranker silently degraded to the lexical order it exists to fix.
@@ -847,11 +862,33 @@ def rank_candidates(source_value, candidates, source_description='', *, source_c
                 'content': json.dumps(evidence, ensure_ascii=False),
             }],
         )
-    except Exception as exc:                      # noqa: BLE001 - degrade, never fail
-        # A Suggest button that returns nothing because a third party is down is
-        # worse than one that returns a decent guess a curator can correct.
-        logger.warning('Concept ranking failed for %r: %s', source_value, exc)
-        return fallback, fallback_note
+    except Exception as exc:  # noqa: BLE001 - retain fallback, expose a safe reason
+        status_code = getattr(exc, 'status_code', None)
+        reasons = {
+            400: ('invalid_request', 'Anthropic rejected the ranking request (HTTP 400).'),
+            401: ('authentication_failed', 'Anthropic rejected the configured API key (HTTP 401).'),
+            403: ('permission_denied', 'The configured key is not permitted to use the ranking model (HTTP 403).'),
+            404: ('model_not_found', f'Anthropic could not find or grant access to {RANKING_MODEL} (HTTP 404).'),
+            429: ('rate_limited', 'Anthropic rate-limited the ranking request (HTTP 429).'),
+            529: ('provider_overloaded', 'Anthropic is temporarily overloaded (HTTP 529).'),
+        }
+        reason, detail = reasons.get(status_code, (
+            'request_failed', 'The Anthropic ranking request failed; see the server diagnostic log.',
+        ))
+        body = getattr(exc, 'body', None)
+        provider_error = body.get('error', body) if isinstance(body, dict) else None
+        provider_message = provider_error.get('message', '') if isinstance(provider_error, dict) else ''
+        if status_code == 400 and isinstance(provider_message, str) and 'credit balance is too low' in provider_message.lower():
+            reason, detail = (
+                'insufficient_credit',
+                'The Anthropic API account has insufficient credits. Add API credits in '
+                'Anthropic Plans & Billing or configure a funded API key.',
+            )
+        elif type(exc).__name__ == 'APITimeoutError':
+            reason, detail = 'timeout', 'The Anthropic ranking request timed out.'
+        elif type(exc).__name__ == 'APIConnectionError':
+            reason, detail = 'connection_failed', 'The ranking process could not connect to Anthropic.'
+        return unavailable(reason, detail, error=exc)
 
     payload = next(
         (block.text for block in response.content if block.type == 'text'), ''
@@ -864,8 +901,9 @@ def rank_candidates(source_value, candidates, source_description='', *, source_c
     # prompt asks for null, so this is the shape a model most plausibly gets
     # wrong. Degrading is the contract; 500ing the request is not.
     if not isinstance(verdict, dict):
-        logger.warning('Concept ranking returned unusable output for %r.', source_value)
-        return fallback, fallback_note
+        if getattr(response, 'stop_reason', None) == 'max_tokens':
+            return unavailable('output_truncated', 'Anthropic reached the output token limit before returning a ranking.', response=response)
+        return unavailable('invalid_output', 'Anthropic returned no usable ranking JSON.', response=response)
 
     chosen_id = verdict.get('concept_id')
     if chosen_id is None:
@@ -875,11 +913,7 @@ def rank_candidates(source_value, candidates, source_description='', *, source_c
     if chosen is None:
         # The model named something outside the shortlist. Do not follow it --
         # the candidates were domain-scoped and validated, an arbitrary id is not.
-        logger.warning(
-            'Concept ranking chose %s, which was not among the candidates for %r.',
-            chosen_id, source_value,
-        )
-        return fallback, fallback_note
+        return unavailable('candidate_outside_pool', 'Anthropic selected a concept outside the candidate list.', response=response)
 
     return chosen, (
         f'{verdict.get("confidence", "unknown")} confidence: '

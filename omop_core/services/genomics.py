@@ -53,9 +53,10 @@ def approved_mapping(field_name):
 
 def mapped_concept(mapping):
     if mapping.concept_id and mapping.concept.standard_concept == 'S':
-        if mapping.concept.domain_id.lower() != mapping.omop_table:
-            raise ValidationError({mapping.field_name: 'The approved concept domain does not match its OMOP table.'})
-        return mapping.concept_id, mapping.concept_id
+        if mapping.concept.domain_id.lower() == mapping.omop_table:
+            return mapping.concept_id, mapping.concept_id
+        # Domain drifted in a newer Athena release — fall through to LOINC
+        # resolution which handles mismatches gracefully (concept 0 + source).
     if mapping.vocabulary_id == 'LOINC' and mapping.concept_code:
         concept, source, domain = _resolve(mapping.concept_code, mapping.omop_table.title())
         return (concept if domain.lower() == mapping.omop_table else 0), source

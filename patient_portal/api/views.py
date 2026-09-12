@@ -11107,6 +11107,7 @@ def propose_all_mappings(request):
             continue  # concept not in vocabulary DB — skip
 
         to_create.append(FieldConceptMapping(
+            provenance='system_generated',
             field_name=p['field_name'],
             concept=concept,
             vocabulary_id=p['vocabulary_id'],

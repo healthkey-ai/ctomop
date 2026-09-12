@@ -1,5 +1,10 @@
 # Genetic Mutations in OMOP CDM - Complete Implementation
 
+> Historical implementation notes. The current Genomics CRUD design, field
+> mappings, storage limits and recommendations are documented in
+> [Patient genomics](docs/genomics.md). The old four-field representation and
+> concept examples below do not describe the new writer.
+
 ## Question Answered: 
 **"Will I be able to get the origin and interpretation of those mutations from these standard OMOP tables without the OMOP Genomic extension?"**
 

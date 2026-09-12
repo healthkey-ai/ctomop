@@ -56,6 +56,8 @@ paths = [
   '''.*/test_[^/]*\.py$''',
   '''.*\.(test|itest)\.tsx?$''',
   '''.*/__tests__/.*''',
+  '''omop_core/data/.*\.json$''',
+  '''docs/genomics_handoff\.md$''',
 ]
 
 # This genomic marker identifier appears as a catalog key and in its handoff

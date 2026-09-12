@@ -18,6 +18,7 @@ import DiseaseTab from "@/components/PatientInfo/tabs/DiseaseTab";
 import TreatmentTab from "@/components/PatientInfo/tabs/TreatmentTab";
 import BloodTab from "@/components/PatientInfo/tabs/BloodTab";
 import LabsTab from "@/components/PatientInfo/tabs/LabsTab";
+import GenomicsTab from "@/components/PatientInfo/tabs/GenomicsTab";
 import BehaviorTab from "@/components/PatientInfo/tabs/BehaviorTab";
 import WearableTab from "@/components/PatientInfo/tabs/WearableTab";
 import ClinicalSummaryTab from "@/components/PatientInfo/tabs/ClinicalSummaryTab";
@@ -529,36 +530,6 @@ export default function PatientDetail({
     scheduleAutoSave(updated, editedNameRef.current);
   }, [scheduleAutoSave]);
 
-  const handleMutationAdd = useCallback(() => {
-    const raw = pendingDataRef.current?.info.genetic_mutations
-      ?? editedInfoRef.current.genetic_mutations ?? [];
-    const mutations = [
-      ...(raw as { gene: string; mutation: string; origin: string; interpretation: string }[]),
-      { gene: "", mutation: "", origin: "", interpretation: "" },
-    ];
-    handleFieldChange("genetic_mutations", mutations);
-  }, [handleFieldChange]);
-
-  const handleMutationRemove = useCallback((index: number) => {
-    const raw = pendingDataRef.current?.info.genetic_mutations
-      ?? editedInfoRef.current.genetic_mutations ?? [];
-    const mutations = [
-      ...(raw as { gene: string; mutation: string; origin: string; interpretation: string }[]),
-    ];
-    mutations.splice(index, 1);
-    handleFieldChange("genetic_mutations", mutations);
-  }, [handleFieldChange]);
-
-  const handleMutationChange = useCallback((index: number, field: string, value: string) => {
-    const raw = pendingDataRef.current?.info.genetic_mutations
-      ?? editedInfoRef.current.genetic_mutations ?? [];
-    const mutations = [
-      ...(raw as { gene: string; mutation: string; origin: string; interpretation: string }[]),
-    ];
-    mutations[index] = { ...mutations[index], [field]: value };
-    if (field === "gene") mutations[index].mutation = "";
-    handleFieldChange("genetic_mutations", mutations);
-  }, [handleFieldChange]);
 
   const handleNameChange = useCallback((name: string) => {
     setEditedName(name);
@@ -672,7 +643,7 @@ export default function PatientDetail({
   // Build tab list dynamically — patient mode adds Allergies (after Labs) and Surveys (last).
   // Immunizations are shown inside the Treatment tab, not as a separate tab.
   const canViewOmop = !patientMode && !!(user?.is_staff || user?.is_org_admin);
-  const coreTabs = ["General", getDiseaseTabLabel(), "Treatment", "Blood", "Labs"];
+  const coreTabs = ["General", getDiseaseTabLabel(), "Treatment", "Blood", "Labs", "Genomics"];
   const afterLabsTabs = patientMode ? ["Allergies"] : [];
   const trailingTabs = ["Behavior", "Wearables", "Summary"];
   const surveyTabs = patientMode ? ["Surveys"] : [];
@@ -689,10 +660,11 @@ export default function PatientDetail({
 
   const tabDescriptions: Record<number, string> = {
     0: "Keep patient details up to date for accurate personalisation.",
-    1: "Disease-specific clinical information and genetic details.",
+    1: "Disease selection, staging, and disease-specific clinical information.",
     2: "Therapy history, treatment lines, and planned therapies.",
     3: "Blood counts and differential.",
     4: "Chemistry, liver function, coagulation, cardiac and tumour markers.",
+    5: "Genes, variants, origins, interpretations, and test details.",
     ...(allergiesIdx >= 0 ? { [allergiesIdx]: "Known allergies and intolerances from your health records." } : {}),
     [behaviorIdx]: "Lifestyle, socioeconomic, and behavioural health factors.",
     [wearablesIdx]: "30 day summaries derived from synced OMOP data.",
@@ -879,9 +851,6 @@ export default function PatientDetail({
                   <DiseaseTab
                     formData={editedInfo}
                     onChange={handleFieldChange}
-                    onMutationAdd={handleMutationAdd}
-                    onMutationRemove={handleMutationRemove}
-                    onMutationChange={handleMutationChange}
                     diseaseType={getDiseaseType()}
                   />
                 )}
@@ -910,6 +879,7 @@ export default function PatientDetail({
                 )}
                 {activeTab === 3 && <BloodTab formData={editedInfo} onChange={handleFieldChange} />}
                 {activeTab === 4 && <LabsTab formData={editedInfo} onChange={handleFieldChange} />}
+                {activeTab === 5 && <GenomicsTab formData={editedInfo} />}
                 {allergiesIdx >= 0 && activeTab === allergiesIdx && <AllergyList user={user ?? null} />}
                 {activeTab === behaviorIdx && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} />}
                 {activeTab === wearablesIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} />}

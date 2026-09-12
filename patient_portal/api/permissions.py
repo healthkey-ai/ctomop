@@ -219,6 +219,15 @@ class PatientCrudPermission(ScopedTokenPermission):
         return super().has_permission(request, view)
 
 
+class GenomicsCrudPermission(ScopedTokenPermission):
+    """Variant CRUD; actions must enforce can_access/write_patient per person."""
+
+    def has_permission(self, request, view):
+        if not is_service_token(request) and (request.auth is None or isinstance(request.auth, TokenClaims)):
+            return bool(request.user and request.user.is_authenticated)
+        return super().has_permission(request, view)
+
+
 class EtlPatientCrudPermission(PatientCrudPermission):
     """Patient CRUD rules plus the narrowly placed legacy ETL capability."""
 

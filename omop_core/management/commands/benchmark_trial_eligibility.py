@@ -115,6 +115,7 @@ def _latest_measurement_text_subquery(concept_codes):
                 'value_as_string',
                 'value_source_value',
                 'value_as_concept__concept_name',
+                output_field=CharField(),
             )
         )
         .order_by('-measurement_date', '-measurement_id')
@@ -151,6 +152,7 @@ def _latest_observation_text_subquery(concept_codes):
                 'value_as_string',
                 'value_source_value',
                 'value_as_concept__concept_name',
+                output_field=CharField(),
             )
         )
         .order_by('-observation_date', '-observation_id')

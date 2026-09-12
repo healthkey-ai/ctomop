@@ -228,6 +228,9 @@ _OMOP_DERIVED_FIELDS = [
 # than ``_OMOP_DERIVED_FIELDS`` because a few Person/Location fields are
 # populated by refresh but intentionally not cleared when their source is
 # incomplete.  They are still OMOP-backed facts, not projection-owned values.
+from omop_core.services.genomics_catalog import patient_fields as _genomic_patient_fields
+_OMOP_DERIVED_FIELDS.extend(_genomic_patient_fields())
+
 PATIENT_RECORD_OMOP_MAPPED_FIELDS = frozenset(_OMOP_DERIVED_FIELDS) | frozenset({
     'date_of_birth', 'gender', 'race', 'ethnicity', 'languages_skills',
     'country', 'region', 'city', 'postal_code', 'latitude', 'longitude',
@@ -625,7 +628,7 @@ def _clear_derived_fields(patient_info: PatientRecord) -> None:
                 'first_line_therapy_type_ids', 'second_line_therapy_type_ids',
                 'later_therapy_type_ids', 'therapy_type_ids',
                 'stem_cell_transplant_history', 'sct_eligibility',
-            ) else None
+            ) or field in _genomic_patient_fields() else None
             setattr(patient_info, field, default)
 
 
@@ -659,6 +662,8 @@ class OmopSnapshot:
     meas_by_source: dict        # source_value → [Measurement]
     obs_by_source: dict         # source_value → [Observation]
     death_date_assertion: object | None = None  # Latest UI assertion, including an explicit clear
+    # Per-refresh memoization only; never cache database mappings process-wide.
+    genomics_cache: dict = dataclasses.field(default_factory=dict, compare=False)
 
 
 def _build_snapshot(person: Person) -> OmopSnapshot:
@@ -2236,6 +2241,7 @@ _GENETIC_MUTATION_LOINCS = {
     # Generic, repeatable LOINC question used by the clinician-facing mutation
     # editor (#905).  The gene is carried in qualifier_source_value.
     '36908-2': None,
+    '81252-9': None,  # Discrete genetic variant, with linked components.
     '21636-6': 'BRCA1',
     '21640-8': 'BRCA2',   # BRCA2 gene c.6174delT [Presence] in Blood or Tissue
     '21739-8': 'TP53',    # TP53 gene mutations found [Identifier] in Blood or Tissue
@@ -2594,6 +2600,12 @@ def _get_genomics_pathology_data(person: Person, snapshot: OmopSnapshot = None) 
             data['mrd_status'] = value[:50]
 
     mutations = _get_genetic_mutations(person, snapshot).get('genetic_mutations', [])
+    # A recorded negative/no-call is not a detected molecular marker. Legacy
+    # findings without an assessment retain their historical summary behavior.
+    # Status defaults to 'present' for legacy rows, so the filter is safe.
+    mutations = [m for m in mutations
+                 if m.get('assessment') in (None, '', 'present')
+                 and m.get('status', 'present') == 'present']
     if mutations:
         # ``genetic_mutations`` remains the structured canonical projection;
         # molecular_markers is its legacy display-compatible summary.
@@ -3426,34 +3438,46 @@ def _get_performance_data(person: Person, snapshot: OmopSnapshot = None) -> dict
 def _get_genetic_mutations(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data = {}
     snapshot = snapshot or _build_snapshot(person)
+    if 'projection' in snapshot.genomics_cache:
+        return snapshot.genomics_cache['projection']
 
     origin_concepts = {255395001: 'germline', 255461003: 'somatic'}
     interpretation_concepts = {30166007: 'pathogenic', 10828004: 'benign', 42425007: 'vus'}
 
     mutations = []
+    from omop_core.models import FieldConceptMapping
+    from omop_core.services.genomics_catalog import markers, project_priority_variants
+    marker_sources = {'genomics:' + m['key']: m for m in markers()}
+    marker_sources.update({m.source_value: _genomic_patient_fields()[m.field_name]
+        for m in FieldConceptMapping.objects.filter(field_name__in=_genomic_patient_fields()) if m.source_value})
 
     _gen_codes = set(_GENETIC_MUTATION_LOINCS.keys())
     genetic_measurements = [
         m for m in snapshot.measurements
         if (getattr(m.measurement_concept, 'concept_code', None) in _gen_codes
-            or m.measurement_source_value in _gen_codes)
+            or m.measurement_source_value in _gen_codes or m.measurement_source_value in marker_sources)
     ]
 
     for measurement in genetic_measurements:
-        if not measurement.value_as_string:
+        marker = marker_sources.get(measurement.measurement_source_value)
+        if not measurement.value_as_string and _measurement_code(measurement) not in ('36908-2', '81252-9') and not marker:
             continue
         code = _measurement_code(measurement)
         gene = _GENETIC_MUTATION_LOINCS.get(code)
-        if code == '36908-2':
+        if code in ('36908-2', '81252-9') or marker:
             gene = measurement.qualifier_source_value
-        if not gene:
+        if not gene and code not in ('36908-2', '81252-9') and not marker:
             continue
 
+        from omop_core.services.genomics import _read_note_text
         mutation_data = {
-            'gene': gene.lower(),
-            'variant': measurement.value_as_string,
+            'id': measurement.measurement_id,
+            'gene': (gene or '').lower(),
+            'variant': _read_note_text(measurement.value_as_string),
             'test_date': measurement.measurement_date.isoformat() if measurement.measurement_date else None,
         }
+        if marker:
+            mutation_data['marker_key'] = marker['key']
 
         if measurement.qualifier_concept and measurement.qualifier_concept.concept_id in origin_concepts:
             mutation_data['origin'] = origin_concepts[measurement.qualifier_concept.concept_id]
@@ -3461,12 +3485,18 @@ def _get_genetic_mutations(person: Person, snapshot: OmopSnapshot = None) -> dic
         if measurement.value_as_concept and measurement.value_as_concept.concept_id in interpretation_concepts:
             mutation_data['interpretation'] = interpretation_concepts[measurement.value_as_concept.concept_id]
 
-        if measurement.qualifier_source_value and code != '36908-2':
+        if measurement.qualifier_source_value and code not in ('36908-2', '81252-9') and not marker:
             mutation_data['assay_method'] = measurement.qualifier_source_value
 
         mutations.append(mutation_data)
 
-    data['genetic_mutations'] = mutations
+    from omop_core.services.genomics import enrich_variants
+    data['genetic_mutations'] = [v for v in enrich_variants(mutations, snapshot) if v.get('gene')]
+    # Default status to 'present' for legacy rows with no stored status component.
+    for v in data['genetic_mutations']:
+        v.setdefault('status', 'present')
+    data.update(project_priority_variants(data['genetic_mutations']))
+    snapshot.genomics_cache['projection'] = data
     return data
 
 
@@ -3842,7 +3872,10 @@ def _compute_derived_fields(patient_info: PatientRecord, *, apply_formulas=True)
 
     mutations = patient_info.genetic_mutations or []
     patient_info.tp53_disruption = any(
-        m.get('gene', '').lower() == 'tp53' and m.get('interpretation') == 'pathogenic'
+        m.get('gene', '').lower() == 'tp53'
+        and (m.get('interpretation') or '').lower() == 'pathogenic'
+        and m.get('assessment') in (None, '', 'present')
+        and m.get('status', 'present') == 'present'
         for m in mutations
     )
 

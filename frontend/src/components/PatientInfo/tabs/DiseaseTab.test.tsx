@@ -132,11 +132,38 @@ function setupVocabMock({
 const BASE_PROPS = {
   formData: {} as Record<string, unknown>,
   onChange: vi.fn(),
-  onMutationAdd: () => {},
-  onMutationRemove: () => {},
-  onMutationChange: () => {},
   diseaseType: 'myeloma' as const,
 };
+
+describe('DiseaseTab — Genomics owns all gene and mutation editors', () => {
+  beforeEach(async () => {
+    __resetWritableFieldsCache();
+    (globalThis as Record<string, unknown>).__DESCRIPTORS__ = {
+      ...DESCRIPTORS,
+      genetic_mutations: observation('variants', 'json'),
+      molecular_markers: observation('markers', 'string'),
+      tp53_disruption: observation('tp53', 'boolean'),
+      cytogenetic_abnormalities: observation('cytogenetic', 'string'),
+    };
+    await fetchWritableFields();
+    setupVocabMock();
+  });
+
+  it.each(['breast', 'myeloma', 'lymphoma', 'mcl', 'cll'] as const)(
+    '%s keeps disease selection but no genetic editors, even with stored results', diseaseType => {
+      render(<DiseaseTab onChange={vi.fn()} diseaseType={diseaseType} formData={{
+        disease: 'Breast Cancer', genetic_mutations: [{ gene: 'BRCA1', variant: 'c.68_69delAG' }],
+        molecular_markers: 'TP53', tp53_disruption: true, cytogenetic_abnormalities: 'del(17p)',
+      }} />);
+      expect(screen.getByText('Disease')).toBeInTheDocument();
+      for (const label of ['Genetic Mutations', 'Molecular Markers', 'TP53 Disruption', 'Cytogenetic Abnormalities']) {
+        expect(screen.queryByText(label)).not.toBeInTheDocument();
+      }
+      expect(screen.queryByRole('button', { name: 'Add Mutation' })).not.toBeInTheDocument();
+      expect(screen.queryByDisplayValue('c.68_69delAG')).not.toBeInTheDocument();
+    },
+  );
+});
 
 function renderMyeloma(
   formData: Record<string, unknown> = {},

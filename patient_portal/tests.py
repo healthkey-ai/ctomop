@@ -26993,19 +26993,45 @@ class RecordAttestationTest(TestCase):
         self.assertEqual(self.person.validated_by, 'patient@attest.com')
         self.assertIsNotNone(self.person.validation_date)
 
-    # --- 5. Patient can set suppress_demographics_for_others via /me/ ---
-    def test_patient_can_set_suppress_demographics(self):
-        self.client.force_authenticate(user=self.patient_identity)
-        resp = self.client.patch(
-            '/api/patient-info/me/',
-            {'suppress_demographics_for_others': True},
-            format='json',
-        )
-        self.assertEqual(resp.status_code, 200)
-        self.record.refresh_from_db()
-        self.assertTrue(self.record.suppress_demographics_for_others)
+    @override_settings(SERVICE_AUTH_SCOPES="patient/*.read patient/*.write")
+    def test_non_staff_patch_ignores_sensitive_fields_and_saves_email(self):
+        from patient_portal.api.permissions import SERVICE_TOKEN
 
-    # --- 6. Staff/doctor/org_admin can set suppress_demographics_for_others ---
+        fields = {
+            'validated': True,
+            'validated_by': 'Dr. Smith',
+            'validation_date': date(2026, 9, 10),
+            'suppress_demographics_for_others': True,
+        }
+        for instance in (self.person, self.record):
+            for field, value in fields.items():
+                setattr(instance, field, value)
+            instance.save(update_fields=list(fields))
+
+        for token in (None, SERVICE_TOKEN):
+            for endpoint in ('me', str(self.person.person_id)):
+                with self.subTest(token=token, endpoint=endpoint):
+                    self.client.force_authenticate(user=self.patient_identity, token=token)
+                    email = f'{endpoint}-{token or "patient"}@example.test'
+                    resp = self.client.patch(
+                        f'/api/patient-info/{endpoint}/',
+                        {
+                            'validated': False,
+                            'validated_by': 'Self verified',
+                            'validation_date': 'not-a-date',
+                            'suppress_demographics_for_others': False,
+                            'email': email,
+                        },
+                        format='json',
+                    )
+                    self.assertEqual(resp.status_code, 200, resp.data)
+                    for instance in (self.person, self.record):
+                        instance.refresh_from_db()
+                        for field, value in fields.items():
+                            self.assertEqual(getattr(instance, field), value)
+                        self.assertEqual(instance.email, email)
+
+    # --- 6. Staff can set suppress_demographics_for_others ---
     def test_staff_can_set_suppress_demographics(self):
         self.client.force_authenticate(user=self.staff_user)
         resp = self.client.patch(

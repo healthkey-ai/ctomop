@@ -59,3 +59,11 @@ paths = [
   '''omop_core/data/.*\.json$''',
   '''docs/genomics_handoff\.md$''',
 ]
+
+# This genomic marker identifier appears as a catalog key and in its handoff
+# documentation. It is not an API credential; keep all other values scanned.
+[[allowlists]]
+description = "BCL2 amplification catalog identifier"
+targetRules = ["generic-api-key"]
+regexTarget = "secret"
+regexes = ['''^bcl2_amplification$''']

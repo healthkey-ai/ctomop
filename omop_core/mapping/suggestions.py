@@ -25,7 +25,7 @@ that from the source text would overwrite a better answer with a worse one.
 Retrieval then ranking, and the order within retrieval is the point:
 
 **1. UMLS.** CUI bridging is a curated NLM equivalency, so a single standard
-concept ends the pipeline with no model call at all.
+concept wins without a model call, after all enabled searches expose alternatives.
 
 **2. Lexical, for the candidate subset.** The GIN trigram indexes narrow via the
 ``%`` operator; ``similarity()`` then scores only the survivors. Scoring first
@@ -188,6 +188,7 @@ DEFAULT_STRATEGIES = [STRATEGY_UMLS, STRATEGY_LEXICAL, STRATEGY_SEMANTIC]
 # Keep explicit requests from older clients compatible; default runs pass the
 # complete retrieval pool straight to the LLM, without redundant reordering.
 ALL_STRATEGIES = [*DEFAULT_STRATEGIES, STRATEGY_VECTORS]
+RANKING_MODEL = 'claude-opus-5'
 
 
 def _find_source_concept(source_vocabulary_id, source_code):
@@ -360,6 +361,7 @@ def semantic_candidates(source_value, domain_id, limit=CANDIDATE_LIMIT):
         'domain_id': row['concept__domain_id'],
         # Separate from vector_score: retrieving neighbours is not reranking.
         'semantic_score': round(1 - row['distance'], 4),
+        'vector_distance': round(row['distance'], 6),
         'retrieval': STRATEGY_SEMANTIC,
     } for row in sorted(rows, key=lambda r: (r['distance'], r['concept_id']))]
 
@@ -811,14 +813,28 @@ def rank_candidates(source_value, candidates, source_description='', *, source_c
     if require_model_selection:
         fallback_note = 'Ranking model unavailable; expanded search remains unresolved.'
 
+    def unavailable(reason, detail, *, error=None, response=None):
+        # Never log the key, source text, prompt, raw provider body, or exception
+        # message. SDK exceptions can carry request data. These fields distinguish
+        # configuration, authentication, provider, and response failures safely.
+        status_code = getattr(error, 'status_code', None)
+        request_id = getattr(error, 'request_id', None) or getattr(response, '_request_id', None)
+        logger.warning(
+            'Concept ranking unavailable reason=%s model=%s key_configured=%s '
+            'candidate_count=%s error_class=%s status_code=%s request_id=%s stop_reason=%s',
+            reason, RANKING_MODEL, bool(getattr(settings, 'ANTHROPIC_API_KEY', '')),
+            len(candidates), type(error).__name__ if error else None,
+            status_code, request_id, getattr(response, 'stop_reason', None),
+        )
+        return fallback, f'{fallback_note} Details: {detail}'
+
     if not getattr(settings, 'ANTHROPIC_API_KEY', ''):
-        return fallback, fallback_note
+        return unavailable('missing_api_key', 'ANTHROPIC_API_KEY is not configured in the process performing ranking.')
 
     try:
         import anthropic
-    except ImportError:
-        logger.warning('anthropic SDK not installed; falling back to lexical order.')
-        return fallback, fallback_note
+    except ImportError as exc:
+        return unavailable('sdk_unavailable', 'The Anthropic SDK is not installed.', error=exc)
 
     evidence = {
         'source': source_context or {
@@ -830,7 +846,7 @@ def rank_candidates(source_value, candidates, source_description='', *, source_c
     try:
         client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
         response = client.messages.create(
-            model='claude-opus-5',
+            model=RANKING_MODEL,
             # Thinking tokens count against this. At 1024 the response stopped
             # at max_tokens with no text block, json.loads raised, and the
             # ranker silently degraded to the lexical order it exists to fix.
@@ -846,11 +862,33 @@ def rank_candidates(source_value, candidates, source_description='', *, source_c
                 'content': json.dumps(evidence, ensure_ascii=False),
             }],
         )
-    except Exception as exc:                      # noqa: BLE001 - degrade, never fail
-        # A Suggest button that returns nothing because a third party is down is
-        # worse than one that returns a decent guess a curator can correct.
-        logger.warning('Concept ranking failed for %r: %s', source_value, exc)
-        return fallback, fallback_note
+    except Exception as exc:  # noqa: BLE001 - retain fallback, expose a safe reason
+        status_code = getattr(exc, 'status_code', None)
+        reasons = {
+            400: ('invalid_request', 'Anthropic rejected the ranking request (HTTP 400).'),
+            401: ('authentication_failed', 'Anthropic rejected the configured API key (HTTP 401).'),
+            403: ('permission_denied', 'The configured key is not permitted to use the ranking model (HTTP 403).'),
+            404: ('model_not_found', f'Anthropic could not find or grant access to {RANKING_MODEL} (HTTP 404).'),
+            429: ('rate_limited', 'Anthropic rate-limited the ranking request (HTTP 429).'),
+            529: ('provider_overloaded', 'Anthropic is temporarily overloaded (HTTP 529).'),
+        }
+        reason, detail = reasons.get(status_code, (
+            'request_failed', 'The Anthropic ranking request failed; see the server diagnostic log.',
+        ))
+        body = getattr(exc, 'body', None)
+        provider_error = body.get('error', body) if isinstance(body, dict) else None
+        provider_message = provider_error.get('message', '') if isinstance(provider_error, dict) else ''
+        if status_code == 400 and isinstance(provider_message, str) and 'credit balance is too low' in provider_message.lower():
+            reason, detail = (
+                'insufficient_credit',
+                'The Anthropic API account has insufficient credits. Add API credits in '
+                'Anthropic Plans & Billing or configure a funded API key.',
+            )
+        elif type(exc).__name__ == 'APITimeoutError':
+            reason, detail = 'timeout', 'The Anthropic ranking request timed out.'
+        elif type(exc).__name__ == 'APIConnectionError':
+            reason, detail = 'connection_failed', 'The ranking process could not connect to Anthropic.'
+        return unavailable(reason, detail, error=exc)
 
     payload = next(
         (block.text for block in response.content if block.type == 'text'), ''
@@ -863,8 +901,9 @@ def rank_candidates(source_value, candidates, source_description='', *, source_c
     # prompt asks for null, so this is the shape a model most plausibly gets
     # wrong. Degrading is the contract; 500ing the request is not.
     if not isinstance(verdict, dict):
-        logger.warning('Concept ranking returned unusable output for %r.', source_value)
-        return fallback, fallback_note
+        if getattr(response, 'stop_reason', None) == 'max_tokens':
+            return unavailable('output_truncated', 'Anthropic reached the output token limit before returning a ranking.', response=response)
+        return unavailable('invalid_output', 'Anthropic returned no usable ranking JSON.', response=response)
 
     chosen_id = verdict.get('concept_id')
     if chosen_id is None:
@@ -874,11 +913,7 @@ def rank_candidates(source_value, candidates, source_description='', *, source_c
     if chosen is None:
         # The model named something outside the shortlist. Do not follow it --
         # the candidates were domain-scoped and validated, an arbitrary id is not.
-        logger.warning(
-            'Concept ranking chose %s, which was not among the candidates for %r.',
-            chosen_id, source_value,
-        )
-        return fallback, fallback_note
+        return unavailable('candidate_outside_pool', 'Anthropic selected a concept outside the candidate list.', response=response)
 
     return chosen, (
         f'{verdict.get("confidence", "unknown")} confidence: '
@@ -887,14 +922,18 @@ def rank_candidates(source_value, candidates, source_description='', *, source_c
 
 
 def retrieval_pool(*, source_code, source_vocabulary_id, source_text, domain_id,
-                   strategies, lexical_limit=CANDIDATE_LIMIT):  # noqa: C901
+                   strategies, lexical_limit=CANDIDATE_LIMIT, on_candidates=None):  # noqa: C901
     """Candidates for one source code, in the order the ranker should see them.
 
     Returns ``(candidates, umls_cui, definitive)``.  ``definitive`` means UMLS
     bridged the code to exactly one standard concept: an NLM-curated
-    equivalency, so the pipeline stops there and spends no model call.
+    equivalency. Other enabled searches still run to expose alternatives.
     """
-    candidates, umls_cui = [], None
+    candidates, umls_cui, definitive = [], None, False
+
+    def report(strategy, hits):
+        if on_candidates is not None:
+            on_candidates(strategy, [dict(hit) for hit in hits])
 
     # ICD-10 source systems do not determine the destination OMOP domain.
     # Other inputs (such as labs) retain their domain constraint.
@@ -915,30 +954,31 @@ def retrieval_pool(*, source_code, source_vocabulary_id, source_text, domain_id,
 
     if STRATEGY_UMLS in strategies:
         umls_hits, umls_cui = umls_candidates(source_code, source_vocabulary_id, domain_id)
-        if len(umls_hits) == 1:
-            return umls_hits, umls_cui, True
+        definitive = len(umls_hits) == 1
         candidates = list(umls_hits)
+        report(STRATEGY_UMLS, umls_hits)
 
     if STRATEGY_LEXICAL in strategies:
         seen = {c['concept_id'] for c in candidates}
         # UMLS hits stay ahead of lexical ones and are never displaced by a
         # lexical duplicate: a curated equivalency outranks a string overlap,
         # and its umls_score is the evidence the ranker's prompt shows.
-        candidates += [
-            hit for hit in lexical_candidates(
-                source_text or source_code, domain_id, limit=lexical_limit,
-            )
-            if hit['concept_id'] not in seen
-        ]
+        lexical_hits = lexical_candidates(source_text or source_code, domain_id, limit=lexical_limit)
+        report(STRATEGY_LEXICAL, lexical_hits)
+        candidates += [hit for hit in lexical_hits if hit['concept_id'] not in seen]
 
     if STRATEGY_SEMANTIC in strategies:
         # Always search when enabled, even if lexical returned plausible hits:
         # the correct concept can still be absent from that shortlist.
         by_id = {c['concept_id']: c for c in candidates}
-        for hit in semantic_candidates(source_text or source_code, domain_id):
+        semantic_hits = semantic_candidates(source_text or source_code, domain_id)
+        report(STRATEGY_SEMANTIC, semantic_hits)
+        for hit in semantic_hits:
             existing = by_id.get(hit['concept_id'])
             if existing is not None:
                 existing['semantic_score'] = hit['semantic_score']
+                if 'vector_distance' in hit:
+                    existing['vector_distance'] = hit['vector_distance']
             else:
                 candidates.append(hit)
                 by_id[hit['concept_id']] = hit
@@ -960,11 +1000,11 @@ def retrieval_pool(*, source_code, source_vocabulary_id, source_text, domain_id,
         # and lexical fallback precedence instead of comparing unlike scores.
         candidates = umls_tier + lexical_tier + semantic_tier
 
-    return candidates, umls_cui, False
+    return candidates, umls_cui, definitive
 
 
 def _prepare(*, source_code, source_vocabulary_id, source_text, domain_id,
-             strategies, lexical_limit, source_context=None):
+             strategies, lexical_limit, source_context=None, on_candidates=None):
     """Everything for one source code that needs the database, and nothing more.
 
     Split out so the ranking that follows is pure network work and can be run
@@ -973,7 +1013,7 @@ def _prepare(*, source_code, source_vocabulary_id, source_text, domain_id,
     candidates, umls_cui, definitive = retrieval_pool(
         source_code=source_code, source_vocabulary_id=source_vocabulary_id,
         source_text=source_text, domain_id=domain_id,
-        strategies=strategies, lexical_limit=lexical_limit,
+        strategies=strategies, lexical_limit=lexical_limit, on_candidates=on_candidates,
     )
     if source_context is None:
         source_context = build_source_context(
@@ -1228,7 +1268,7 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
     *strategies* controls the pipeline, which is not a waterfall of independent
     tiers but one retrieval and one ranking:
 
-    - ``umls`` — CUI bridge.  A single standard concept ends it with no model call.
+    - ``umls`` — CUI bridge. A unique match wins after other searches finish.
     - ``lexical`` — GIN trigram, the best *lexical_limit* survivors.
     - ``semantic`` — up to ten cosine neighbours, even when lexical has hits.
     - ``vectors`` — reorders those survivors by embedding similarity.
@@ -1296,6 +1336,9 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
             domain_id=mapping.domain_id or (fallback[1] if fallback else ''),
             strategies=strategies,
             lexical_limit=lexical_limit,
+            on_candidates=lambda strategy, candidates: emit(
+                'candidates', **source(mapping), strategy=strategy, candidates=candidates,
+            ),
             source_context=build_source_context(
                 source_code=mapping.source_code, vocabulary_id=mapping.source_vocabulary_id,
                 description=mapping.source_code_description, source_concept=source_concept,
@@ -1318,7 +1361,7 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
 
     def ranked(job):
         emit('ranked', **source(job['mapping']), suggested=job['chosen'],
-             note=job['note'], strategy_used=job['strategy_used'])
+             note=job['note'], strategy_used=job['strategy_used'], candidates=job['candidates'])
 
     rank_and_expand_jobs(jobs, on_ranked=ranked)
     report('writing', 0)
@@ -1454,7 +1497,7 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
 
 def suggest_one_mapping(source_code, source_vocabulary_id, omop_table, *,
                         source_description='', strategies=None,
-                        lexical_limit=CANDIDATE_LIMIT):
+                        lexical_limit=CANDIDATE_LIMIT, activity=None):
     """Run the shared retrieval and ranking pipeline for one dialog row."""
     if strategies is None:
         strategies = list(DEFAULT_STRATEGIES)
@@ -1468,16 +1511,28 @@ def suggest_one_mapping(source_code, source_vocabulary_id, omop_table, *,
     description = source_description or (
         source_concept.concept_name if source_concept else umls_name
     )
+    def emit(stage, **details):
+        if activity is not None:
+            activity({
+                "stage": stage, "source_code": source_code,
+                "source_vocabulary_id": source_vocabulary_id, **details,
+            })
+
+    emit("retrieving")
     job = _prepare(
         source_code=source_code, source_vocabulary_id=source_vocabulary_id,
         source_text=description, domain_id=domain_id,
         strategies=strategies, lexical_limit=lexical_limit,
+        on_candidates=lambda strategy, candidates: emit(
+            "candidates", strategy=strategy, candidates=candidates,
+        ),
         source_context=build_source_context(
             source_code=source_code, vocabulary_id=source_vocabulary_id,
             description=source_description, source_concept=source_concept,
             umls_name=umls_name, domain_id=domain_id, omop_table=omop_table,
         ),
     )
+    emit("ranking")
     rank_and_expand_jobs([job])
 
     from omop_core.services.athena_mapping_guard import (
@@ -1493,6 +1548,7 @@ def suggest_one_mapping(source_code, source_vocabulary_id, omop_table, *,
         'strategy_used': job['strategy_used'],
         'umls_cui': job['umls_cui'],
         'candidates_considered': len(job['candidates']),
+        'candidates': job['candidates'],
         'vector_reranked': job['vector_reranked'],
         'query_expansion': job.get('query_expansion'),
     }

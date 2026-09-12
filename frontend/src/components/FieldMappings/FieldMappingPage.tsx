@@ -33,6 +33,7 @@ interface FieldDescriptor {
     unit: string;
     omop_table: string;
     status: string;
+    provenance?: "system_generated" | "curator" | "";
     reviewer: string | null;
     reviewed_at: string | null;
     notes: string;
@@ -370,6 +371,7 @@ export default function FieldMappingPage() {
       <table className="min-w-full text-sm">
         <thead>
           <tr className="bg-gray-50 text-left text-[11px] uppercase text-gray-500">
+            <th className="px-3 py-2">Provenance</th>
             <th className="px-3 py-2">Field Name</th>
             <th className="px-3 py-2">
               <span className="inline-flex items-center gap-1">
@@ -385,6 +387,11 @@ export default function FieldMappingPage() {
         <tbody className="divide-y divide-gray-100">
           {fields.map((f) => (
             <tr key={f.field_name} className="group hover:bg-gray-50/50">
+              <td className="px-3 py-2 text-xs whitespace-nowrap">
+                {f.mapping?.provenance === "system_generated" ? "System Generated"
+                  : f.mapping?.provenance === "curator" ? "Curator"
+                  : f.mapping ? "Unrecorded" : "—"}
+              </td>
               <td className="px-3 py-2 font-mono text-xs">{f.field_name}</td>
               <td className="px-3 py-2">
                 <div className="flex items-center gap-1.5">

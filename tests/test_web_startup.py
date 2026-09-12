@@ -22,7 +22,6 @@ def test_web_startup_commands_and_failure_gates(tmp_path, failed_command):
         shim = tmp_path / executable
         shim.write_text("#!/bin/sh\n" + body)
         shim.chmod(0o755)
-    gdrive_url = "https://drive.google.com/drive/folders/fake-test-id"
     result = subprocess.run(
         ["bash", str(ROOT / "start.sh")],
         cwd=ROOT,
@@ -31,7 +30,7 @@ def test_web_startup_commands_and_failure_gates(tmp_path, failed_command):
             "PATH": f"{tmp_path}:{os.environ['PATH']}",
             "STARTUP_LOG": str(log),
             "FAIL_COMMAND": failed_command or "",
-            "ATHENA_VOCABULARY_GDRIVE_URL": gdrive_url,
+            "ATHENA_VOCABULARY_GDRIVE_URL": "https://example.test/athena",
         },
         capture_output=True,
         text=True,
@@ -43,7 +42,7 @@ def test_web_startup_commands_and_failure_gates(tmp_path, failed_command):
             assert command.split()[1] in get_commands(), command
     expected = [
         "manage.py check --deploy --fail-level ERROR",
-        f"manage.py prepare_production_database --gdrive {gdrive_url}",
+        "manage.py prepare_production_database --gdrive https://example.test/athena",
         "manage.py setup_admin",
         "gunicorn ctomop.wsgi:application",
     ]

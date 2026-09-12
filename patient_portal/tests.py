@@ -10969,6 +10969,19 @@ class ServiceTokenOmopAccessTest(TestCase):
         SERVICE_AUTH_TOKEN='test-service-secret',
         SERVICE_AUTH_SCOPES='patient/*.read system/etl.write',
     )
+    def test_etl_grant_can_refresh_patient_record(self):
+        """system/etl.write must be able to POST /refresh/ (#1170)."""
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION='Bearer test-service-secret')
+        response = client.post(
+            f'/api/v1/patient-records/{self.person_a.person_id}/refresh/')
+        self.assertEqual(response.status_code, 202, response.data)
+        self.assertIn('task_id', response.data)
+
+    @override_settings(
+        SERVICE_AUTH_TOKEN='test-service-secret',
+        SERVICE_AUTH_SCOPES='patient/*.read system/etl.write',
+    )
     def test_etl_capability_is_not_a_general_write_grant(self):
         client = APIClient()
         client.credentials(HTTP_AUTHORIZATION='Bearer test-service-secret')

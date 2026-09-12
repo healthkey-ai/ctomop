@@ -10,6 +10,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Detect async e2e changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      async_e2e: ${{ steps.filter.outputs.async_e2e }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history supports PR merge-base and deployment push diffs.
+          # The detector only reads filenames; no LFS download is needed.
+          fetch-depth: 0
+          lfs: false
+      - id: filter
+        run: python3 .github/scripts/async_e2e_changes.py
+
   backend:
     name: Backend tests
     runs-on: ubuntu-latest
@@ -89,6 +106,12 @@ jobs:
 
   e2e:
     name: Async derivation e2e
+    needs: changes
+    # If detection fails, run the tests rather than silently losing coverage.
+    # Deployment callers use their push diff, so frontend-only merges skip too.
+    if: >-
+      !cancelled() &&
+      (needs.changes.result != 'success' || needs.changes.outputs.async_e2e == 'true')
     runs-on: ubuntu-latest
 
     services:

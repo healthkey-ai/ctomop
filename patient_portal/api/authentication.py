@@ -268,10 +268,14 @@ class ServiceTokenAuthentication(BaseAuthentication):
             settings.SERVICE_AUTH_TOKENS, settings.SERVICE_AUTH_TOKEN,
             settings.SERVICE_AUTH_SCOPES,
         )
-        matched = None
-        for secret, credential in credentials:
-            if hmac.compare_digest(header[7:].encode(), secret.encode()):
-                matched = credential
+        from patient_portal.service_applications import stored_credential, check_environment_fallback
+        matched = stored_credential(header[7:])
+        if matched is None:
+            for secret, credential in credentials:
+                if hmac.compare_digest(header[7:].encode(), secret.encode()):
+                    matched = credential
+            if matched is not None:
+                check_environment_fallback(matched)
         if matched is None:
             return None
 

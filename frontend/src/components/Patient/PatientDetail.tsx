@@ -1,9 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { ArrowLeft, Check, AlertCircle, ChevronDown, Download } from "lucide-react";
+import { ArrowLeft, Check, AlertCircle, ChevronDown, Download, ShieldCheck } from "lucide-react";
 import api from "@/api/axios";
 import { fetchWritableFields, LIFECYCLE, type FieldDescriptors } from "@/hooks/useWritableFields";
-import { writeProfileFields, type ProfileEdit } from "@/api/clinicalFacts";
+// Profile fields now write through PatientRecord PATCH alongside clinical fields.
 import { getActiveBranding } from "@/config/branding";
 import type { User } from "@/hooks/useAuth";
 import DeleteAccountDialog from "./DeleteAccountDialog";
@@ -20,9 +20,70 @@ import BloodTab from "@/components/PatientInfo/tabs/BloodTab";
 import LabsTab from "@/components/PatientInfo/tabs/LabsTab";
 import BehaviorTab from "@/components/PatientInfo/tabs/BehaviorTab";
 import WearableTab from "@/components/PatientInfo/tabs/WearableTab";
+import ClinicalSummaryTab from "@/components/PatientInfo/tabs/ClinicalSummaryTab";
 import PatientOmopTab from "./PatientOmopTab";
+import { confirmRecord } from "@/api/clinicalFacts";
 
 type SaveStatus = "idle" | "pending" | "saving" | "saved" | "error";
+
+function RecordConfirmation({
+  validated,
+  validationDate,
+  onConfirm,
+}: {
+  validated: boolean;
+  validationDate: string | null;
+  onConfirm: () => Promise<void>;
+}) {
+  const [confirming, setConfirming] = useState(false);
+
+  const handleConfirm = async () => {
+    setConfirming(true);
+    try {
+      await onConfirm();
+    } finally {
+      setConfirming(false);
+    }
+  };
+
+  if (validated) {
+    return (
+      <div className="mb-6 flex items-center gap-3 rounded-lg border border-green-200 bg-green-50 px-4 py-3">
+        <ShieldCheck className="h-5 w-5 text-green-600" />
+        <span className="text-sm text-green-800">
+          Record confirmed{validationDate ? ` on ${validationDate}` : ''}
+        </span>
+        <button
+          onClick={handleConfirm}
+          disabled={confirming}
+          className="ml-auto text-sm text-green-700 underline hover:text-green-900 disabled:opacity-50"
+        >
+          Re-confirm
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mb-6 rounded-lg border border-blue-200 bg-blue-50 px-5 py-4">
+      <div className="flex items-start gap-3">
+        <ShieldCheck className="mt-0.5 h-5 w-5 text-blue-600" />
+        <div className="flex-1">
+          <p className="text-sm font-medium text-blue-900">
+            Confirm that your health record is accurate and up to date
+          </p>
+          <button
+            onClick={handleConfirm}
+            disabled={confirming}
+            className="mt-3 inline-flex items-center gap-2 rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+          >
+            {confirming ? 'Confirming...' : 'Confirm Record'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function ErrorToast({ message, onDismiss }: { message: string; onDismiss: () => void }) {
   useEffect(() => {
@@ -338,9 +399,9 @@ export default function PatientDetail({
       const { patient_name: _echoed, ...info } = data.info as Record<string, unknown>;
       const renamed = !!data.name && data.name !== patientNameRef.current;
 
-      // All clinical edits go through PatientRecord PATCH. The backend
-      // handles OMOP projection for fields with approved mappings.
-      // Profile fields (person-targeted) go to the persons endpoint.
+      // All fields — clinical and profile alike — go through PatientRecord
+      // PATCH. The backend projects profile fields to Person/Location and
+      // clinical fields to OMOP tables after the PATCH lands.
       // Fail closed: an empty descriptor makes nothing look writable, so a
       // descriptor we could not fetch is a failed save, reported as one.
       let descriptors: FieldDescriptors;
@@ -353,20 +414,12 @@ export default function PatientDetail({
         );
       }
       const baseline = patientInfoRef.current ?? {};
-      // Profile fields (target === 'person') go to the persons endpoint.
-      // Everything else — clinical fields (with or without OMOP projection) —
-      // goes to PatientRecord PATCH. The backend projects mapped fields into
-      // OMOP tables after the PATCH lands.
-      const profileEdits: ProfileEdit[] = [];
       const patchFields: Record<string, unknown> = {};
 
       for (const [f, v] of Object.entries(info)) {
         if (LIFECYCLE.has(f) || v === baseline[f]) continue;
         const desc = descriptors[f];
-        if (desc?.writable && desc.target === 'person') {
-          profileEdits.push({ field: f, descriptor: desc, value: v });
-        } else if (desc?.writable && desc.target === 'patient_record') {
-          // Direct or mapped — all go through PatientRecord PATCH.
+        if (desc?.writable && desc.target === 'patient_record') {
           patchFields[f] = v;
         } else if (!(f in descriptors)) {
           // Unknown to the descriptor (e.g. custom fields) — PATCH them too.
@@ -374,15 +427,7 @@ export default function PatientDetail({
         }
       }
 
-      // Person profile fields go in a single request (latitude/longitude pair).
-      if (profileEdits.length) {
-        await writeProfileFields(personId, profileEdits);
-        for (const { field } of profileEdits) {
-          if (patientInfoRef.current) patientInfoRef.current[field] = info[field];
-        }
-      }
-
-      // All clinical + unmapped fields ride the PatientRecord PATCH.
+      // All fields ride the single PatientRecord PATCH.
       if (renamed || Object.keys(patchFields).length > 0) {
         await api.patch(
           `/patient-info/${personId}/`,
@@ -484,6 +529,37 @@ export default function PatientDetail({
     scheduleAutoSave(updated, editedNameRef.current);
   }, [scheduleAutoSave]);
 
+  const handleMutationAdd = useCallback(() => {
+    const raw = pendingDataRef.current?.info.genetic_mutations
+      ?? editedInfoRef.current.genetic_mutations ?? [];
+    const mutations = [
+      ...(raw as { gene: string; mutation: string; origin: string; interpretation: string }[]),
+      { gene: "", mutation: "", origin: "", interpretation: "" },
+    ];
+    handleFieldChange("genetic_mutations", mutations);
+  }, [handleFieldChange]);
+
+  const handleMutationRemove = useCallback((index: number) => {
+    const raw = pendingDataRef.current?.info.genetic_mutations
+      ?? editedInfoRef.current.genetic_mutations ?? [];
+    const mutations = [
+      ...(raw as { gene: string; mutation: string; origin: string; interpretation: string }[]),
+    ];
+    mutations.splice(index, 1);
+    handleFieldChange("genetic_mutations", mutations);
+  }, [handleFieldChange]);
+
+  const handleMutationChange = useCallback((index: number, field: string, value: string) => {
+    const raw = pendingDataRef.current?.info.genetic_mutations
+      ?? editedInfoRef.current.genetic_mutations ?? [];
+    const mutations = [
+      ...(raw as { gene: string; mutation: string; origin: string; interpretation: string }[]),
+    ];
+    mutations[index] = { ...mutations[index], [field]: value };
+    if (field === "gene") mutations[index].mutation = "";
+    handleFieldChange("genetic_mutations", mutations);
+  }, [handleFieldChange]);
+
   const handleNameChange = useCallback((name: string) => {
     setEditedName(name);
     scheduleAutoSave(pendingDataRef.current?.info ?? editedInfoRef.current, name);
@@ -513,27 +589,7 @@ export default function PatientDetail({
     }
   }, [personId]);
 
-  const handleMutationAdd = useCallback(() => {
-    const raw = pendingDataRef.current?.info?.genetic_mutations ?? editedInfoRef.current?.genetic_mutations ?? [];
-    const m = [...(raw as { gene: string; mutation: string; origin: string; interpretation: string }[])];
-    m.push({ gene: "", mutation: "", origin: "", interpretation: "" });
-    handleFieldChange("genetic_mutations", m);
-  }, [handleFieldChange]);
 
-  const handleMutationRemove = useCallback((i: number) => {
-    const raw = pendingDataRef.current?.info?.genetic_mutations ?? editedInfoRef.current?.genetic_mutations ?? [];
-    const m = [...(raw as { gene: string; mutation: string; origin: string; interpretation: string }[])];
-    m.splice(i, 1);
-    handleFieldChange("genetic_mutations", m);
-  }, [handleFieldChange]);
-
-  const handleMutationChange = useCallback((i: number, field: string, value: string) => {
-    const raw = pendingDataRef.current?.info?.genetic_mutations ?? editedInfoRef.current?.genetic_mutations ?? [];
-    const m = [...(raw as { gene: string; mutation: string; origin: string; interpretation: string }[])];
-    m[i] = { ...m[i], [field]: value };
-    if (field === "gene") m[i].mutation = "";
-    handleFieldChange("genetic_mutations", m);
-  }, [handleFieldChange]);
 
   const handleZipcodeChange = useCallback(async (zipcode: string) => {
     handleFieldChange("postal_code", zipcode);
@@ -618,7 +674,7 @@ export default function PatientDetail({
   const canViewOmop = !patientMode && !!(user?.is_staff || user?.is_org_admin);
   const coreTabs = ["General", getDiseaseTabLabel(), "Treatment", "Blood", "Labs"];
   const afterLabsTabs = patientMode ? ["Allergies"] : [];
-  const trailingTabs = ["Behavior", "Wearables"];
+  const trailingTabs = ["Behavior", "Wearables", "Summary"];
   const surveyTabs = patientMode ? ["Surveys"] : [];
   const adminTabs = canViewOmop ? ["OMOP"] : [];
   const tabLabels = [...coreTabs, ...afterLabsTabs, ...trailingTabs, ...surveyTabs, ...adminTabs];
@@ -627,7 +683,8 @@ export default function PatientDetail({
   const allergiesIdx = patientMode ? coreTabs.length : -1;
   const behaviorIdx = coreTabs.length + afterLabsTabs.length;
   const wearablesIdx = behaviorIdx + 1;
-  const surveysIdx = patientMode ? wearablesIdx + 1 : -1;
+  const summaryIdx = wearablesIdx + 1;
+  const surveysIdx = patientMode ? summaryIdx + 1 : -1;
   const omopIdx = canViewOmop ? tabLabels.length - 1 : -1;
 
   const tabDescriptions: Record<number, string> = {
@@ -639,6 +696,7 @@ export default function PatientDetail({
     ...(allergiesIdx >= 0 ? { [allergiesIdx]: "Known allergies and intolerances from your health records." } : {}),
     [behaviorIdx]: "Lifestyle, socioeconomic, and behavioural health factors.",
     [wearablesIdx]: "30 day summaries derived from synced OMOP data.",
+    [summaryIdx]: "Read-only overview of all clinical data grouped by domain.",
     ...(surveysIdx >= 0 ? { [surveysIdx]: "Surveys assigned to you by your care team." } : {}),
     ...(omopIdx >= 0 ? { [omopIdx]: "Raw OMOP rows associated with this patient." } : {}),
   };
@@ -779,13 +837,43 @@ export default function PatientDetail({
 
               <div key={activeTab} className="animate-tab-in px-8 pb-10">
                 {activeTab === 0 && (
-                  <GeneralTab
-                    formData={editedInfo}
-                    onChange={handleFieldChange}
-                    editedName={editedName}
-                    onNameChange={handleNameChange}
-                    onZipcodeChange={handleZipcodeChange}
-                  />
+                  <>
+                    {patientMode && (
+                      <RecordConfirmation
+                        validated={!!editedInfo.validated}
+                        validationDate={editedInfo.validation_date as string | null}
+                        onConfirm={async () => {
+                          try {
+                            const result = await confirmRecord();
+                            setEditedInfo((prev) => ({
+                              ...prev,
+                              validated: result.validated,
+                              validated_by: result.validated_by,
+                              validation_date: result.validation_date,
+                            }));
+                            setPatientInfo((prev) =>
+                              prev ? {
+                                ...prev,
+                                validated: result.validated,
+                                validated_by: result.validated_by,
+                                validation_date: result.validation_date,
+                              } : prev,
+                            );
+                          } catch {
+                            setSaveErrorMsg('Failed to confirm record. Please try again.');
+                          }
+                        }}
+                      />
+                    )}
+                    <GeneralTab
+                      formData={editedInfo}
+                      onChange={handleFieldChange}
+                      editedName={editedName}
+                      onNameChange={handleNameChange}
+                      onZipcodeChange={handleZipcodeChange}
+                      patientMode={patientMode}
+                    />
+                  </>
                 )}
                 {activeTab === 1 && (
                   <DiseaseTab
@@ -825,6 +913,7 @@ export default function PatientDetail({
                 {allergiesIdx >= 0 && activeTab === allergiesIdx && <AllergyList user={user ?? null} />}
                 {activeTab === behaviorIdx && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} />}
                 {activeTab === wearablesIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} />}
+                {activeTab === summaryIdx && <ClinicalSummaryTab formData={editedInfo} onNavigateToLabs={() => setActiveTab(4)} />}
                 {surveysIdx >= 0 && activeTab === surveysIdx && <PatientSurveys user={user ?? null} />}
                 {omopIdx >= 0 && activeTab === omopIdx && personId && <PatientOmopTab personId={personId} />}
               </div>

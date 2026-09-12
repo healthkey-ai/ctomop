@@ -6,7 +6,7 @@
  * writable and the rest are refused for three different reasons, so this is the
  * tab where "render what the server says" has to mean more than one thing.
  */
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import GeneralTab from './GeneralTab';
 import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
@@ -45,10 +45,9 @@ const DESCRIPTORS: Record<string, unknown> = {
   },
   email: { kind: 'profile', writable: true, target: 'person', payload_field: 'email', value_kind: 'string' },
   city: { kind: 'profile', writable: true, target: 'person', payload_field: 'city', value_kind: 'string' },
-  // Writable only while empty, so not writable as far as an editor is concerned.
   date_of_birth: {
-    kind: 'profile', writable: false, fill_if_empty: true, target: 'person',
-    reason: 'Set on the Person record, and only while it is empty — this endpoint never overwrites an existing value.',
+    kind: 'direct', writable: true, target: 'patient_record',
+    projection_target: 'person', value_kind: 'date',
   },
   // OMOP measurements — these do carry a date.
   weight: measurement('29463-7'),
@@ -75,11 +74,14 @@ beforeEach(() => {
   mockGet.mockResolvedValue({ data: DESCRIPTORS });
 });
 
-function renderTab(formData: Record<string, unknown> = {}) {
+function renderTab(
+  formData: Record<string, unknown> = {},
+  onChange: (field: string, value: unknown) => void = vi.fn(),
+) {
   return render(
     <GeneralTab
       formData={formData}
-      onChange={vi.fn()}
+      onChange={onChange}
       editedName="Alishia Howell"
       onNameChange={vi.fn()}
       onZipcodeChange={vi.fn()}
@@ -126,15 +128,20 @@ describe('GeneralTab', () => {
     expect(screen.queryByTestId('reason-gender')).not.toBeInTheDocument();
   });
 
-  it('explains a field that is fillable only while empty', async () => {
-    // The endpoint never overwrites a date of birth, so an editable box would
-    // lie about the outcome: the save would succeed and change nothing.
-    renderTab({ date_of_birth: '1970-01-01' });
+  it('renders date of birth as an editable calendar control', async () => {
+    const onChange = vi.fn();
+    renderTab({ date_of_birth: '1970-01-01' }, onChange);
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
 
-    expect(screen.getByTestId('reason-date_of_birth')).toHaveTextContent(
-      /only while it is empty/i,
-    );
+    const input = screen.getByText('Date of Birth').parentElement?.parentElement
+      ?.querySelector('input') as HTMLInputElement;
+    expect(input).toBeEnabled();
+    expect(input).toHaveAttribute('type', 'date');
+    expect(input).toHaveValue('1970-01-01');
+    expect(screen.queryByTestId('reason-date_of_birth')).not.toBeInTheDocument();
+
+    fireEvent.change(input, { target: { value: '1971-02-03' } });
+    expect(onChange).toHaveBeenCalledWith('date_of_birth', '1971-02-03');
   });
 
   it('explains a computed field rather than offering it', async () => {
@@ -193,9 +200,23 @@ describe('GeneralTab', () => {
 
     for (const title of ['Patient Details', 'Location', 'Race & Ethnicity',
                          'Clinical Summary', 'Medical History',
-                         'Infection Status', 'Physical Measurements']) {
+                         'Infection Status', 'Physical Measurements', 'End of Life']) {
       expect(screen.getByText(title)).toBeInTheDocument();
     }
+  });
+
+  it('puts death date at the bottom of the tab', async () => {
+    renderTab({ death_date: '2025-02-01' });
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    const deathDate = screen.getByText('Death Date').parentElement?.parentElement
+      ?.querySelector('input') as HTMLInputElement;
+    const physicalMeasurements = screen.getByText('Physical Measurements');
+    expect(
+      physicalMeasurements.compareDocumentPosition(deathDate)
+      & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(deathDate).toHaveAttribute('type', 'date');
   });
 });
 

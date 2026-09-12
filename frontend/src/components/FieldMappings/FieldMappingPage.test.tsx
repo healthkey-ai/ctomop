@@ -244,6 +244,24 @@ describe("FieldMappingPage", () => {
     });
   });
 
+  it("shows mapping provenance in the first column", async () => {
+    mockGet.mockImplementation((url: string) => Promise.resolve({ data:
+      url === "/v1/field-mappings/" ? ["system_generated", "curator", ""].map((provenance, i) => ({
+        ...MOCK_DESCRIPTORS[0], field_name: `origin_${i}`, tab: "general",
+        mapping: { id: i + 1, provenance, status: "proposed", concept_id: null,
+          concept_name: "", vocabulary_id: "", concept_code: "", omop_table: "measurement",
+          unit: "", reviewer: null, reviewed_at: null, notes: "" },
+      })) : {} }));
+    renderPage();
+    for (const [i, label] of ["System Generated", "Curator", "Unrecorded"].entries()) {
+      const field = await screen.findByText(`origin_${i}`);
+      const row = field.closest("tr")!;
+      expect(within(row).getAllByRole("cell")[0]).toHaveTextContent(label);
+      const table = row.closest("table")!;
+      expect(within(table).getAllByRole("columnheader")[0]).toHaveTextContent("Provenance");
+    }
+  });
+
   it("renders field table with tab bar and category sections", async () => {
     renderPage();
     await waitFor(() => {

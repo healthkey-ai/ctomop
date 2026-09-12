@@ -326,35 +326,21 @@ describe('writeClinicalFact — supersede targeting', () => {
 });
 
 describe('writeFieldValue — routing by target', () => {
-  const PROFILE = {
-    kind: 'profile', writable: true, target: 'person',
+  const DIRECT_PROFILE = {
+    kind: 'direct', writable: true, target: 'patient_record',
+    projection_target: 'person',
     person_field: 'gender_concept + gender_source_value',
     payload_field: 'gender', value_kind: 'string',
   } as unknown as FieldDescriptor;
 
-  it('sends a profile field to the persons endpoint, not an observation', async () => {
-    // This POSTed an Observation with concept, type and source value all
-    // undefined, and never touched Person. `target: 'person'` passed the
-    // `!descriptor.target` guard and then fell through to the observation branch.
-    await writeFieldValue(261, 'gender', PROFILE, 'female');
-
+  it('refuses a patient_record target — profile fields go through doSave', async () => {
+    // Profile fields now target patient_record and are handled by the PATCH
+    // in doSave, not by writeFieldValue.
+    await expect(
+      writeFieldValue(261, 'gender', DIRECT_PROFILE, 'female'),
+    ).rejects.toThrow(/writes directly to PatientRecord/);
     expect(mockPost).not.toHaveBeenCalled();
-    expect(mockPatch).toHaveBeenCalledWith('/v1/persons/261/', { gender: 'female' });
-  });
-
-  it('keys on payload_field, not on the prose in person_field', async () => {
-    const city = {
-      kind: 'profile', writable: true, target: 'person',
-      person_field: 'Location.city', payload_field: 'city', value_kind: 'string',
-    } as unknown as FieldDescriptor;
-    await writeFieldValue(261, 'city', city, 'Boston');
-
-    expect(mockPatch).toHaveBeenCalledWith('/v1/persons/261/', { city: 'Boston' });
-  });
-
-  it('clears with null rather than empty string', async () => {
-    await writeFieldValue(261, 'gender', PROFILE, '');
-    expect(mockPatch).toHaveBeenCalledWith('/v1/persons/261/', { gender: null });
+    expect(mockPatch).not.toHaveBeenCalled();
   });
 
   it('still routes a measurement to the OMOP endpoint', async () => {
@@ -364,10 +350,10 @@ describe('writeFieldValue — routing by target', () => {
     }));
   });
 
-  it('refuses a target writeClinicalFact cannot write instead of mis-posting', async () => {
+  it('refuses a target writeClinicalFact cannot write', async () => {
     await expect(
-      writeClinicalFact(261, 'gender', PROFILE, 'female'),
-    ).rejects.toThrow(/writes to person/);
+      writeClinicalFact(261, 'gender', DIRECT_PROFILE, 'female'),
+    ).rejects.toThrow(/writes to patient_record/);
     expect(mockPost).not.toHaveBeenCalled();
   });
 });

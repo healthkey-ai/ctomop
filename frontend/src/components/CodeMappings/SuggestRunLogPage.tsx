@@ -1,3 +1,4 @@
+import type { SuggestCandidate } from "./SuggestCandidates";
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import api from "@/api/axios";
@@ -18,6 +19,8 @@ type Activity = Partial<Source> & {
   note?: string;
   suggested?: { concept_id: number; concept_name: string; vocabulary_id: string; concept_code: string } | null;
   candidates_considered?: number;
+  candidates?: SuggestCandidate[];
+  strategy?: string;
   strategy_used?: string | null;
   vector_reranked?: boolean;
   umls_cui?: string | null;
@@ -47,6 +50,7 @@ const labels: Record<string, string> = {
   selected: "Selected codes, in processing order",
   retrieving: "Searching for candidates",
   retrieved: "Candidate search complete",
+  candidates: "Retrieved candidates",
   ranking: "Ranking candidates",
   ranked: "Ranking decision",
   result: "Result",
@@ -122,6 +126,14 @@ export default function SuggestRunLogPage() {
           {event.source_code && <p className="mt-2 font-medium">{event.source_vocabulary_id || "Uncoded"}:{event.source_code}
             {" · "}Seen {event.occurrences}
             {(event.source_description || event.source_code_description) && ` — ${event.source_description || event.source_code_description}`}</p>}
+          {event.candidates && <div className="mt-2">
+            {event.strategy && <p className="font-medium">{event.strategy === "umls" ? "UMLS" : event.strategy}</p>}
+            {!event.candidates.length && <p>No matches</p>}
+            <ul className="list-inside list-disc">{event.candidates.map(candidate => <li key={candidate.concept_id}>
+              {candidate.vocabulary_id}:{candidate.concept_code} — {candidate.concept_name} (OMOP {candidate.concept_id})
+              {candidate.vector_distance != null && ` · Vector distance ${candidate.vector_distance.toFixed(4)}`}
+            </li>)}</ul>
+          </div>}
           {event.candidates_considered !== undefined && <p className="mt-1 text-slate-600">{event.candidates_considered} candidate(s)
             {event.umls_cui && ` · UMLS ${event.umls_cui}`}{event.vector_reranked && " · Vector reranked"}</p>}
           {(event.stage === "ranked" || event.stage === "result") && <p className="mt-2">

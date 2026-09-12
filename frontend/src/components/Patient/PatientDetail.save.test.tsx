@@ -5,7 +5,8 @@
  * is replaced by a single write path: all writable fields land on PatientRecord,
  * and the backend projects mapped fields into OMOP tables.
  *
- * Profile fields (target === 'person') still go to the persons endpoint.
+ * Profile fields (target === 'patient_record' with projection_target) also go
+ * through the same PATCH — the backend projects them to Person/Location.
  *
  * The rule these pin: send only changed, writable fields in the PATCH. Lifecycle
  * columns are never sent, aliases are never sent, and unchanged values are never
@@ -29,17 +30,13 @@ vi.mock('@/hooks/useVocabulary', () => ({
   useVocabulary: () => ({ options: [], source: null, loading: false }),
 }));
 
-vi.mock('@/api/clinicalFacts', async () => {
-  const actual = await vi.importActual<typeof import('@/api/clinicalFacts')>(
-    '@/api/clinicalFacts',
-  );
-  return { ...actual, writeProfileFields: vi.fn().mockResolvedValue({}) };
-});
-
 import api from '@/api/axios';
-import { writeProfileFields } from '@/api/clinicalFacts';
 
 const DESCRIPTORS = {
+  date_of_birth: {
+    kind: 'direct', writable: true, target: 'patient_record',
+    projection_target: 'person', value_kind: 'date',
+  },
   anc_thousand_per_ul: {
     kind: 'direct', writable: true, target: 'patient_record',
     value_kind: 'number',
@@ -67,6 +64,7 @@ const DESCRIPTORS = {
 const PATIENT = {
   person_id: 261,
   patient_name: 'Alishia Tawny Howell',
+  date_of_birth: '1970-01-01',
   anc_thousand_per_ul: 3.1,
   absolute_neutrophile_count: '3.10',
   hemoglobin_g_dl: 12.5,
@@ -119,6 +117,14 @@ function patchBody() {
 }
 
 describe('PatientDetail save — the edit, not the record', () => {
+  it('routes a date-of-birth correction through the PatientRecord PATCH', async () => {
+    await renderAndLoad();
+    await editAndSave('1970-01-01', '1971-02-03');
+
+    await waitFor(() => expect(api.patch).toHaveBeenCalled());
+    expect(patchBody()).toEqual({ date_of_birth: '1971-02-03' });
+  });
+
   it('routes a clinical edit to the PatientRecord PATCH', async () => {
     await renderAndLoad();
     await openBloodTab();
@@ -173,7 +179,6 @@ describe('PatientDetail save — the edit, not the record', () => {
     await editAndSave('3.1', '5.5');
 
     await waitFor(() => expect(api.patch).toHaveBeenCalled());
-    expect(writeProfileFields).not.toHaveBeenCalled();
   });
 
   it('does not PATCH at all when the descriptor cannot be fetched', async () => {
@@ -191,7 +196,6 @@ describe('PatientDetail save — the edit, not the record', () => {
     await editAndSave('howell@example.org', 'a.howell@example.org');
 
     expect(api.patch).not.toHaveBeenCalled();
-    expect(writeProfileFields).not.toHaveBeenCalled();
   });
 
   it('surfaces the rejected field names from a read-only refusal', async () => {

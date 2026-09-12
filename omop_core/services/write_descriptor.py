@@ -1,9 +1,9 @@
-"""Which PatientRecord fields a client may write, and the OMOP fact to write instead.
+"""Which PatientRecord fields a client may write and how they project to OMOP.
 
-`PatientRecord` is a derived read model with no writable clinical columns, so an
-editor cannot patch it. It has to write the underlying OMOP fact and let derivation
-follow. Doing that needs per-field knowledge the client does not have: which table,
-which concept, which unit.
+User-entered values land on `PatientRecord` first. When a reviewed mapping exists,
+the same PATCH also projects an OMOP fact with its table, concept, type, source and
+unit metadata. Computed projections remain read-only and direct fields without a
+complete mapping remain safely editable on PatientRecord.
 
 Serving that from the server rather than hardcoding it in the client is deliberate.
 `concept_id` is resolved from the vocabulary tables and moves with vocabulary
@@ -11,10 +11,8 @@ releases, so a TypeScript copy would drift silently and start writing facts agai
 stale concepts. It also means a field becomes editable the moment its mapping lands
 here — no frontend release.
 
-Coverage is partial and openly reported: most projection fields have no reviewed
-concept set yet (see docs/omop_to_patientrecord.md) and are returned as not
-writable with a reason, rather than omitted. A client that only sees writable
-fields cannot tell "you may not edit this" from "I forgot to send it".
+Coverage is openly reported: every projection field is classified, including
+computed values, aliases and values authored through a dedicated resource.
 """
 
 from omop_core.models import (
@@ -151,6 +149,7 @@ def _field_choice_options() -> dict[str, list[tuple[str, str | None]]]:
 # event, so they have no concept and no date. PATCH /api/v1/persons/{person_id}/
 # already writes them and derivation copies them forward.
 _PROFILE_REPLACEABLE = {
+    'date_of_birth': 'year_of_birth / month_of_birth / day_of_birth / birth_datetime',
     'email': 'email',
     'phone_number': 'phone_number',
     'facility_name': 'facility_name',
@@ -167,13 +166,6 @@ _PROFILE_DEMOGRAPHIC = {
     'gender': ('gender_concept + gender_source_value', 'gender'),
     'race': ('race_concept + race_source_value', 'race'),
     'ethnicity': ('ethnicity_concept + ethnicity_source_value', 'ethnicity'),
-}
-
-# Same endpoint, but fill-if-empty: it populates a blank and refuses to clobber an
-# existing value. Reported separately because "writable" would be a lie — a
-# clinician cannot correct one here, only supply a missing one.
-_PROFILE_FILL_IF_EMPTY = {
-    'date_of_birth': 'year_of_birth / month_of_birth / day_of_birth',
 }
 
 # Thirty-day aggregates over a stream of device readings. A clinician does not
@@ -509,11 +501,8 @@ def get_serializer_read_only_fields():
     read_only |= set(_COMPUTED_INPUTS)
     # KIND_ALIAS: mirrors of canonical fields
     read_only |= set(_ALIAS_TO_CANONICAL)
-    # KIND_PROFILE: target is Person, not PatientRecord
-    read_only |= set(_PROFILE_DEMOGRAPHIC)
-    read_only |= set(_PROFILE_LOCATION)
-    read_only |= set(_PROFILE_REPLACEABLE)
-    read_only |= set(_PROFILE_FILL_IF_EMPTY)
+    # Profile fields now write through PatientRecord PATCH (KIND_DIRECT),
+    # so they are no longer read-only on the serializer.
     # KIND_AUTHORED / KIND_UNMAPPED: therapy-prefix fields (minus exceptions)
     for field in PatientRecord._meta.concrete_fields:
         name = field.name
@@ -586,22 +575,13 @@ def build_writable_field_descriptor():
         if field in _PROFILE_DEMOGRAPHIC:
             person_field, kind = _PROFILE_DEMOGRAPHIC[field]
             descriptor[field] = {
-                'kind': KIND_PROFILE,
+                'kind': KIND_DIRECT,
                 'writable': True,
-                'target': 'person',
-                'endpoint': 'PATCH /api/v1/persons/{person_id}/',
+                'target': 'patient_record',
+                'projection_target': 'person',
                 'person_field': person_field,
-                # What to actually send. `person_field` documents the Person
-                # columns behind this and reads as prose ("gender_concept +
-                # gender_source_value", "Location.city"); the endpoint keys every
-                # profile field on the PatientRecord field name and resolves the
-                # rest itself. A client guessing from the prose would send neither.
                 'payload_field': field,
                 'value_kind': 'string',
-                # A curated set, not the whole vocabulary: OMOP's Race holds 1,409
-                # concepts and Ethnicity 150 nationality-style entries, which is
-                # not the question a clinical form asks. Anything sent is still
-                # preserved verbatim in the source value.
                 'options': [
                     {'value': display, 'code': code}
                     for code, display in demographic_choices(kind)
@@ -611,10 +591,10 @@ def build_writable_field_descriptor():
 
         if field in _PROFILE_LOCATION:
             descriptor[field] = {
-                'kind': KIND_PROFILE,
+                'kind': KIND_DIRECT,
                 'writable': True,
-                'target': 'person',
-                'endpoint': 'PATCH /api/v1/persons/{person_id}/',
+                'target': 'patient_record',
+                'projection_target': 'location',
                 'person_field': _PROFILE_LOCATION[field],
                 'payload_field': field,
                 'value_kind': _value_kind(field),
@@ -623,34 +603,13 @@ def build_writable_field_descriptor():
 
         if field in _PROFILE_REPLACEABLE:
             descriptor[field] = {
-                'kind': KIND_PROFILE,
+                'kind': KIND_DIRECT,
                 'writable': True,
-                'target': 'person',
-                'endpoint': 'PATCH /api/v1/persons/{person_id}/',
+                'target': 'patient_record',
+                'projection_target': 'person',
                 'person_field': _PROFILE_REPLACEABLE[field],
                 'payload_field': field,
                 'value_kind': _value_kind(field),
-            }
-            continue
-
-        if field in _PROFILE_FILL_IF_EMPTY:
-            descriptor[field] = {
-                'kind': KIND_PROFILE,
-                # Not writable in the sense the editor means. The endpoint fills a
-                # blank and silently leaves an existing value alone, so offering a
-                # box that appears to accept a correction would lie about the
-                # outcome — the save would succeed and change nothing.
-                'writable': False,
-                'fill_if_empty': True,
-                'target': 'person',
-                'endpoint': 'PATCH /api/v1/persons/{person_id}/',
-                'person_field': _PROFILE_FILL_IF_EMPTY[field],
-                'payload_field': field,
-                'value_kind': _value_kind(field),
-                'reason': (
-                    'Set on the Person record, and only while it is empty — this '
-                    'endpoint never overwrites an existing value.'
-                ),
             }
             continue
 

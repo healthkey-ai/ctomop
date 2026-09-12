@@ -35,6 +35,12 @@ services:
       - key: CELERY_BROKER_URL
         sync: false
 
+      # Used once when migration 0201 is pending and any of its target LOINC
+      # concepts are absent. The bounded bootstrap scans the archive but inserts
+      # only those concepts; full vocabulary loads are separate maintenance.
+      - key: ATHENA_VOCABULARY_GDRIVE_URL
+        sync: false
+
       # ── Required because DEBUG is False above ────────────────────────────
       # ctomop/settings.py raises ImproperlyConfigured at import when DEBUG is
       # False and either of these is unset (see the guard at settings.py:57-65),
@@ -74,6 +80,12 @@ services:
       - key: PHR_BASE_URL
         sync: false
 
+      # Unset means Sentry stays off, which is also the rollback.
+      - key: SENTRY_DSN
+        sync: false
+      - key: SENTRY_ENVIRONMENT
+        value: production
+
   - type: worker
     name: promop-worker
     runtime: python
@@ -104,6 +116,13 @@ services:
           name: promop-redis
           type: redis
           property: connectionString
+      - key: SENTRY_DSN
+        fromService:
+          name: promop
+          type: web
+          envVarKey: SENTRY_DSN
+      - key: SENTRY_ENVIRONMENT
+        value: production
 
   - type: redis
     name: promop-redis
@@ -171,6 +190,10 @@ services:
           name: promop-staging-redis
           type: keyvalue
           property: connectionString
+      - key: SENTRY_DSN
+        sync: false
+      - key: SENTRY_ENVIRONMENT
+        value: staging
     region: oregon
   - type: worker
     name: promop-staging-worker
@@ -226,6 +249,13 @@ services:
         value: '1'
       - key: CELERY_WORKER_PREFETCH_MULTIPLIER
         value: '1'
+      - key: SENTRY_DSN
+        fromService:
+          name: promop-staging
+          type: web
+          envVarKey: SENTRY_DSN
+      - key: SENTRY_ENVIRONMENT
+        value: staging
   - type: keyvalue
     name: promop-staging-redis
     region: oregon

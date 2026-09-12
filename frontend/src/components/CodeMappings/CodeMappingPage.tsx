@@ -1,3 +1,5 @@
+import IndividualSuggestCandidates from "./IndividualSuggestCandidates";
+import SuggestCandidates, { type CandidateActivity } from "./SuggestCandidates";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { ArrowLeft, Check, ChevronDown, ChevronRight, Pencil, Plus, Search, Sparkles, Trash2, X } from "lucide-react";
@@ -199,6 +201,7 @@ const strategyLabel: Record<string, string> = {
   umls: "UMLS",
   vectors: "Vector",
   lexical: "Lexical",
+  semantic: "Semantic retrieval",
 };
 
 /** How far along a run is, counting the phase it is actually in.
@@ -242,6 +245,7 @@ const SUGGEST_POLL_TIMEOUT_MS = 20 * 60 * 1000;
 
 /** Progress of one queued Suggest run, as /suggest-runs/<id>/ reports it. */
 type SuggestRunProgress = {
+  activity?: CandidateActivity[];
   run_id: string;
   state: "queued" | "running" | "success" | "failure";
   total: number;
@@ -260,7 +264,7 @@ type SuggestRunProgress = {
 const STRATEGY_LABELS = {
   umls: "UMLS",
   lexical: "Lexical",
-  vectors: "Vectors",
+  semantic: "Semantic retrieval",
 } as const;
 
 /**
@@ -451,6 +455,8 @@ export default function CodeMappingPage() {
   const [pages, setPages] = useState<Partial<Record<MappingSection, number>>>({});
   const loadSequence = useRef(0);
   const dialogRequest = useRef(0);
+  const dialogChoice = useRef<number | null>(null);
+  const [individualSuggestion, setIndividualSuggestion] = useState<{ request: number; activity: CandidateActivity[]; running: boolean } | null>(null);
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [rows, setRows] = useState<CodeMappingRow[]>([]);
   const [reference, setReference] = useState<Reference>(emptyReference);
@@ -477,7 +483,7 @@ export default function CodeMappingPage() {
   const validSuggestionLimit = suggestionLimit !== "" && Number.isInteger(suggestionLimit)
     && suggestionLimit >= 1 && suggestionLimit <= maxSuggestions;
   const [strategies, setStrategies] = useState({
-    umls: true, vectors: true, lexical: true,
+    umls: true, lexical: true, semantic: true,
   });
   const [dialogMode, setDialogMode] = useState<"new" | "edit" | null>(null);
   const [selectedRow, setSelectedRow] = useState<CodeMappingRow | null>(null);
@@ -649,19 +655,10 @@ export default function CodeMappingPage() {
     : accuracy?.by_source_vocabulary?.[selectedVocabulary];
   const modelAccuracy = scopedAccuracy ?? accuracy?.overall;
   const selectedAccuracy = modelAccuracy?.latest_reviewed ?? modelAccuracy;
-  // An empty-string key is the Uncoded bucket. Never borrow another tab's
-  // reviews when this tab has none. Every box in the accuracy strip is scored
-  // over all model versions, so the six numbers describe one population; the
-  // fallbacks support older API responses.
-  // The metrics come only from the cross-version snapshot, so they always
-  // describe the same reviews the counts do. With no snapshot -- this tab has
-  // none, or a web instance mid-roll answered without the key -- they read as
-  // em dashes. A single version's score beside all-version counts is the
-  // mismatch this strip exists to avoid, and no box names a version any more
-  // to explain it. Counts keep their older-response fallback, because
-  // review_totals already spans versions.
-  const allModels = scopedAccuracy?.all_models;
-  const reviewTotals = allModels ?? scopedAccuracy?.review_totals ?? scopedAccuracy;
+  // Match History's All models row across every vocabulary and model version.
+  // Older API responses can supply global counts, but not global scores.
+  const allModels = accuracy?.overall?.all_models;
+  const reviewTotals = allModels ?? accuracy?.overall?.review_totals ?? accuracy?.overall;
 
   const suggestModelVersion = accuracy?.suggest_model_version ?? "";
 
@@ -814,7 +811,8 @@ export default function CodeMappingPage() {
 
   const setField = (field: keyof MappingForm, value: string) => {
     if (field.startsWith("source_") || field.startsWith("destination_")) setSuggestionMessage("");
-    if (["source_code", "source_vocabulary_id", "source_code_description"].includes(field)) {
+    if (field.startsWith("destination_")) dialogChoice.current = dialogRequest.current;
+    if (["source_code", "source_vocabulary_id", "source_code_description", "omop_table"].includes(field)) {
       dialogRequest.current += 1;
       setSearchingConcepts(false);
       setCheckingUmls(false);
@@ -849,6 +847,7 @@ export default function CodeMappingPage() {
 
   /** Apply a concept to the form: id, name, code, vocabulary, class, standard flag. */
   const applyConcept = (concept: ConceptResult, adoptDomain = false) => {
+    dialogChoice.current = dialogRequest.current;
     setSuggestionMessage("");
     setForm((prev) => {
       // A concept only supplies the domain when the curator has not chosen one;
@@ -939,23 +938,57 @@ export default function CodeMappingPage() {
   const suggestCurrentCode = async () => {
     setSuggestionMessage("");
     const request = ++dialogRequest.current;
+    dialogChoice.current = null;
+    setIndividualSuggestion({ request, activity: [], running: true });
     setCheckingUmls(false);
     setError("");
     setSearchingConcepts(true);
     try {
       const enabled = Object.entries(strategies).filter(([, on]) => on).map(([name]) => name);
-      const { data } = await api.post("/v1/code-mappings/suggest-one/", {
+      const { data: started } = await api.post<SuggestRunProgress>("/v1/code-mappings/suggest-one/", {
         source_code: form.source_code, source_vocabulary_id: form.source_vocabulary_id,
         source_code_description: form.source_code_description, omop_table: form.omop_table,
-        strategies: enabled,
+        strategies: enabled, async: true,
       });
+      let current = started;
+      const deadline = Date.now() + SUGGEST_POLL_TIMEOUT_MS;
+      let failures = 0;
+      while (request === dialogRequest.current) {
+        setIndividualSuggestion({ request, activity: current.activity ?? [], running: current.state === "queued" || current.state === "running" });
+        if (current.state !== "queued" && current.state !== "running") break;
+        if (Date.now() > deadline) throw new Error("Suggestion timed out");
+        await new Promise(resolve => setTimeout(resolve, SUGGEST_POLL_INTERVAL_MS));
+        if (request !== dialogRequest.current) return;
+        try {
+          const { data } = await api.get<SuggestRunProgress>(`/v1/code-mappings/suggest-runs/${started.run_id}/`, {
+            params: { include_activity: "1" },
+          });
+          current = data;
+          failures = 0;
+        } catch (error) {
+          if (++failures > SUGGEST_POLL_MAX_FAILURES) throw error;
+        }
+      }
       if (request !== dialogRequest.current) return;
-      if (data.suggested) {
-        applyConcept(data.suggested);
-        setSuggestionMessage(`Suggested via ${data.strategy_used || "waterfall"}.`);
-      } else setError(data.note || "No suggestion found.");
-    } catch { if (request === dialogRequest.current) setError("Failed to suggest a destination concept."); }
-    finally { if (request === dialogRequest.current) setSearchingConcepts(false); }
+      if (current.state === "failure") {
+        setError(current.error || "Failed to suggest a destination concept.");
+        return;
+      }
+      const result = current.activity?.filter(event => event.stage === "result").at(-1);
+      if (result?.suggested && dialogChoice.current !== request) {
+        applyConcept(result.suggested as ConceptResult);
+        setSuggestionMessage("Winner filled in. You can choose another candidate before saving.");
+      } else if (!result?.suggested && dialogChoice.current !== request) {
+        setSuggestionMessage("No winner selected. You can choose a candidate or search below.");
+      }
+    } catch {
+      if (request === dialogRequest.current) setError("Failed to suggest a destination concept. Any candidates already shown are still selectable.");
+    } finally {
+      if (request === dialogRequest.current) {
+        setSearchingConcepts(false);
+        setIndividualSuggestion(current => current?.request === request ? { ...current, running: false } : current);
+      }
+    }
   };
 
   const checkUmls = async () => {
@@ -1083,9 +1116,7 @@ export default function CodeMappingPage() {
    * somewhere a curator re-points *into* — enumerating SNOMED's 1.09M concepts
    * would not be a queue.
    */
-  // Vectors reranks what retrieval found; it retrieves nothing itself, so a run
-  // without UMLS or Lexical would report "no candidate concept" for every code.
-  const hasRetrieval = strategies.umls || strategies.lexical;
+  const hasRetrieval = strategies.umls || strategies.lexical || strategies.semantic;
 
   const runSuggest = async () => {
     if (!validSuggestionLimit) {
@@ -1121,6 +1152,7 @@ export default function CodeMappingPage() {
           limit: suggestionLimit,
           strategies: activeStrategies,
           replace: effectiveReplace,
+          include_activity: true,
         },
       );
       suggestRunRef.current = started.run_id;
@@ -1177,7 +1209,7 @@ export default function CodeMappingPage() {
       if (suggestRunRef.current !== started.run_id) return current;  // superseded or unmounted
       try {
         const { data } = await api.get<SuggestRunProgress>(
-          `/v1/code-mappings/suggest-runs/${started.run_id}/`,
+          `/v1/code-mappings/suggest-runs/${started.run_id}/`, { params: { include_activity: "1" } },
         );
         failures = 0;
         current = data;
@@ -1523,24 +1555,18 @@ export default function CodeMappingPage() {
             className="h-8 w-16 rounded-md border border-slate-300 px-2 text-xs"
           />
           <span className="text-xs text-slate-600">Using</span>
-          {(["umls", "lexical", "vectors"] as const).map((key) => (
+          {(["umls", "lexical", "semantic"] as const).map((key) => (
             <span key={key} className="inline-flex items-center gap-1">
               <label className="inline-flex items-center gap-1 text-xs text-slate-600">
                 <input
                   type="checkbox"
-                  checked={strategies[key] && !(key === "vectors" && !hasRetrieval)}
-                  disabled={key === "vectors" && !hasRetrieval}
+                  checked={strategies[key]}
                   onChange={(e) =>
                     setStrategies((prev) => ({ ...prev, [key]: e.target.checked }))
                   }
-                  title={
-                    key === "vectors" && !hasRetrieval
-                      ? "Vectors reranks what retrieval found, so it needs UMLS or Lexical."
-                      : undefined
-                  }
                   className="h-3.5 w-3.5 rounded border-slate-300 disabled:opacity-40"
                 />
-                <span className={key === "vectors" && !hasRetrieval ? "text-slate-400" : ""}>
+                <span>
                   {STRATEGY_LABELS[key]}
                 </span>
               </label>
@@ -1557,7 +1583,7 @@ export default function CodeMappingPage() {
           </label>
           <section
             aria-label="Suggestion accuracy"
-            title="Every model version's reviews of this tab, scored together. The History page breaks results out by model, over all tabs at once."
+            title="Overall reviews across all vocabularies and model versions, matching the History page's All models row."
             className="ml-auto flex max-w-full shrink-0 flex-wrap divide-x rounded-md border border-slate-200 bg-slate-50 text-right text-xs"
           >
             {([
@@ -1581,6 +1607,11 @@ export default function CodeMappingPage() {
             </a>
           </section>
         </div>
+
+        {suggestRun && <SuggestCandidates key={suggestRun.run_id}
+          activity={suggestRun.activity ?? []}
+          finished={suggestRun.state === "success" || suggestRun.state === "failure"}
+          onSaved={() => { void refreshCurrent.current(); }} />}
 
         {!suggestRun && latestRunId && (
           <div className="mb-4 text-sm">
@@ -1962,13 +1993,13 @@ export default function CodeMappingPage() {
                         </label>
                         <HelpTip tip={TIP.search_vocabulary} />
                       </div>
-                      {(["umls", "lexical", "vectors"] as const).map((key) => (
+                      {(["umls", "lexical", "semantic"] as const).map((key) => (
                         <div key={key} className="inline-flex items-center gap-1 text-xs text-slate-600">
                           <label className="inline-flex items-center gap-1">
                             <input type="checkbox" checked={strategies[key]} onChange={(e) => setStrategies((prev) => ({ ...prev, [key]: e.target.checked }))} />
                             {STRATEGY_LABELS[key]}
                           </label>
-                          <HelpTip tip={key === "umls" ? "Bridge the code to an equivalent concept through UMLS. A single match is used as-is." : key === "lexical" ? "Retrieve candidate destinations by matching names and synonyms." : "Reorder the retrieved candidates by semantic similarity."} />
+                          <HelpTip tip={key === "umls" ? "Bridge the code to an equivalent concept through UMLS. A unique match wins after the other enabled searches finish." : key === "lexical" ? "Retrieve candidate destinations by matching names and synonyms." : "Find candidate destinations by meaning, including concepts whose names and synonyms do not match the source wording."} />
                         </div>
                       ))}
                       <button
@@ -1982,6 +2013,13 @@ export default function CodeMappingPage() {
                       </button>
                     </div>
                   </div>
+                  {individualSuggestion?.request === dialogRequest.current && <IndividualSuggestCandidates
+                    activity={individualSuggestion.activity} running={individualSuggestion.running}
+                    selectedId={form.destination_concept_id}
+                    onSelect={candidate => {
+                      applyConcept(candidate as ConceptResult);
+                      setSuggestionMessage("Candidate selected. Save the mapping to keep your choice.");
+                    }} />}
                   <div className="flex gap-2">
                     <div className="relative flex-1">
                       <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={15} />

@@ -3,8 +3,12 @@ import json
 import logging
 import time
 from email.utils import parsedate_to_datetime
+from typing import Callable
 
-from django.http import JsonResponse
+import sentry_sdk
+from django.http import HttpRequest, HttpResponse, JsonResponse
+
+from ctomop.sentry import redact_path
 
 logger = logging.getLogger('audit')
 _deprecation_logger = logging.getLogger(__name__)
@@ -292,3 +296,25 @@ class ForcePasswordChangeMiddleware:
         if not getattr(user, 'must_change_password', False):
             return False
         return not any(path.endswith(s) for s in _FORCE_CHANGE_EXEMPT_SUFFIXES)
+
+
+class SentryServerErrorMiddleware:
+    """Reports 5xx responses that a view returned instead of raising."""
+
+    def __init__(self, get_response: Callable[[HttpRequest], HttpResponse]) -> None:
+        self.get_response = get_response
+
+    def __call__(self, request: HttpRequest) -> HttpResponse:
+        response = self.get_response(request)
+        if response.status_code >= 500 and not self._already_reported(response):
+            sentry_sdk.capture_message(
+                f'{response.status_code} {request.method} {redact_path(request.path)}',
+                level='error',
+            )
+        return response
+
+    @staticmethod
+    def _already_reported(response: HttpResponse) -> bool:
+        # DRF marks what its exception handler built, and Django marks what it
+        # logged while turning an exception into a response.
+        return getattr(response, 'exception', False) or getattr(response, '_has_been_logged', False)

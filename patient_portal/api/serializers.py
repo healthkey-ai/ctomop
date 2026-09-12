@@ -5,7 +5,7 @@ from patient_portal.models import Identity, PatientConsent, PatientMessage
 from omop_core.models import (
     PatientRecord, Concept, FieldConceptMapping, FieldSynonym, Person,
     ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
-    PatientDocument, PatientTrialEnrollment, ProvenanceRecord,
+    PatientDocument, PatientTrialEnrollment, TrialSearchPreferences, ProvenanceRecord,
     StemCellTransplant, SctEligibility, PostTransformationOutcome,
     Organization, OrgTrust, OrgInvitation, GroupAccess,
     InterchangeAgreement,
@@ -316,7 +316,15 @@ class GenderField(serializers.CharField):
 
     def to_internal_value(self, data):
         title = str(data).title()
-        return self.DISPLAY_TO_CODE.get(title, data)
+        if title in self.DISPLAY_TO_CODE:
+            return self.DISPLAY_TO_CODE[title]
+        # Also accept DB codes directly (M, F, empty string).
+        if data in self.CODE_TO_DISPLAY or data == '':
+            return data
+        raise serializers.ValidationError(
+            f"Invalid gender value '{data}'. "
+            f"Expected one of: {', '.join(self.DISPLAY_TO_CODE.keys())}."
+        )
 
 
 def _derived_wearable_fields():
@@ -407,9 +415,11 @@ class PatientRecordSerializer(serializers.ModelSerializer):
     def validate_death_date(self, value):
         if value and value > localdate():
             raise serializers.ValidationError('Death date cannot be in the future.')
-        dob = getattr(self.instance, 'date_of_birth', None)
-        if value and dob and value < dob:
-            raise serializers.ValidationError('Death date cannot precede date of birth.')
+        return value
+
+    def validate_date_of_birth(self, value):
+        if value and value > localdate():
+            raise serializers.ValidationError('Date of birth cannot be in the future.')
         return value
 
     def validate_treatment_refractory_status(self, value):
@@ -834,6 +844,15 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(str(exc)) from exc
 
     def validate(self, data):
+        dob = data.get(
+            'date_of_birth', getattr(self.instance, 'date_of_birth', None))
+        death = data.get(
+            'death_date', getattr(self.instance, 'death_date', None))
+        if death and dob and death < dob:
+            raise serializers.ValidationError({
+                'death_date': 'Death date cannot precede date of birth.',
+            })
+
         # Cross-field: transformation date/outcome require the flag, on both
         # create and PATCH (fall back to the stored value for partial updates).
         transformed = data.get(
@@ -1065,7 +1084,49 @@ class PatientDocumentSerializer(serializers.ModelSerializer):
 class PatientTrialEnrollmentSerializer(serializers.ModelSerializer):
     class Meta:
         model = PatientTrialEnrollment
-        fields = ['id', 'person', 'trial_id', 'nct_id', 'status']
+        fields = ['id', 'person', 'trial_id', 'nct_id', 'status', 'is_favorite']
+
+    def validate_person(self, value):
+        """`person` may be set at creation and never moved afterwards.
+
+        Object-level permission inspects the row as it stands BEFORE the
+        update, so a patient PATCHing `{'person': <someone else>}` on a row
+        that is legitimately theirs passes every check — and plants an
+        enrollment, with its status, nct_id and coordinator notes, on
+        another patient's chart. They then lose sight of it while that
+        patient and their providers gain it.
+        """
+        if self.instance is not None and value != self.instance.person:
+            raise serializers.ValidationError(
+                'person cannot be changed on an existing enrollment.'
+            )
+        return value
+
+
+class TrialSearchPreferencesSerializer(serializers.ModelSerializer):
+    # Computed on the model so every client agrees on what "a filter the
+    # patient set" means — the trial-search UI paints this number on its
+    # Filters button, and a count computed client-side drifts from the one
+    # the server would compute.
+    non_default_filter_count = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = TrialSearchPreferences
+        fields = ['person', 'preferences', 'non_default_filter_count', 'updated_at']
+        read_only_fields = ['person', 'updated_at']
+
+    def validate_preferences(self, value):
+        """A JSONField accepts any JSON, including a list or a bare string.
+
+        Stored, those serialize back through `non_default_filter_count`,
+        which iterates `.items()` — so one PATCH of `[]` would 500 every
+        later read of that row, not just the write.
+        """
+        if not isinstance(value, dict):
+            raise serializers.ValidationError(
+                'preferences must be a JSON object of filter name to value.'
+            )
+        return value
 
 
 class ProvenanceRecordSerializer(serializers.ModelSerializer):
@@ -1193,7 +1254,7 @@ class FieldConceptMappingSerializer(serializers.ModelSerializer):
         model = FieldConceptMapping
         fields = [
             'id', 'field_name', 'concept', 'vocabulary_id', 'concept_code',
-            'unit', 'omop_table', 'status', 'reviewer',
+            'unit', 'omop_table', 'status', 'provenance', 'reviewer',
             'reviewed_at', 'notes', 'created_at', 'updated_at',
             # What turns an approved mapping into a writable field. Without a
             # source_value derivation cannot find the row the editor writes, so
@@ -1201,7 +1262,7 @@ class FieldConceptMappingSerializer(serializers.ModelSerializer):
             'source_value', 'value_kind', 'type_concept_id',
             'value_vocabulary', 'multiple', 'makes_field_writable',
         ]
-        read_only_fields = ['id', 'reviewer', 'reviewed_at', 'created_at', 'updated_at']
+        read_only_fields = ['provenance', 'id', 'reviewer', 'reviewed_at', 'created_at', 'updated_at']
 
     def validate_concept_code(self, value):
         if not value:
@@ -1260,6 +1321,7 @@ class FieldConceptMappingSerializer(serializers.ModelSerializer):
         return attrs
 
     def create(self, validated_data):
+        validated_data['provenance'] = 'curator'
         request = self.context.get('request')
         if validated_data.get('status') == 'approved' and request:
             validated_data['reviewer'] = request.user
@@ -1267,6 +1329,16 @@ class FieldConceptMappingSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
 
     def update(self, instance, validated_data):
+        # Approval alone does not change who supplied the recipe. A manual
+        # correction does, even if its author leaves the approval status alone.
+        recipe_fields = {
+            'field_name', 'concept', 'vocabulary_id', 'concept_code', 'omop_table',
+            'source_value', 'unit', 'value_kind', 'type_concept_id',
+            'value_vocabulary', 'multiple',
+        }
+        if any(key in validated_data and validated_data[key] != getattr(instance, key)
+               for key in recipe_fields):
+            validated_data['provenance'] = 'curator'
         request = self.context.get('request')
         if validated_data.get('status') == 'approved' and instance.status != 'approved' and request:
             validated_data['reviewer'] = request.user
@@ -1362,6 +1434,7 @@ class CustomPatientFieldCreateSerializer(serializers.Serializer):
         field_formula = None
         with transaction.atomic():
             mapping = FieldConceptMapping.objects.create(
+                provenance='curator',
                 field_name=validated_data['field_name'],
                 concept=concept,
                 vocabulary_id=concept.vocabulary_id,

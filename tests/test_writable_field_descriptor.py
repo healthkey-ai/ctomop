@@ -405,35 +405,39 @@ class TestEveryFieldIsCategorised:
 
     def test_location_fields_are_writable_not_grouped_as_missing(self):
         """They were grouped as 'location' only while they had no write path.
-        The persons endpoint now upserts the OMOP Location row."""
+        The PatientRecord PATCH now upserts the OMOP Location row."""
         d = build_writable_field_descriptor()
-        assert d['city']['kind'] == 'profile'
+        assert d['city']['kind'] == 'direct'
         assert d['city']['writable'] is True
+        assert d['city']['target'] == 'patient_record'
 
 
 class TestProfileFields:
-    def test_a_replaceable_profile_field_is_writable_at_the_persons_endpoint(self):
+    def test_a_replaceable_profile_field_is_writable_via_patient_record(self):
         entry = build_writable_field_descriptor()['email']
 
-        assert entry['kind'] == 'profile'
+        assert entry['kind'] == 'direct'
         assert entry['writable'] is True
-        assert entry['target'] == 'person'
-        assert 'persons' in entry['endpoint']
+        assert entry['target'] == 'patient_record'
+        assert entry['projection_target'] == 'person'
 
-    def test_a_fill_if_empty_field_is_not_reported_writable(self):
-        """The endpoint populates a blank and silently leaves a value alone, so a
-        box that looked editable would succeed and change nothing.
-
-        gender/race/ethnicity used to be in this category. They are now fully
-        correctable; date_of_birth deliberately is not — overwriting a recorded
-        birth date is a different decision.
-        """
+    def test_date_of_birth_is_correctable_via_patient_record(self):
         entry = build_writable_field_descriptor()['date_of_birth']
 
-        assert entry['kind'] == 'profile'
-        assert entry['writable'] is False
-        assert entry['fill_if_empty'] is True
-        assert 'never overwrites' in entry['reason']
+        assert entry['kind'] == 'direct'
+        assert entry['writable'] is True
+        assert entry['target'] == 'patient_record'
+        assert entry['projection_target'] == 'person'
+        assert 'fill_if_empty' not in entry
+
+    def test_no_direct_field_is_falsely_read_only(self):
+        direct = {
+            field: entry for field, entry in build_writable_field_descriptor().items()
+            if entry['kind'] == 'direct' and not entry.get('curated')
+        }
+
+        assert direct
+        assert not [field for field, entry in direct.items() if not entry['writable']]
 
 
 class TestWearableAggregates:
@@ -581,24 +585,27 @@ class TestProfilePayloadField:
     200 and changes nothing.
     """
 
-    def test_every_writable_profile_field_names_an_accepted_key(self):
+    def test_every_profile_field_has_projection_target(self):
+        """Profile fields now route through PatientRecord PATCH with a
+        projection_target indicating the backing store (person or location)."""
         from patient_portal.api.views import (
-            _PERSON_DEMOGRAPHIC_FIELDS, _PERSON_LOCATION_FIELDS,
-            _PERSON_PATCHABLE_FIELDS, _PERSON_REPLACEABLE_FIELDS,
+            _PROFILE_DEMOGRAPHIC_FIELDS, _PROFILE_LOCATION_FIELDS,
+            _PROFILE_SIMPLE_PERSON_FIELDS,
         )
 
         accepted = (
-            set(_PERSON_DEMOGRAPHIC_FIELDS) | set(_PERSON_LOCATION_FIELDS)
-            | set(_PERSON_PATCHABLE_FIELDS) | set(_PERSON_REPLACEABLE_FIELDS)
+            set(_PROFILE_DEMOGRAPHIC_FIELDS) | set(_PROFILE_LOCATION_FIELDS)
+            | _PROFILE_SIMPLE_PERSON_FIELDS | {'date_of_birth'}
         )
         profile = {
             f: v for f, v in build_writable_field_descriptor().items()
-            if v.get('target') == 'person' and v.get('writable')
+            if v.get('projection_target') in ('person', 'location') and v.get('writable')
         }
         assert profile, 'expected writable profile fields'
         for field, entry in profile.items():
-            assert 'payload_field' in entry, f'{field} has no payload_field'
+            assert entry.get('target') == 'patient_record', (
+                f'{field} should target patient_record, not {entry.get("target")}'
+            )
             assert entry['payload_field'] in accepted, (
-                f"{field} would send '{entry['payload_field']}', which the "
-                f'persons endpoint does not accept'
+                f"{field} payload_field '{entry['payload_field']}' not in accepted set"
             )

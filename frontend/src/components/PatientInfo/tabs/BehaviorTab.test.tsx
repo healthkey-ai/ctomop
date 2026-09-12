@@ -176,7 +176,7 @@ describe('BehaviorTab — language skills', () => {
     await userEvent.click(await screen.findByText('Speak'));
 
     await waitFor(() => expect(mockPatch).toHaveBeenCalledWith(
-      '/v1/persons/7/',
+      '/patient-info/7/',
       { language_skills: { english: ['speak'] } },
     ));
     await waitFor(() => expect(onRefresh).toHaveBeenCalled());

@@ -5,7 +5,7 @@ import { PatientInfoProvider } from "./PatientInfoProvider";
 import { usePatientInfoMe, usePatchPatientInfo } from "./patientInfoHooks";
 import type { PatientInfoProps } from "./patientInfoTypes";
 import { fetchWritableFields, LIFECYCLE, type FieldDescriptors } from "@/hooks/useWritableFields";
-import { writeProfileFields, type ProfileEdit } from "@/api/clinicalFacts";
+// Profile fields now write through PatientRecord PATCH alongside clinical fields.
 import GeneralTab from "@/components/PatientInfo/tabs/GeneralTab";
 import DiseaseTab from "@/components/PatientInfo/tabs/DiseaseTab";
 import TreatmentTab from "@/components/PatientInfo/tabs/TreatmentTab";
@@ -159,30 +159,20 @@ function PatientInfoInner({ readOnly, onPatientUpdated }: Pick<PatientInfoProps,
       const baseline = serverInfoRef.current;
       const personId = baseline.person_id ?? data?.patient_info?.person_id;
 
-      // Profile fields (target === 'person') go to the persons endpoint.
-      // Everything else goes to PatientRecord PATCH — the backend handles
-      // OMOP projection for mapped fields.
-      const profileEdits: ProfileEdit[] = [];
+      // All fields — clinical and profile — go through PatientRecord PATCH.
+      // The backend projects profile fields to Person/Location and clinical
+      // fields to OMOP tables after the PATCH lands.
       const patchFields: Record<string, unknown> = {};
 
       if (personId) {
         for (const [f, v] of Object.entries(info)) {
           if (f === "patient_name" || LIFECYCLE.has(f) || v === baseline[f]) continue;
           const desc = descriptors[f];
-          if (desc?.writable && desc.target === 'person') {
-            profileEdits.push({ field: f, descriptor: desc, value: v });
-          } else if (desc?.writable && desc.target === 'patient_record') {
+          if (desc?.writable && desc.target === 'patient_record') {
             patchFields[f] = v;
           } else if (!(f in descriptors)) {
             patchFields[f] = v;
           }
-        }
-      }
-
-      if (profileEdits.length) {
-        await writeProfileFields(personId as number, profileEdits);
-        for (const { field } of profileEdits) {
-          serverInfoRef.current[field] = info[field];
         }
       }
 

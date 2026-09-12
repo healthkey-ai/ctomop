@@ -3393,6 +3393,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         _t_bulk_insert = _time.monotonic()
                         try:
                             Measurement.objects.bulk_create(_pending_measurements)
+                            from patient_portal.webhooks import publish_patient_bulk_change
+                            publish_patient_bulk_change(person.pk, 'measurement', len(_pending_measurements))
                             for _bm in _pending_measurements:
                                 _pt_measurement_ids.append(_bm.measurement_id)
                             for (_bm, _psrc, _puid, _preason) in _pending_provenances:
@@ -3506,6 +3508,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             _po.observation_id = _oid
                         try:
                             Observation.objects.bulk_create(_pending_observations)
+                            from patient_portal.webhooks import publish_patient_bulk_change
+                            publish_patient_bulk_change(person.pk, 'observation', len(_pending_observations))
                             logger.info(
                                 '{"event": "observations_written", "person_id": %d, "count": %d}',
                                 person.person_id, len(_pending_observations),
@@ -4747,6 +4751,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 for m, mid in zip(pending_measurements, m_ids):
                     m.measurement_id = mid
                 Measurement.objects.bulk_create(pending_measurements)
+                from patient_portal.webhooks import publish_patient_bulk_change
+                publish_patient_bulk_change(person.pk, 'measurement', len(pending_measurements))
                 created_count += len(pending_measurements)
 
             if pending_observations:
@@ -4754,6 +4760,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 for obs, oid in zip(pending_observations, obs_ids):
                     obs.observation_id = oid
                 Observation.objects.bulk_create(pending_observations)
+                from patient_portal.webhooks import publish_patient_bulk_change
+                publish_patient_bulk_change(person.pk, 'observation', len(pending_observations))
                 created_count += len(pending_observations)
 
         # Refresh the PatientRecord to recompute 30-day summaries
@@ -6237,7 +6245,9 @@ def _apply_upsert_plan(plan, model_cls, pk_field, model_name):
             content_type=ContentType.objects.get_for_model(model_cls),
             object_id__in=plan.collapse_ids,
         ).delete()
-        model_cls.objects.filter(**{f'{pk_field}__in': plan.collapse_ids}).delete()
+        from patient_portal.webhooks import suppress_webhook_events
+        with suppress_webhook_events():
+            model_cls.objects.filter(**{f'{pk_field}__in': plan.collapse_ids}).delete()
 
     if plan.to_update:
         model_cls.objects.bulk_update(
@@ -6637,6 +6647,9 @@ class _OmopBulkCreateMixin:
                     model_cls.objects.bulk_create(instances)
                     ids, updated = list(new_ids), 0
 
+            from patient_portal.webhooks import publish_patient_bulk_change
+            publish_patient_bulk_change(person.pk, model_cls._meta.model_name, len(new_ids) + updated)
+
             # No source supplied means no ProvenanceRecord, matching the single-row
             # path — inventing a source would make provenance unfalsifiable.
             # Only inserted rows get one: an upsert that left a row untouched
@@ -6827,6 +6840,9 @@ class _OmopBulkUpdateMixin:
             self._record_bulk_provenance(
                 request, person, model_cls, pk_field, instances)
 
+        from patient_portal.webhooks import publish_patient_bulk_change
+        publish_patient_bulk_change(person.pk, model_cls._meta.model_name, len(instances))
+
         # Unguarded and inside the transaction, so a failed derivation rolls the
         # batch back instead of leaving a stale read model.
         if not _skip_refresh_requested(request):
@@ -7004,9 +7020,11 @@ class _OmopBulkDeleteMixin:
 
         # Unlike bulk_create, queryset.delete() does fire post_delete, so without
         # the suppression the batch costs one derivation per row.
-        with suppress_patient_record_refresh():
+        from patient_portal.webhooks import publish_patient_bulk_change, suppress_webhook_events
+        with suppress_patient_record_refresh(), suppress_webhook_events():
             self._delete_dangling_links(model_cls, found_ids)
             model_cls.objects.filter(**{f'{pk_field}__in': found_ids}).delete()
+        publish_patient_bulk_change(person.pk, model_cls._meta.model_name, len(found_ids), operation='bulk_deleted')
 
         # Unguarded and inside the transaction, so a failed derivation rolls the
         # batch back instead of leaving a stale read model.

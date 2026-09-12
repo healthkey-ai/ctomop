@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
 import os
+import json
 from pathlib import Path
 import dj_database_url
 from dotenv import load_dotenv
@@ -618,6 +619,13 @@ else:
 CELERY_BROKER_URL = os.environ.get('CELERY_BROKER_URL', '')
 CELERY_RESULT_BACKEND = os.environ.get('CELERY_RESULT_BACKEND', CELERY_BROKER_URL)
 CELERY_TASK_SERIALIZER = 'json'
+WEBHOOK_INBOUND_SOURCES = json.loads(os.environ.get('WEBHOOK_INBOUND_SOURCES', '{}'))
+CELERY_BEAT_SCHEDULE = {
+    'recover-webhook-deliveries': {
+        'task': 'patient_portal.tasks.dispatch_pending_webhooks',
+        'schedule': 60.0,
+    },
+}
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_ACCEPT_CONTENT = ['json']
 

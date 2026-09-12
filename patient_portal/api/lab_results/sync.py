@@ -31,6 +31,7 @@ from omop_core.models import (
 )
 from omop_core.services.pk import next_pk, next_pk_batch
 from patient_portal.api.permissions import LabSyncPermission, get_request_org, is_service_token
+from patient_portal.webhooks import publish_patient_bulk_change
 
 logger = logging.getLogger(__name__)
 
@@ -324,6 +325,7 @@ class SyncView(APIView):
             ))
         if new_objects:
             Measurement.objects.bulk_create(new_objects)
+            publish_patient_bulk_change(person_id, 'measurement', len(new_objects))
 
         # Ownership: link all measurements (created + deduped) to this visit
         MeasurementOwnership.objects.bulk_create(

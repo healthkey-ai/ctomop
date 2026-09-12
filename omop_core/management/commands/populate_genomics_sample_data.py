@@ -202,8 +202,11 @@ class Command(BaseCommand):
             if not Concept.objects.filter(
                 vocabulary_id='CDM', concept_code='measurement.measurement_id',
                 invalid_reason__isnull=True,
+            ).exists() and not Concept.objects.filter(
+                vocabulary_id='CDM', concept_name='measurement.measurement_id',
+                standard_concept='S', invalid_reason__isnull=True,
             ).exists():
-                missing.append("Concept(vocabulary_id='CDM', concept_code='measurement.measurement_id')")
+                missing.append("CDM concept 'measurement.measurement_id'")
             if missing:
                 raise CommandError(f'Required OMOP concepts missing: {", ".join(missing)}. Load vocabularies first.')
             genomics_mappings = FieldConceptMapping.objects.filter(

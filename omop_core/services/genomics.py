@@ -197,6 +197,12 @@ def _event_concept():
         invalid_reason__isnull=True,
     ).first()
     if concept is None:
+        # Athena CDM vocabulary uses CDM### codes with the table.column as the name.
+        concept = Concept.objects.filter(
+            vocabulary_id='CDM', concept_name='measurement.measurement_id',
+            standard_concept='S', invalid_reason__isnull=True,
+        ).first()
+    if concept is None:
         raise ValidationError({'variant': 'Load the OMOP CDM vocabulary (measurement.measurement_id) before saving variants.'})
     return concept.pk
 

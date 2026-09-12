@@ -301,7 +301,7 @@ def _find(person, variant_id):
 
 @transaction.atomic
 @suppress_patient_record_refresh()
-def save_variant(person, payload, variant_id=None, type_concept_id=32817):
+def save_variant(person, payload, variant_id=None, type_concept_id=32817, skip_refresh=False):
     PatientRecord.objects.select_for_update().get(person=person)
     previous = _find(person, variant_id) if variant_id is not None else None
     data = normalize_variant(payload, previous)
@@ -399,14 +399,15 @@ def save_variant(person, payload, variant_id=None, type_concept_id=32817):
             stored_text, _ = _store_text(str(value), person, data['test_date'], type_concept_id, parent.pk)
             attrs['value_as_string'] = stored_text
         model.objects.create(**attrs)
-    from omop_core.services.patient_record_service import refresh_patient_record
-    refresh_patient_record(person)
+    if not skip_refresh:
+        from omop_core.services.patient_record_service import refresh_patient_record
+        refresh_patient_record(person)
     return _find(person, parent.pk)
 
 
 @transaction.atomic
 @suppress_patient_record_refresh()
-def delete_variant(person, variant_id):
+def delete_variant(person, variant_id, skip_refresh=False):
     PatientRecord.objects.select_for_update().get(person=person)
     previous = _find(person, variant_id)
     marker = marker_for_variant(previous)
@@ -416,8 +417,9 @@ def delete_variant(person, variant_id):
         rows.update(is_erroneous=True, erroneous_reason='Removed in Genomics editor')
     Measurement.objects.filter(person=person, pk=variant_id).update(
         is_erroneous=True, erroneous_reason='Removed in Genomics editor')
-    from omop_core.services.patient_record_service import refresh_patient_record
-    refresh_patient_record(person)
+    if not skip_refresh:
+        from omop_core.services.patient_record_service import refresh_patient_record
+        refresh_patient_record(person)
 
 
 @transaction.atomic

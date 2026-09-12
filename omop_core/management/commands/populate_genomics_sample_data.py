@@ -199,6 +199,11 @@ class Command(BaseCommand):
                 missing.append('Concept(pk=0)')
             if not Concept.objects.filter(pk=32817).exists():
                 missing.append('Concept(pk=32817)')
+            if not Concept.objects.filter(
+                vocabulary_id='CDM', concept_code='measurement.measurement_id',
+                invalid_reason__isnull=True,
+            ).exists():
+                missing.append("Concept(vocabulary_id='CDM', concept_code='measurement.measurement_id')")
             if missing:
                 raise CommandError(f'Required OMOP concepts missing: {", ".join(missing)}. Load vocabularies first.')
             genomics_mappings = FieldConceptMapping.objects.filter(
@@ -261,6 +266,8 @@ class Command(BaseCommand):
         self.stdout.write(f'Seeding {len(patients)} of {total_eligible} eligible patients'
                           f'{" (dry run)" if dry_run else ""}')
 
+        # Phase 1: Write all OMOP variant data (skip per-variant refresh).
+        seeded_persons = []
         seeded = 0
         total_variants = 0
         for pr in patients:
@@ -285,21 +292,35 @@ class Command(BaseCommand):
                     if overwrite:
                         existing = list_variants(pr.person)
                         for v in existing:
-                            delete_variant(pr.person, v['id'])
+                            delete_variant(pr.person, v['id'], skip_refresh=True)
 
                     for entry in markers:
                         if entry['kind'] == 'gene':
                             payload = _build_gene_payload(entry)
                         else:
                             payload = _build_abnormality_payload(entry)
-                        save_variant(pr.person, payload)
+                        save_variant(pr.person, payload, skip_refresh=True)
                         total_variants += 1
             except Exception as e:
                 self.stderr.write(f'  ERROR person_id={pr.person_id}: {e}')
                 continue
 
+            seeded_persons.append(pr.person)
             seeded += 1
-            self.stdout.write(f'  person_id={pr.person_id} ({code}): {len(markers)} variants')
+            self.stdout.write(f'  person_id={pr.person_id} ({code}): {len(markers)} variants written')
+
+        if dry_run:
+            self.stdout.write(self.style.SUCCESS(
+                f'Done. Would seed {total_variants} variants across {seeded} patients.'
+            ))
+            return
+
+        # Phase 2: Refresh PatientRecord once per patient.
+        self.stdout.write(f'Refreshing {len(seeded_persons)} patient records...')
+        from omop_core.services.patient_record_service import refresh_patient_record
+        for i, person in enumerate(seeded_persons, 1):
+            refresh_patient_record(person)
+            self.stdout.write(f'  refreshed {i}/{len(seeded_persons)} (person_id={person.person_id})')
 
         self.stdout.write(self.style.SUCCESS(
             f'Done. Seeded {total_variants} variants across {seeded} patients.'

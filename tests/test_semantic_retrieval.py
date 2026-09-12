@@ -55,6 +55,7 @@ def test_cosine_retrieval_finds_concepts_without_lexical_hits(encoder):
     hits = suggest.semantic_candidates('heart attack', 'Condition', limit=1)
     assert [hit['concept_id'] for hit in hits] == [good.pk]
     assert hits[0]['semantic_score'] == 1.0
+    assert hits[0]['vector_distance'] == 0.0
     assert hits[0]['retrieval'] == 'semantic'
     assert 'vector_score' not in hits[0]
     encoder.encode.assert_called_once_with('heart attack')
@@ -148,15 +149,29 @@ def test_umls_miss_runs_both_retrievers_and_ranks_once(monkeypatch, lexical_hits
     assert result['vector_reranked'] is False
 
 
-def test_single_umls_hit_skips_other_retrievers(monkeypatch):
+def test_single_umls_hit_continues_and_reports_each_stage(monkeypatch):
     hit = candidate(1, 'umls', umls_score=1.0)
     monkeypatch.setattr(suggest, 'umls_candidates', Mock(return_value=([hit], 'C123')))
-    lexical, semantic = Mock(), Mock()
+    lexical = Mock(return_value=[candidate(2, "lexical")])
+    semantic = Mock(return_value=[candidate(3, "semantic", semantic_score=0.8, vector_distance=0.2)])
     monkeypatch.setattr(suggest, 'lexical_candidates', lexical)
     monkeypatch.setattr(suggest, 'semantic_candidates', semantic)
-    assert pool() == ([hit], 'C123', True)
-    lexical.assert_not_called()
-    semantic.assert_not_called()
+    events = []
+    def received(strategy, hits):
+        if strategy == 'umls':
+            lexical.assert_not_called()
+            semantic.assert_not_called()
+        elif strategy == 'lexical':
+            semantic.assert_not_called()
+        events.append((strategy, hits))
+    hits, cui, definitive = pool(strategies=['umls', 'lexical', 'semantic'], on_candidates=received)
+    assert [c['concept_id'] for c in hits] == [1, 2, 3]
+    assert cui == 'C123'
+    assert definitive
+    assert [stage for stage, _ in events] == ['umls', 'lexical', 'semantic']
+    assert events[-1][1][0]['vector_distance'] == 0.2
+    lexical.assert_called_once()
+    semantic.assert_called_once()
 
 
 def test_deduplicates_and_does_not_rerank_semantic_candidates(monkeypatch):

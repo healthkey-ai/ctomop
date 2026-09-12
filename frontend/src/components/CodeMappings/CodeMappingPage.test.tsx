@@ -2,6 +2,7 @@ import { render, screen, fireEvent, waitFor, within } from "@testing-library/rea
 import { MemoryRouter } from "react-router-dom";
 import { vi, describe, it, expect, beforeEach } from "vitest";
 import CodeMappingPage from "./CodeMappingPage";
+import CodeMappingAccuracyPage from "./CodeMappingAccuracyPage";
 
 const mockGet = vi.fn();
 const mockPost = vi.fn();
@@ -504,6 +505,66 @@ describe("CodeMappingPage", () => {
       fireEvent.click(cell.closest("tr")!);
       return await screen.findByText("Edit Mapping");
     };
+
+    it("shows individual candidates above search and preserves an early choice when the winner arrives", async () => {
+      await openDialog();
+      const alternative = { ...loincHit, concept_id: 555, concept_name: "Early lexical candidate", concept_code: "555" };
+      const semantic = { ...loincHit, concept_id: 556, concept_name: "Later semantic candidate", concept_code: "556", vector_distance: 0.125 };
+      const activity = [
+        { stage: "candidates", strategy: "umls", candidates: [loincHit] },
+        { stage: "candidates", strategy: "lexical", candidates: [alternative] },
+      ];
+      mockPost.mockResolvedValue({ data: suggestRun({ state: "running", activity }) });
+      const originalGet = mockGet.getMockImplementation()!;
+      mockGet.mockImplementation((url: string) => url.includes("/suggest-runs/")
+        ? Promise.resolve({ data: suggestRun({ activity: [...activity,
+          { stage: "candidates", strategy: "semantic", candidates: [semantic] },
+          { stage: "result", suggested: loincHit, candidates: [loincHit, alternative, semantic] },
+        ] }) }) : originalGet(url));
+      const dialog = within(screen.getByRole("dialog"));
+      const suggest = dialog.getByRole("button", { name: "Suggest", exact: true });
+      fireEvent.click(suggest);
+      const section = await dialog.findByRole("region", { name: "Individual suggestion candidates" });
+      expect(suggest.compareDocumentPosition(section) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(section.compareDocumentPosition(dialog.getByLabelText("Search destination concepts")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(within(section).getByRole("status")).toHaveTextContent("Searching");
+      fireEvent.click(within(section).getByRole("button", { name: /Early lexical candidate/ }));
+      expect(dialog.getByLabelText("Destination Concept ID")).toHaveValue(555);
+      expect(mockPatch).not.toHaveBeenCalled();
+      expect(await within(section).findByText("Distance 0.1250", {}, { timeout: 3000 })).toBeInTheDocument();
+      expect(within(section).getByText(`Winner: ${loincHit.concept_name}`)).toBeInTheDocument();
+      expect(dialog.getByLabelText("Destination Concept ID")).toHaveValue(555);
+      expect(mockPost).toHaveBeenCalledWith("/v1/code-mappings/suggest-one/", expect.objectContaining({ async: true }));
+      fireEvent.click(within(section).getByRole("button", { name: /Later semantic candidate/ }));
+      expect(dialog.getByLabelText("Destination Concept ID")).toHaveValue(556);
+      fireEvent.click(dialog.getByRole("button", { name: "Update Mapping" }));
+      await waitFor(() => expect(mockPatch).toHaveBeenCalledWith("/v1/code-mappings/7/", expect.objectContaining({ destination_concept_id: 556 })));
+    });
+
+    it("displays inline individual results and fills the winner when nothing was selected", async () => {
+      await openDialog();
+      mockPost.mockResolvedValue({ data: suggestRun({ activity: [
+        { stage: "candidates", strategy: "umls", candidates: [loincHit] },
+        { stage: "result", suggested: loincHit, candidates: [loincHit] },
+      ] }) });
+      fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Suggest", exact: true }));
+      await waitFor(() => expect(screen.getByLabelText("Destination Concept ID")).toHaveValue(loincHit.concept_id));
+      const section = screen.getByRole("region", { name: "Individual suggestion candidates" });
+      expect(within(section).getByText("Winner")).toBeInTheDocument();
+      expect(mockPatch).not.toHaveBeenCalled();
+    });
+
+    it("hides old individual candidates and ignores the winner after the source changes", async () => {
+      await openDialog();
+      mockPost.mockResolvedValue({ data: suggestRun({ state: "running", activity: [
+        { stage: "candidates", strategy: "umls", candidates: [loincHit] },
+      ] }) });
+      fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Suggest", exact: true }));
+      await screen.findByRole("region", { name: "Individual suggestion candidates" });
+      fireEvent.change(screen.getByLabelText("Source Code Value"), { target: { value: "CHANGED" } });
+      expect(screen.queryByRole("region", { name: "Individual suggestion candidates" })).not.toBeInTheDocument();
+      expect(screen.getByLabelText("Destination Concept ID")).toHaveValue(proposedRow.destination_concept_id);
+    });
 
     it("highlights imported alternatives and saves the curator's selected destination", async () => {
       renderPage([{ ...proposedRow, destination_count: 3 }]);
@@ -1162,12 +1223,12 @@ describe("CodeMappingPage", () => {
       // The run is queued and a code costs seconds, so a curator has to be able
       // to tell a working run from a stuck one.
       mockPost.mockResolvedValue({
-        data: suggestRun({ state: "running", total: 4, retrieved: 1, done: 0 }),
+        data: { ...suggestRun({ state: "running", total: 4, retrieved: 1, done: 0 }), activity: [{ stage: "candidates", mapping_id: 7, source_code: "LIVE", strategy: "umls", candidates: [{ concept_id: 1, concept_name: "UMLS candidate", concept_code: "A", vocabulary_id: "SNOMED" }] }] },
       });
       mockGet.mockImplementation((url: string) => {
         if (url.startsWith("/v1/code-mappings/suggest-runs/")) {
           return Promise.resolve({
-            data: suggestRun({ state: "success", total: 4, done: 4, destinations: 4 }),
+            data: { ...suggestRun({ state: "success", total: 4, done: 4, destinations: 4 }), activity: [{ stage: "candidates", mapping_id: 7, source_code: "LIVE", strategy: "semantic", candidates: [{ concept_id: 2, concept_name: "Semantic candidate", concept_code: "B", vocabulary_id: "SNOMED", vector_distance: 0.25 }] }] },
           });
         }
         if (url === "/v1/code-mappings/") return Promise.resolve({ data: [proposedRow] });
@@ -1186,11 +1247,16 @@ describe("CodeMappingPage", () => {
       await waitFor(() =>
         expect(screen.getByTestId("suggest-progress"))
           .toHaveTextContent("Searching for candidates… 1 of 4"));
+      expect(screen.getByText(/UMLS candidate/)).toBeInTheDocument();
       // Then it polls to completion.
       await waitFor(() =>
         expect(screen.getByTestId("suggest-progress"))
           .toHaveTextContent("Done — wrote 4 new destination(s) across 4 code(s)."),
         { timeout: 4000 });
+      expect(screen.getByText(/Semantic candidate/)).toBeInTheDocument();
+      expect(screen.getByText("Distance 0.2500")).toBeInTheDocument();
+      expect(mockGet).toHaveBeenCalledWith(expect.stringContaining("/suggest-runs/"), { params: { include_activity: "1" } });
+      expect(mockPost).toHaveBeenCalledWith("/v1/code-mappings/suggest/", expect.objectContaining({ include_activity: true }));
     });
 
     it("says how many remain so the curator knows to run it again", async () => {
@@ -1274,7 +1340,7 @@ describe("mapping dialog request isolation", () => {
   it("clears a previous code's no-match message when opening another code", async () => {
     renderPage([first, second]);
     fireEvent.click(await screen.findByText("Z94.81"));
-    mockPost.mockResolvedValueOnce({ data: { suggested: null, note: "No suitable concept: Z94.81" } });
+    mockPost.mockResolvedValueOnce({ data: suggestRun({ activity: [{ stage: "result", suggested: null, note: "No suitable concept: Z94.81" }] }) });
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Suggest" }));
     expect(await screen.findByText("No suitable concept: Z94.81")).toBeInTheDocument();
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
@@ -1285,15 +1351,15 @@ describe("mapping dialog request isolation", () => {
   it("shows the suggestion method only in the dialog and clears it for another code", async () => {
     renderPage([first, second]);
     fireEvent.click(await screen.findByText("Z94.81"));
-    mockPost.mockResolvedValueOnce({ data: { suggested: loincHit, strategy_used: "lexical" } });
+    mockPost.mockResolvedValueOnce({ data: suggestRun({ activity: [{ stage: "result", suggested: loincHit, strategy_used: "lexical" }] }) });
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Suggest" }));
-    const message = await screen.findByText("Suggested via lexical.");
+    const message = await screen.findByText("Winner filled in. You can choose another candidate before saving.");
     expect(screen.getByRole("dialog")).toContainElement(message);
-    expect(screen.getAllByText("Suggested via lexical.")).toHaveLength(1);
+    expect(screen.getAllByText("Winner filled in. You can choose another candidate before saving.")).toHaveLength(1);
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
-    expect(screen.queryByText("Suggested via lexical.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Winner filled in. You can choose another candidate before saving.")).not.toBeInTheDocument();
     fireEvent.click(screen.getByText("Z12.11"));
-    expect(screen.queryByText("Suggested via lexical.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Winner filled in. You can choose another candidate before saving.")).not.toBeInTheDocument();
   });
 
   it.each([false, true])("ignores a late suggestion for a closed dialog (destination=%s)", async (found) => {
@@ -1337,14 +1403,14 @@ describe("server mapping pages", () => {
   });
 });
 
-describe("Uncoded review counters and refresh", () => {
+describe("Overall review counters and refresh", () => {
   const metrics = { approved: 0, accepted: 0, rejected: 0, overridden: 0, reviewed: 0, precision: null, recall: null, f1: null, model_version: "v0.2" };
   beforeEach(() => { mockGet.mockReset(); mockPatch.mockReset(); });
 
-  it("shows Uncoded reviews across models instead of the newest model's zeroes", async () => {
+  it("shows overall reviews across models regardless of the selected vocabulary", async () => {
     mockGet.mockImplementation((url: string) => Promise.resolve({ data: url.includes("accuracy") ? {
-      overall: { ...metrics, review_totals: { approved: 99, rejected: 99, overridden: 99 } },
-      by_source_vocabulary: { "": { ...metrics, review_totals: { approved: 6, rejected: 2, overridden: 3 } } },
+      overall: { ...metrics, review_totals: { approved: 6, rejected: 2, overridden: 3 } },
+      by_source_vocabulary: { "": { ...metrics, review_totals: { approved: 99, rejected: 99, overridden: 99 } } },
     } : url.includes("reference") ? reference : [proposedRow] }));
     render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
     const section = await screen.findByRole("region", { name: "Suggestion accuracy" });
@@ -1364,21 +1430,29 @@ describe("Uncoded review counters and refresh", () => {
   it("scores precision, recall and F1 over every model rather than the newest reviewed one", async () => {
     // v0.3 alone would read 100%; all models together are 2 of 4 accepted.
     const latestReviewed = { ...metrics, model_version: "v0.3", reviewed: 1, approved: 1, precision: 1, recall: 1, f1: 1 };
-    const allModels = { ...metrics, model_versions: 2, reviewed: 4, approved: 2, rejected: 1, overridden: 1, precision: 0.5, recall: 2 / 3, f1: 0.5 };
+    const allModels = { ...metrics, model_versions: 2, suggestions: 4, reviewed: 4, approved: 2, rejected: 1, overridden: 1, precision: 0.5, recall: 2 / 3, f1: 4 / 7 };
     mockGet.mockImplementation((url: string) => Promise.resolve({ data: url.includes("accuracy") ? {
-      overall: metrics,
-      by_source_vocabulary: { "": { ...metrics, model_version: "v0.3", latest_reviewed: latestReviewed, all_models: allModels } },
+      overall: url.includes("dashboard") ? allModels : { ...metrics, all_models: allModels },
+      models: [latestReviewed, { ...metrics, model_version: "v0.2" }],
+      by_source_vocabulary: { "": { ...latestReviewed, all_models: { ...latestReviewed, model_versions: 1 } } },
     } : url.includes("reference") ? reference : [proposedRow] }));
     render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
     const section = await screen.findByRole("region", { name: "Suggestion accuracy" });
     expect(await within(section).findByText("Precision")).toBeInTheDocument();
     expect(within(section).getByText("Precision").parentElement).toHaveTextContent("50.0%");
     expect(within(section).getByText("Recall").parentElement).toHaveTextContent("66.7%");
-    expect(within(section).getByText("F1").parentElement).toHaveTextContent("50.0%");
+    expect(within(section).getByText("F1").parentElement).toHaveTextContent("57.1%");
     expect(within(section).getByText("Approved").parentElement).toHaveTextContent("2");
     expect(within(section).getByText("Rejected").parentElement).toHaveTextContent("1");
     expect(within(section).getByText("Other destination").parentElement).toHaveTextContent("1");
     expect(within(section).queryByText(/model reviews/)).not.toBeInTheDocument();
+    const labels = ["Approved", "Rejected", "Other destination", "Precision", "Recall", "F1"];
+    const displayed = labels.map(label => within(section).getByText(label).parentElement?.lastElementChild?.textContent);
+    fireEvent.click(screen.getByRole("tab", { name: /Overall/ }));
+    expect(labels.map(label => within(section).getByText(label).parentElement?.lastElementChild?.textContent)).toEqual(displayed);
+    render(<MemoryRouter><CodeMappingAccuracyPage /></MemoryRouter>);
+    const historyRow = (await screen.findByText("All models (2)")).closest("tr")!;
+    expect(within(historyRow).getAllByRole("cell").slice(2).map(cell => cell.textContent)).toEqual(displayed);
   });
 
   it("shows dashes rather than one model's score when the API predates all_models", async () => {
@@ -1387,9 +1461,8 @@ describe("Uncoded review counters and refresh", () => {
     // with nothing left on the strip to explain it.
     const latestReviewed = { ...metrics, model_version: "v0.2", reviewed: 2, approved: 2, precision: 1, recall: 1, f1: 1 };
     mockGet.mockImplementation((url: string) => Promise.resolve({ data: url.includes("accuracy") ? {
-      overall: metrics,
-      by_source_vocabulary: { "": { ...metrics, model_version: "v0.3", latest_reviewed: latestReviewed,
-        review_totals: { approved: 5, rejected: 1, overridden: 0 } } },
+      overall: { ...metrics, latest_reviewed: latestReviewed, review_totals: { approved: 5, rejected: 1, overridden: 0 } },
+      by_source_vocabulary: {},
     } : url.includes("reference") ? reference : [proposedRow] }));
     render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
     const section = await screen.findByRole("region", { name: "Suggestion accuracy" });
@@ -1407,9 +1480,7 @@ describe("Uncoded review counters and refresh", () => {
         return loads === 1 ? Promise.resolve({ data: [proposedRow] }) : new Promise(() => {});
       }
       if (url.includes("reference")) return Promise.resolve({ data: reference });
-      return Promise.resolve({ data: { overall: metrics, by_source_vocabulary: {
-        "": { ...metrics, review_totals: { approved: loads > 1 ? 1 : 0, rejected: 0, overridden: 0 } },
-      } } });
+      return Promise.resolve({ data: { overall: { ...metrics, review_totals: { approved: loads > 1 ? 1 : 0, rejected: 0, overridden: 0 } }, by_source_vocabulary: {} } });
     });
     mockPatch.mockResolvedValue({ data: { ...proposedRow, status: "approved" } });
     render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
@@ -1420,16 +1491,15 @@ describe("Uncoded review counters and refresh", () => {
     expect(mockGet.mock.calls.filter(([url]) => url === "/v1/code-mappings/reference/")).toHaveLength(1);
   });
 
-  it("does not display other vocabularies' reviews for an Uncoded tab without suggestions", async () => {
+  it("shows overall reviews even when the selected vocabulary has no suggestions", async () => {
     mockGet.mockImplementation((url: string) => Promise.resolve({ data: url.includes("accuracy") ? {
       overall: { ...metrics, approved: 99, review_totals: { approved: 99, rejected: 0, overridden: 0 } },
       by_source_vocabulary: {},
     } : url.includes("reference") ? reference : [proposedRow] }));
     render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
     const section = await screen.findByRole("region", { name: "Suggestion accuracy" });
-    expect(within(section).getByText("Approved").parentElement).toHaveTextContent("0");
-    // Metrics are scoped like the counts beside them, so they read as dashes
-    // rather than borrowing the overall model's score.
+    expect(within(section).getByText("Approved").parentElement).toHaveTextContent("99");
+    // Older API responses still cannot supply cross-version scores.
     expect(within(section).getAllByText("—")).toHaveLength(3);
   });
 });

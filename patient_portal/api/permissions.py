@@ -17,7 +17,8 @@ SERVICE_TOKEN = "service-token"
 
 def is_service_token(request) -> bool:
     """Return True when the request was authenticated as a trusted service token."""
-    return isinstance(request.auth, ServiceCredential) or request.auth == SERVICE_TOKEN
+    token = getattr(request, "auth", None)
+    return isinstance(token, ServiceCredential) or token == SERVICE_TOKEN
 
 
 def service_token_scopes(request):

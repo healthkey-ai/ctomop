@@ -218,7 +218,7 @@ def test_ordinary_clinical_provenance_cannot_spoof_service_actor(service_id):
     response = client.post('/api/measurements/', {
         'person': person.pk, 'measurement_concept': 3000963,
         'measurement_date': '2026-06-01', 'measurement_type_concept': 32883,
-        'value_as_number': 12, 'source_user_id': 'spoofed-patient',
+        'value_as_number': 12, 'source': 'EHR_SYNC', 'source_user_id': 'spoofed-patient',
     }, format='json', HTTP_X_PROVENANCE_USER_ID='another-spoof')
     assert response.status_code == 201, response.data
     measurement = Measurement.objects.get(person=person)

@@ -840,8 +840,10 @@ class PatientRecordSerializer(serializers.ModelSerializer):
         from omop_core.services.cytogenetics import normalise_cytogenetic_markers
         try:
             return normalise_cytogenetic_markers(value, strict=True)
-        except ValueError as exc:
-            raise serializers.ValidationError(str(exc)) from exc
+        except ValueError:
+            raise serializers.ValidationError(
+                'Unrecognized cytogenetic marker selection.'
+            ) from None
 
     def validate(self, data):
         dob = data.get(

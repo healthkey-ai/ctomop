@@ -136,6 +136,7 @@ def test_serializer_rejects_values_outside_the_ui_vocabulary():
     )
     assert serializer.is_valid() is False
     assert 'cytogenetic_markers' in serializer.errors
+    assert 'not-a-reviewed-marker' not in str(serializer.errors)
 
 
 def test_serializer_accepts_the_legacy_write_name_but_emits_only_the_canonical_name():

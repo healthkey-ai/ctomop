@@ -85,3 +85,28 @@ test('API errors publish failure, never a passing status', async () => {
   await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1 }, core: { warning() {} } });
   assert.deepEqual(statuses.map(status => status.state), ['pending', 'failure']);
 });
+
+test('a security label on a referenced non-closing issue also requires review', async () => {
+  const { github, current } = fixture();
+  current.body = 'Related to #141';
+  github.graphql = async () => ({ repository: { pullRequest: { closingIssuesReferences: { nodes: [], pageInfo: { hasNextPage: false } } } } });
+  github.rest.issues.get = async () => ({ data: { labels: [{ name: 'security' }] } });
+  assert.equal((await evaluate(github, 'healthkey-ai', 'promop', current)).state, 'failure');
+});
+
+test('an ordinary PR cannot overwrite a security failure on a shared head', async () => {
+  const { github, current, statuses } = fixture();
+  const security = { ...current, number: 8, labels: [{ name: 'security' }] };
+  github.rest.pulls.list = async () => [security, current];
+  github.rest.pulls.get = async p => ({ data: p.pull_number === 8 ? security : current });
+  await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1 }, core: { warning() {} } });
+  assert.deepEqual(statuses.map(status => status.state), ['pending', 'failure']);
+});
+
+test('a PR changed during evaluation cannot receive a passing status', async () => {
+  const { github, current, statuses } = fixture();
+  let reads = 0;
+  github.rest.pulls.get = async () => ({ data: { ...current, updated_at: ++reads === 1 ? 'now' : 'later' } });
+  await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1 }, core: { warning() {} } });
+  assert.deepEqual(statuses.map(status => status.state), ['pending', 'failure']);
+});

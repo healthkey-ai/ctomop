@@ -450,6 +450,10 @@ def _curated_writes(choice_options=None):
         elif choice_options and row.field_name in choice_options:
             entry['options'] = choice_options[row.field_name]
             entry['multiple'] = row.multiple
+        if (row.field_name == 'cytogenetic_markers' and row.multiple
+                and row.vocabulary_id == 'SNOMED' and row.concept_code == '107675007'):
+            from omop_core.services.cytogenetics import descriptor as cytogenetic_descriptor
+            entry = cytogenetic_descriptor(mapping_approved=True)
         entries[row.field_name] = entry
     return entries
 
@@ -901,8 +905,4 @@ def build_writable_field_descriptor():
             'source_value': 'patient-record:' + field,
         }
     descriptor['death_date']['reason'] = 'Corrections are dated OMOP observations; earlier facts remain as history.'
-    from omop_core.services.cytogenetics import FIELD, descriptor as cytogenetic_descriptor
-    marker_descriptor = cytogenetic_descriptor()
-    if marker_descriptor is not None:
-        descriptor[FIELD] = marker_descriptor
     return descriptor

@@ -139,10 +139,10 @@ def selections(value):
     return re.split(r',\s*(?![^()]*\))', normalized) if normalized else []
 
 
-def descriptor():
+def descriptor(*, mapping_approved=False):
     from omop_core.models import Concept, FieldChoice, FieldConceptMapping
 
-    if not FieldConceptMapping.objects.filter(
+    if not mapping_approved and not FieldConceptMapping.objects.filter(
         field_name=FIELD, status='approved', multiple=True,
         vocabulary_id='SNOMED', concept_code=LEGACY_CONCEPT_CODE,
     ).exists():
@@ -174,18 +174,17 @@ def descriptor():
                 'type_concept_id': 32817, 'value_kind': 'string',
             }
     entry['options'] = options
-    if FieldConceptMapping.objects.filter(field_name=FIELD, status='approved', multiple=True).exists():
-        entry['projection'] = {
-            'omop_table': 'observation', 'choice_projections': recipes,
-            'choice_values': [choice.display for choice in choices],
+    entry['projection'] = {
+        'omop_table': 'observation', 'choice_projections': recipes,
+        'choice_values': [choice.display for choice in choices],
+    }
+    legacy_concept = concepts.get(('SNOMED', LEGACY_CONCEPT_CODE))
+    if legacy_concept:
+        entry['projection']['legacy_projection'] = {
+            'omop_table': 'observation', 'concept_id': legacy_concept.pk,
+            'source_value': LEGACY_SOURCE, 'type_concept_id': 32817,
+            'value_kind': 'string',
         }
-        legacy_concept = concepts.get(('SNOMED', LEGACY_CONCEPT_CODE))
-        if legacy_concept:
-            entry['projection']['legacy_projection'] = {
-                'omop_table': 'observation', 'concept_id': legacy_concept.pk,
-                'source_value': LEGACY_SOURCE, 'type_concept_id': 32817,
-                'value_kind': 'string',
-            }
     return entry
 
 

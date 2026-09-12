@@ -4297,7 +4297,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     if ecog is not None:
                         _patch['ecog_performance_status'] = ecog
                     if cytogenetics_str is not None:
-                        _patch['cytogenic_markers'] = cytogenetics_str
+                        _patch['cytogenetic_markers'] = cytogenetics_str
                     if measurable_disease_imwg is not None:
                         _patch['measurable_disease_imwg'] = measurable_disease_imwg
                     if lymph_node_status:

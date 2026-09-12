@@ -274,7 +274,7 @@ _TAB_DISEASE = frozenset({
     'tumor_size', 'lymph_node_status', 'metastasis_status',
     'biopsy_grade', 'biopsy_grade_depr', 'plasma_cell_leukemia',
     'pd_l1_assay', 'pd_l1_ic_percentage', 'pd_l1_combined_positive_score',
-    'cytogenic_markers', 'molecular_markers',
+    'cytogenetic_markers', 'molecular_markers',
     'condition_code_icd_10', 'condition_code_snomed_ct',
     'condition_clinical_status', 'prior_procedures',
     'metastatic_status', 'active_infection_status', 'active_malignancies',

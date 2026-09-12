@@ -217,7 +217,8 @@ def _store_text(value, person, date, type_concept_id, parent_pk):
         note_text=value,
         note_source_value=f'genomics:overflow:{parent_pk}',
     )
-    return value[:_CDM_TEXT_WIDTH - 10] + f'[note:{note.pk}]', note.pk
+    reference = f'[note:{note.pk}]'
+    return value[:_CDM_TEXT_WIDTH - len(reference)] + reference, note.pk
 
 
 def _read_note_text(value):

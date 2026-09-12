@@ -151,7 +151,7 @@ _OMOP_DERIVED_FIELDS = [
     # MM boolean/coded fields (derived by _get_mm_specific_data)
     'plasma_cell_leukemia', 'bone_lesions', 'meets_crab', 'meets_slim',
     # MM cytogenetics + SCT (derived by _get_sct_cytogenetic_data)
-    'cytogenic_markers', 'sct_date', 'stem_cell_transplant_history', 'sct_eligibility',
+    'cytogenetic_markers', 'sct_date', 'stem_cell_transplant_history', 'sct_eligibility',
     # Vitals
     'systolic_blood_pressure', 'diastolic_blood_pressure', 'heartrate',
     'weight', 'weight_units', 'height', 'height_units', 'temperature',
@@ -3228,7 +3228,10 @@ def _get_sct_cytogenetic_data(person: Person, snapshot: OmopSnapshot = None) -> 
             continue
 
         if src == 'mm-cytogenetic-markers':
-            data['cytogenic_markers'] = val
+            from omop_core.services.cytogenetics import (
+                normalise_cytogenetic_markers, read_cytogenetic_summary,
+            )
+            data['cytogenetic_markers'] = normalise_cytogenetic_markers(read_cytogenetic_summary(obs))
         elif src == 'mm-sct-date':
             try:
                 data['sct_date'] = datetime.strptime(val[:10], '%Y-%m-%d').date()

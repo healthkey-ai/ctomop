@@ -12,6 +12,21 @@ from tests.factories import ConceptFactory, MeasurementFactory, ObservationFacto
 pytestmark = pytest.mark.django_db
 
 
+@pytest.mark.parametrize('note_id', [1, 10**15])
+def test_genomic_overflow_reference_fits_cdm_width_with_large_note_ids(monkeypatch, note_id):
+    from datetime import date
+    from omop_core.services.genomics import _read_note_text, _store_text
+
+    person = PersonFactory()
+    monkeypatch.setattr('omop_core.services.genomics.next_pk', lambda model, field: note_id)
+    value = 'Original laboratory narrative. ' * 20
+    stored, created_id = _store_text(value, person, date(2026, 9, 1), 0, 7)
+    assert created_id == note_id
+    assert len(stored) == 60
+    assert stored.endswith(f'[note:{note_id}]')
+    assert _read_note_text(stored) == value
+
+
 @pytest.fixture
 def setup():
     person = PersonFactory()

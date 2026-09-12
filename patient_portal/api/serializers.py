@@ -390,6 +390,22 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             'user_edited_fields', 'custom_fields', 'therapy_overrides',
         )
 
+    def to_internal_value(self, data):
+        """Accept the historical misspelling on writes during API migration."""
+        if 'cytogenic_markers' in data:
+            legacy_value = data.get('cytogenic_markers')
+            data = data.copy()
+            data.pop('cytogenic_markers')
+            if 'cytogenetic_markers' in data and data['cytogenetic_markers'] != legacy_value:
+                raise serializers.ValidationError({
+                    'cytogenetic_markers': (
+                        'Do not send conflicting cytogenic_markers and '
+                        'cytogenetic_markers values.'
+                    ),
+                })
+            data['cytogenetic_markers'] = legacy_value
+        return super().to_internal_value(data)
+
     def get_supportive_therapy_courses(self, obj):
         from patient_portal.api.supportive_therapies import SupportiveTherapySerializer
         return SupportiveTherapySerializer(
@@ -818,6 +834,16 @@ class PatientRecordSerializer(serializers.ModelSerializer):
                 f"Allowed: {sorted(allowed)}"
             )
         return value
+
+    def validate_cytogenetic_markers(self, value):
+        """Store the same canonical tokens used by FHIR refresh and matching."""
+        from omop_core.services.cytogenetics import normalise_cytogenetic_markers
+        try:
+            return normalise_cytogenetic_markers(value, strict=True)
+        except ValueError:
+            raise serializers.ValidationError(
+                'Unrecognized cytogenetic marker selection.'
+            ) from None
 
     def validate(self, data):
         dob = data.get(

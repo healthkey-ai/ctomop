@@ -114,7 +114,13 @@ def curated_values_from_snapshot(snapshot):
         if value is None:
             continue
         try:
-            values[name] = readable_fields[name].to_python(value)
+            value = readable_fields[name].to_python(value)
+            if name == 'cytogenetic_markers':
+                from omop_core.services.cytogenetics import (
+                    normalise_cytogenetic_markers, read_cytogenetic_summary,
+                )
+                value = normalise_cytogenetic_markers(read_cytogenetic_summary(row))
+            values[name] = value
         except (ValidationError, ValueError, TypeError):
             continue
     return values
@@ -196,6 +202,7 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
             answer_fields = ('value_as_number', 'value_as_string', 'value_as_concept_id',
                              'value_source_value', 'unit_source_value', 'unit_concept_id')
             previous = {f: getattr(instance, f) for f in answer_fields} if val_num else {}
+            note_changed = False
             if val_num is not None:
                 # Reset all answer columns, including answers on same-day imports.
                 instance.value_as_number = None
@@ -205,7 +212,11 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
                 if not _is_empty(value):
                     kind = projection.get('value_kind')
                     if kind in ('string', 'date', 'json'):
-                        instance.value_as_string = str(value)
+                        if field_name == 'cytogenetic_markers':
+                            from omop_core.services.cytogenetics import store_cytogenetic_summary
+                            instance.value_as_string, note_changed = store_cytogenetic_summary(instance, str(value))
+                        else:
+                            instance.value_as_string = str(value)
                     else:
                         try:
                             instance.value_as_number = float(value)
@@ -213,7 +224,7 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
                             instance.value_as_string = str(value)
                 instance.unit_source_value = projection.get('unit') or None
                 instance.unit_concept_id = projection.get('unit_concept_id') or None
-            if existing and all(getattr(instance, f) == v for f, v in previous.items()):
+            if existing and not note_changed and all(getattr(instance, f) == v for f, v in previous.items()):
                 return acknowledge_existing
             instance._skip_patient_record_refresh = True
             instance.save()

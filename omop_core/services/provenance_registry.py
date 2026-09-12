@@ -453,7 +453,7 @@ _MANUAL_ENTRIES: dict[str, FieldProvenance] = {
         selection_rule="all",
         description="SCT eligibility from FHIR extensions / Observation",
     ),
-    "cytogenic_markers": FieldProvenance(
+    "cytogenetic_markers": FieldProvenance(
         omop_table="Observation",
         lookup_strategy="snomed",
         extractor="_get_sct_cytogenetic_data",

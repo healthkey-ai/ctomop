@@ -2,7 +2,7 @@
 import pytest
 from rest_framework.test import APIRequestFactory, force_authenticate
 
-from omop_core.models import Concept, Measurement, Observation
+from omop_core.models import Concept, Measurement, Note, Observation
 from omop_core.services.genomics import FIELDS, list_variants, replace_variants, save_variant
 from omop_core.services.patient_record_service import refresh_patient_record
 from patient_portal.api.views import PatientRecordViewSet
@@ -58,7 +58,14 @@ def test_full_crud_preserves_all_fields_and_unrelated_facts(setup):
     assert {k: response.data[k] for k in payload} == payload
     parent = Measurement.objects.get(pk=variant_id)
     assert parent.measurement_source_value == 'genomics:brca1'
-    assert Observation.objects.get(person=person, observation_source_value='genomics:variant_description').value_as_string == payload['variant_description']
+    obs = Observation.objects.get(person=person, observation_source_value='genomics:variant_description')
+    # Long text overflows to a linked NOTE; the component holds a truncation marker.
+    if len(payload['variant_description']) > 60:
+        assert '[note:' in obs.value_as_string
+        note = Note.objects.get(pk=int(obs.value_as_string.split('[note:')[1].rstrip(']')))
+        assert note.note_text == payload['variant_description']
+    else:
+        assert obs.value_as_string == payload['variant_description']
     frequency = Measurement.objects.get(person=person, measurement_source_value='81258-6')
     assert float(frequency.value_as_number) == 43.25
     assert frequency.unit_source_value == '%'
@@ -207,3 +214,307 @@ def test_analyst_cannot_mutate_visible_patient(setup, monkeypatch):
         response = call(person, analyst, method, {'gene': 'BRCA1'}, None if method == 'post' else variant['id'])
         assert response.status_code == 403
     assert list_variants(person) == [variant]
+
+
+# --- Finding status (§2) ---
+
+
+def test_status_defaults_to_present_on_new_write(setup):
+    """A finding written without explicit status defaults to present."""
+    person, _, _ = setup
+    variant = save_variant(person, {'gene': 'TP53'})
+    assert variant['status'] == 'present'
+    # Status component is stored in OMOP.
+    assert Observation.objects.filter(
+        person=person, observation_event_id=variant['id'],
+        observation_source_value='genomics:status',
+    ).exists()
+
+
+def test_status_defaults_to_present_for_legacy_rows(setup):
+    """Legacy Measurement rows with no status component project status=present."""
+    person, _, _ = setup
+    parent = MeasurementFactory(person=person, measurement_source_value='81252-9',
+        value_as_string='c.123A>G', qualifier_source_value='TP53')
+    variants = list_variants(person)
+    assert len(variants) == 1
+    assert variants[0]['status'] == 'present'
+
+
+@pytest.mark.parametrize('status', ['present', 'absent', 'indeterminate'])
+def test_status_round_trips_through_omop(setup, status):
+    """Each status value stores in OMOP and reads back correctly."""
+    person, record, _ = setup
+    payload = {'gene': 'TP53', 'status': status}
+    if status != 'absent':
+        payload['variant'] = 'c.123A>G'
+    variant = save_variant(person, payload)
+    assert variant['status'] == status
+    refresh_patient_record(person)
+    record.refresh_from_db()
+    projected = record.genetic_mutations
+    assert len(projected) == 1
+    assert projected[0]['status'] == status
+
+
+def test_status_rejects_invalid_values(setup):
+    """Only present, absent and indeterminate are accepted."""
+    person, _, _ = setup
+    from rest_framework.exceptions import ValidationError
+    with pytest.raises(ValidationError, match='status'):
+        save_variant(person, {'gene': 'TP53', 'status': 'unknown'})
+    with pytest.raises(ValidationError, match='status'):
+        save_variant(person, {'gene': 'TP53', 'status': 'not_tested'})
+    assert not Measurement.objects.filter(person=person).exists()
+
+
+def test_absent_finding_writes_parent_and_contextual_components(setup):
+    """An absent finding writes the parent and contextual components."""
+    person, _, _ = setup
+    payload = {
+        'gene': 'TP53', 'status': 'absent',
+        'variant_analysis_method_type': 'FISH',
+        'specimen_type': 'blood', 'laboratory': 'MGH',
+    }
+    variant = save_variant(person, payload)
+    assert variant['status'] == 'absent'
+    assert variant['variant_analysis_method_type'] == 'FISH'
+    assert variant['specimen_type'] == 'blood'
+    assert variant['laboratory'] == 'MGH'
+    parent = Measurement.objects.get(pk=variant['id'])
+    assert not parent.is_erroneous
+
+
+def test_absent_finding_has_no_variant_level_components(setup):
+    """Variant-level components are not stored on absent findings."""
+    person, _, _ = setup
+    variant = save_variant(person, {'gene': 'TP53', 'status': 'absent'})
+    assert variant.get('amino_acid_change') in ('', None)
+    assert variant.get('allelic_frequency') is None
+    assert variant.get('genomic_dna_change') in ('', None)
+    assert variant.get('transcript_reference_sequence_id') in ('', None)
+
+
+def test_variant_level_components_rejected_on_absent(setup):
+    """Supplying variant-level components on an absent finding is an error."""
+    person, _, _ = setup
+    from rest_framework.exceptions import ValidationError
+    with pytest.raises(ValidationError, match='amino_acid_change'):
+        save_variant(person, {'gene': 'TP53', 'status': 'absent', 'amino_acid_change': 'p.R175H'})
+    with pytest.raises(ValidationError, match='allelic_frequency'):
+        save_variant(person, {'gene': 'TP53', 'status': 'absent', 'allelic_frequency': 50.0})
+    with pytest.raises(ValidationError, match='genomic_dna_change'):
+        save_variant(person, {'gene': 'TP53', 'status': 'absent', 'genomic_dna_change': 'g.123A>G'})
+    assert not Measurement.objects.filter(person=person).exists()
+
+
+def test_empty_list_writes_no_omop_facts(setup):
+    """An empty genomics list leaves the marker unknown; no OMOP facts written."""
+    person, record, staff = setup
+    request = APIRequestFactory().patch(
+        f'/api/v1/patient-records/{person.pk}/',
+        {'genomics_tp53': []}, format='json',
+    )
+    force_authenticate(request, user=staff)
+    response = PatientRecordViewSet.as_view({'patch': 'partial_update'})(request, pk=person.person_id)
+    assert response.status_code == 200
+    assert response.data['genomics_tp53'] == []
+    assert not Measurement.objects.filter(person=person).exists()
+
+
+def test_absent_finding_via_named_list_patch(setup):
+    """Recording absence requires an explicit entry with status=absent."""
+    person, record, staff = setup
+    request = APIRequestFactory().patch(
+        f'/api/v1/patient-records/{person.pk}/',
+        {'genomics_del17p': [{'status': 'absent', 'variant_analysis_method_type': 'FISH'}]},
+        format='json',
+    )
+    force_authenticate(request, user=staff)
+    response = PatientRecordViewSet.as_view({'patch': 'partial_update'})(request, pk=person.person_id)
+    assert response.status_code == 200
+    entries = response.data['genomics_del17p']
+    assert len(entries) == 1
+    assert entries[0]['status'] == 'absent'
+
+
+# --- Clone fraction (§5) ---
+
+
+@pytest.mark.parametrize('value,unit,expected', [
+    (50.0, '%', 50.0),
+    (0.5, '1', 0.5),
+    (0, '%', 0.0),
+    (0.0, '1', 0.0),
+])
+def test_clone_fraction_round_trips(setup, value, unit, expected):
+    """Clone fraction stores and reads back with both unit conventions."""
+    person, _, _ = setup
+    variant = save_variant(person, {
+        'gene': 'TP53', 'variant_analysis_method_type': 'FISH',
+        'clone_fraction': value, 'clone_fraction_unit': unit,
+    })
+    assert variant['clone_fraction'] == expected
+    assert variant['clone_fraction_unit'] == unit
+
+
+def test_clone_fraction_preserves_zero(setup):
+    """Zero clone fraction is meaningful and not treated as missing."""
+    person, _, _ = setup
+    variant = save_variant(person, {
+        'gene': 'TP53', 'clone_fraction': 0, 'clone_fraction_unit': '%',
+    })
+    assert variant['clone_fraction'] == 0.0
+    row = Measurement.objects.get(person=person, measurement_source_value='genomics:clone_fraction')
+    assert float(row.value_as_number) == 0.0
+
+
+def test_clone_fraction_rejects_six_decimal_places(setup):
+    """Clone fraction has a maximum of five decimal places."""
+    person, _, _ = setup
+    from rest_framework.exceptions import ValidationError
+    with pytest.raises(ValidationError, match='clone_fraction'):
+        save_variant(person, {'gene': 'TP53', 'clone_fraction': 0.123456, 'clone_fraction_unit': '1'})
+
+
+def test_clone_fraction_not_interchangeable_with_allelic_frequency(setup):
+    """Clone fraction and allelic frequency are distinct components."""
+    person, _, _ = setup
+    variant = save_variant(person, {
+        'gene': 'TP53', 'allelic_frequency': 45.0, 'allelic_frequency_unit': '%',
+        'clone_fraction': 80.0, 'clone_fraction_unit': '%',
+    })
+    assert variant['allelic_frequency'] == 45.0
+    assert variant['clone_fraction'] == 80.0
+    af_row = Measurement.objects.get(person=person, measurement_source_value='81258-6')
+    cf_row = Measurement.objects.get(person=person, measurement_source_value='genomics:clone_fraction')
+    assert float(af_row.value_as_number) == 45.0
+    assert float(cf_row.value_as_number) == 80.0
+
+
+# --- BIDMC component alignment (§7) ---
+
+
+def test_transcript_dna_change_round_trips(setup):
+    """Transcript DNA change (48004-6) stores and reads back separately from genomic_dna_change."""
+    person, _, _ = setup
+    variant = save_variant(person, {
+        'gene': 'TP53', 'variant': 'c.215C>G',
+        'transcript_dna_change': 'c.215C>G',
+        'genomic_dna_change': 'NC_000017.11:g.7674220C>G',
+    })
+    assert variant['transcript_dna_change'] == 'c.215C>G'
+    assert variant['genomic_dna_change'] == 'NC_000017.11:g.7674220C>G'
+    # The raw variant string is preserved alongside the coded value.
+    assert variant['variant'] == 'c.215C>G'
+
+
+def test_transcript_and_genomic_dna_changes_are_separate(setup):
+    """Writing one DNA change does not populate the other."""
+    person, _, _ = setup
+    variant = save_variant(person, {
+        'gene': 'TP53', 'transcript_dna_change': 'c.215C>G',
+    })
+    assert variant['transcript_dna_change'] == 'c.215C>G'
+    assert variant.get('genomic_dna_change') in ('', None)
+
+
+def test_coverage_depth_round_trips(setup):
+    """Coverage depth stores as a numeric value."""
+    person, _, _ = setup
+    variant = save_variant(person, {
+        'gene': 'TP53', 'variant': 'c.215C>G',
+        'coverage_depth': 250,
+    })
+    assert variant['coverage_depth'] == 250.0
+
+
+def test_amino_acid_change_and_type_are_separate(setup):
+    """amino_acid_change and amino_acid_change_type are distinct components."""
+    person, _, _ = setup
+    variant = save_variant(person, {
+        'gene': 'TP53', 'variant': 'c.215C>G',
+        'amino_acid_change': 'p.Pro72Arg',
+        'amino_acid_change_type': 'missense',
+    })
+    assert variant['amino_acid_change'] == 'p.Pro72Arg'
+    assert variant['amino_acid_change_type'] == 'missense'
+
+
+def test_long_text_lands_in_note_and_round_trips(setup):
+    """Text exceeding CDM column width is stored in a NOTE row and round-trips."""
+    person, _, _ = setup
+    long_text = 'A' * 200  # Well beyond the 60-char CDM limit.
+    variant = save_variant(person, {
+        'gene': 'TP53', 'variant_description': long_text,
+    })
+    assert variant['variant_description'] == long_text
+    obs = Observation.objects.get(person=person, observation_source_value='genomics:variant_description')
+    assert '[note:' in obs.value_as_string
+    note_pk = int(obs.value_as_string.split('[note:')[1].rstrip(']'))
+    note = Note.objects.get(pk=note_pk)
+    assert note.note_text == long_text
+    assert note.person == person
+
+
+def test_chromosome_resolves_at_48000_4(setup):
+    """Chromosome stays at LOINC 48000-4, not 73822-9."""
+    person, _, _ = setup
+    variant = save_variant(person, {'gene': 'TP53', 'chromosome': '17'})
+    row = Measurement.objects.filter(
+        person=person, measurement_source_value='48000-4',
+    ).first()
+    assert row is not None
+    assert row.value_as_string == '17'
+
+
+# --- Observed vs derived markers (§4) ---
+
+
+def test_asserted_complex_karyotype_has_provenance(setup):
+    """Asserted complex karyotype stores as a finding with provenance=asserted."""
+    person, record, staff = setup
+    request = APIRequestFactory().patch(
+        f'/api/v1/patient-records/{person.pk}/',
+        {'genomics_complex_karyotype': [{'variant': '3 abnormalities'}]},
+        format='json',
+    )
+    force_authenticate(request, user=staff)
+    response = PatientRecordViewSet.as_view({'patch': 'partial_update'})(request, pk=person.person_id)
+    assert response.status_code == 200
+    entries = response.data['genomics_complex_karyotype']
+    assert len(entries) == 1
+    assert entries[0]['provenance'] == 'asserted'
+
+
+def test_derived_path_stub_returns_no_value(setup):
+    """The derived path is a stub and returns no value."""
+    from omop_core.services.genomics_catalog import _derive_complex_karyotype, _derive_complex_karyotype_excl_t1114
+    assert _derive_complex_karyotype([]) is None
+    assert _derive_complex_karyotype_excl_t1114([]) is None
+
+
+def test_asserted_finding_wins_over_derived(setup):
+    """When an asserted finding exists, derived is not computed."""
+    person, record, staff = setup
+    request = APIRequestFactory().patch(
+        f'/api/v1/patient-records/{person.pk}/',
+        {'genomics_complex_karyotype': [{'variant': '5 abnormalities'}]},
+        format='json',
+    )
+    force_authenticate(request, user=staff)
+    response = PatientRecordViewSet.as_view({'patch': 'partial_update'})(request, pk=person.person_id)
+    assert response.status_code == 200
+    entries = response.data['genomics_complex_karyotype']
+    assert len(entries) == 1
+    assert entries[0]['provenance'] == 'asserted'
+    # No derived entry alongside the asserted one.
+    assert all(e['provenance'] == 'asserted' for e in entries)
+
+
+def test_no_asserted_complex_karyotype_returns_empty(setup):
+    """With no asserted finding and stub derivation, the list is empty."""
+    person, record, staff = setup
+    refresh_patient_record(person)
+    record.refresh_from_db()
+    assert record.genomics_complex_karyotype == []

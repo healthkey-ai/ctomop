@@ -12,16 +12,29 @@ from django.utils.dateparse import parse_date
 from django.utils.timezone import localdate
 from rest_framework.exceptions import NotFound, ValidationError
 
-from omop_core.models import Concept, ConceptRelationship, FieldConceptMapping, Measurement, Observation, PatientRecord
+from omop_core.models import Concept, ConceptRelationship, FieldConceptMapping, Measurement, Note, Observation, PatientRecord
 from omop_core.services.genomics_catalog import catalog, marker_for_variant, patient_fields
 from omop_core.services.pk import next_pk
 from omop_core.signals import suppress_patient_record_refresh
 
 PREFIX = 'genomics:'
 PARENT_CODE = '81252-9'
+_CDM_TEXT_WIDTH = 60  # CDM conformant column width for value_as_string.
 # field: (source code, fallback OMOP domain). LOINCs from the discrete
 # genetic variant panel; local narrative fields explicitly remain unmapped.
 FIELDS = {a['key']: (a['code'], a['table'].title()) for a in catalog()['attributes']}
+# Components added after the frozen v1 catalog; seeded by later migrations.
+FIELDS['status'] = ('genomics:status', 'Observation')
+FIELDS['clone_fraction'] = ('genomics:clone_fraction', 'Measurement')
+FIELDS['transcript_dna_change'] = ('genomics:transcript_dna_change', 'Measurement')
+FIELDS['coverage_depth'] = ('genomics:coverage_depth', 'Measurement')
+FIELDS['amino_acid_change_type'] = ('genomics:amino_acid_change_type', 'Measurement')
+
+# Variant-level components that do not apply to absent findings.
+_VARIANT_LEVEL_FIELDS = frozenset({
+    'amino_acid_change', 'allelic_frequency', 'genomic_dna_change',
+    'transcript_reference_sequence_id',
+})
 
 
 def approved_mapping(field_name):
@@ -45,7 +58,7 @@ def mapped_concept(mapping):
 def normalize_variant(payload, existing=None):
     if not isinstance(payload, dict):
         raise ValidationError({'variant': 'Expected an object.'})
-    allowed = set(FIELDS) | {'id', 'variant', 'mutation', 'test_date', 'assay_method', 'allelic_frequency_unit', 'marker_key'}
+    allowed = set(FIELDS) | {'id', 'variant', 'mutation', 'test_date', 'assay_method', 'allelic_frequency_unit', 'clone_fraction_unit', 'marker_key'}
     unknown = set(payload) - allowed
     if unknown:
         raise ValidationError({key: 'Unknown variant field.' for key in sorted(unknown)})
@@ -54,8 +67,9 @@ def normalize_variant(payload, existing=None):
         data['variant'] = payload['mutation']
     if 'assay_method' in payload and 'variant_analysis_method_type' not in payload:
         data['variant_analysis_method_type'] = payload['assay_method']
+    _NUMERIC_FIELDS = {'allelic_frequency', 'clone_fraction', 'coverage_depth'}
     for key in set(FIELDS) | {'variant'}:
-        if key == 'allelic_frequency':
+        if key in _NUMERIC_FIELDS:
             continue
         value = data.get(key)
         if value is not None and not isinstance(value, str):
@@ -83,6 +97,24 @@ def normalize_variant(payload, existing=None):
             raise ValidationError({key: 'Use a valid YYYY-MM-DD date.'})
     if data.get('assessment') not in ('', 'present', 'absent', 'not_tested', 'no_call', 'indeterminate'):
         raise ValidationError({'assessment': 'Use present, absent, not_tested, no_call or indeterminate.'})
+    status = data.get('status', '')
+    if status not in ('', 'present', 'absent', 'indeterminate'):
+        raise ValidationError({'status': 'Use present, absent or indeterminate.'})
+    # Default to present when omitted, preserving every existing caller.
+    if not status:
+        data['status'] = 'present'
+    # Variant-level components do not apply to absent findings.
+    if data['status'] == 'absent':
+        supplied_variant_fields = _VARIANT_LEVEL_FIELDS & set(payload or {})
+        nonempty = {k for k in supplied_variant_fields if payload.get(k) not in (None, '')}
+        if nonempty:
+            raise ValidationError({k: 'Variant-level components are not accepted on an absent finding.' for k in sorted(nonempty)})
+        # Clear any inherited variant-level values from an existing record.
+        for k in _VARIANT_LEVEL_FIELDS:
+            if k == 'allelic_frequency':
+                data[k] = None
+            else:
+                data[k] = ''
     frequency = data.get('allelic_frequency')
     unit = data.get('allelic_frequency_unit') or '%'
     if unit not in ('%', '1'):
@@ -100,6 +132,36 @@ def normalize_variant(payload, existing=None):
         if number != number.quantize(Decimal('0.00001')):
             raise ValidationError({'allelic_frequency': 'Use at most five decimal places.'})
         data['allelic_frequency'] = number
+    # Clone fraction: same unit discipline as allelic_frequency.
+    clone_frac = data.get('clone_fraction')
+    cf_unit = data.get('clone_fraction_unit') or '%'
+    if cf_unit not in ('%', '1'):
+        raise ValidationError({'clone_fraction_unit': 'Use % or 1 (fraction).'})
+    data['clone_fraction_unit'] = cf_unit
+    if clone_frac is None or clone_frac == '':
+        data['clone_fraction'] = None
+    else:
+        try:
+            number = Decimal(str(clone_frac))
+        except (InvalidOperation, ValueError):
+            number = Decimal('NaN')
+        if not number.is_finite() or not 0 <= number <= (100 if cf_unit == '%' else 1):
+            raise ValidationError({'clone_fraction': 'Enter 0–100 for % or 0–1 for a fraction.'})
+        if number != number.quantize(Decimal('0.00001')):
+            raise ValidationError({'clone_fraction': 'Use at most five decimal places.'})
+        data['clone_fraction'] = number
+    # Coverage depth: non-negative integer or decimal.
+    cov = data.get('coverage_depth')
+    if cov is None or cov == '':
+        data['coverage_depth'] = None
+    else:
+        try:
+            number = Decimal(str(cov))
+        except (InvalidOperation, ValueError):
+            number = Decimal('NaN')
+        if not number.is_finite() or number < 0:
+            raise ValidationError({'coverage_depth': 'Enter a non-negative number.'})
+        data['coverage_depth'] = number
     return data
 
 
@@ -130,6 +192,40 @@ def _event_concept():
     if concept is None:
         raise ValidationError({'variant': 'Load the OMOP CDM vocabulary (measurement.measurement_id) before saving variants.'})
     return concept.pk
+
+
+def _store_text(value, person, date, type_concept_id, parent_pk):
+    """Store text, overflow to a linked NOTE row if it exceeds CDM width.
+
+    Returns the string to store in value_as_string (truncated with note
+    reference if overflow) and the created Note pk (or None).
+    """
+    if not value or len(value) <= _CDM_TEXT_WIDTH:
+        return value, None
+    note = Note.objects.create(
+        note_id=next_pk(Note, 'note_id'),
+        person=person,
+        note_date=date,
+        note_type_concept_id=0,
+        note_text=value,
+        note_source_value=f'genomics:overflow:{parent_pk}',
+    )
+    return value[:_CDM_TEXT_WIDTH - 10] + f'[note:{note.pk}]', note.pk
+
+
+def _read_note_text(value):
+    """Retrieve full text from a linked NOTE if the value contains a note reference."""
+    if not value or '[note:' not in value:
+        return value
+    import re
+    match = re.search(r'\[note:(\d+)\]$', value)
+    if not match:
+        return value
+    try:
+        note = Note.objects.get(pk=int(match.group(1)))
+        return note.note_text
+    except Note.DoesNotExist:
+        return value
 
 
 def _components(person, parent_id):
@@ -170,8 +266,13 @@ def enrich_variants(variants, snapshot):
             if field == 'allelic_frequency':
                 target[field] = float(row.value_as_number) if row.value_as_number is not None else None
                 target['allelic_frequency_unit'] = row.unit_source_value or '1'
+            elif field == 'clone_fraction':
+                target[field] = float(row.value_as_number) if row.value_as_number is not None else None
+                target['clone_fraction_unit'] = row.unit_source_value or '1'
+            elif field == 'coverage_depth':
+                target[field] = float(row.value_as_number) if row.value_as_number is not None else None
             elif field:
-                value = row.value_as_string
+                value = _read_note_text(row.value_as_string)
                 if value is None and row.value_as_concept_id:
                     value = row.value_as_concept.concept_name
                 target[field] = value
@@ -230,7 +331,9 @@ def save_variant(person, payload, variant_id=None, type_concept_id=32817):
         parent = Measurement.objects.get(person=person, pk=variant_id, is_erroneous=False)
     parent.measurement_date = data['test_date']
     parent.qualifier_source_value = data['gene']
-    parent.value_as_string = data['variant'] or data['variant_name'] or data['genomic_dna_change'] or data['amino_acid_change']
+    raw_variant = data['variant'] or data['variant_name'] or data['genomic_dna_change'] or data['amino_acid_change']
+    stored, _ = _store_text(raw_variant, person, data['test_date'], type_concept_id, parent.measurement_id)
+    parent.value_as_string = stored
     # Origin and interpretation are separate facts. Do not leave stale legacy
     # qualifiers after the corresponding component has been cleared.
     parent.qualifier_concept_id = None
@@ -276,8 +379,17 @@ def save_variant(person, payload, variant_id=None, type_concept_id=32817):
             unit = Concept.objects.filter(vocabulary_id='UCUM', concept_code=data['allelic_frequency_unit'],
                 standard_concept='S', invalid_reason__isnull=True).first()
             attrs['unit_concept_id'] = unit.pk if unit else 0
+        elif key == 'clone_fraction':
+            attrs['value_as_number'] = value
+            attrs['unit_source_value'] = data['clone_fraction_unit']
+            unit = Concept.objects.filter(vocabulary_id='UCUM', concept_code=data['clone_fraction_unit'],
+                standard_concept='S', invalid_reason__isnull=True).first()
+            attrs['unit_concept_id'] = unit.pk if unit else 0
+        elif key == 'coverage_depth':
+            attrs['value_as_number'] = value
         else:
-            attrs['value_as_string'] = value
+            stored_text, _ = _store_text(str(value), person, data['test_date'], type_concept_id, parent.pk)
+            attrs['value_as_string'] = stored_text
         model.objects.create(**attrs)
     from omop_core.services.patient_record_service import refresh_patient_record
     refresh_patient_record(person)

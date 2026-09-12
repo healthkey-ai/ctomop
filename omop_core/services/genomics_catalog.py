@@ -44,10 +44,48 @@ def marker_for_variant(variant):
     return next((m for m in markers() if m['gene'].upper() == gene and m['kind'] == 'gene'), None)
 
 
+# Markers that can be either asserted (from a report) or derived (computed
+# at projection time from other stored findings).
+_DERIVABLE_MARKERS = frozenset({'complex_karyotype', 'complex_karyotype_excl_t1114'})
+
+
+def _derive_complex_karyotype(variants):
+    """Stub: complex karyotype threshold logic is an open clinical question.
+
+    Returns None — the derived path is not yet implemented.
+    """
+    return None
+
+
+def _derive_complex_karyotype_excl_t1114(variants):
+    """Stub: same as _derive_complex_karyotype, excluding t(11;14).
+
+    Returns None — the derived path is not yet implemented.
+    """
+    return None
+
+
+_DERIVATION_FUNCTIONS = {
+    'complex_karyotype': _derive_complex_karyotype,
+    'complex_karyotype_excl_t1114': _derive_complex_karyotype_excl_t1114,
+}
+
+
 def project_priority_variants(variants):
     result = {name: [] for name in patient_fields()}
     for variant in variants:
         marker = marker_for_variant(variant)
         if marker:
-            result[marker['field_name']].append(variant)
+            entry = dict(variant)
+            if marker['key'] in _DERIVABLE_MARKERS:
+                entry['provenance'] = 'asserted'
+            result[marker['field_name']].append(entry)
+    # For derivable markers with no asserted finding, attempt derivation.
+    for marker_key in _DERIVABLE_MARKERS:
+        field = next(m['field_name'] for m in markers() if m['key'] == marker_key)
+        if not result[field]:
+            derived = _DERIVATION_FUNCTIONS[marker_key](variants)
+            if derived is not None:
+                derived['provenance'] = 'derived'
+                result[field].append(derived)
     return result

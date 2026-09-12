@@ -2602,7 +2602,10 @@ def _get_genomics_pathology_data(person: Person, snapshot: OmopSnapshot = None) 
     mutations = _get_genetic_mutations(person, snapshot).get('genetic_mutations', [])
     # A recorded negative/no-call is not a detected molecular marker. Legacy
     # findings without an assessment retain their historical summary behavior.
-    mutations = [m for m in mutations if m.get('assessment') in (None, '', 'present')]
+    # Status defaults to 'present' for legacy rows, so the filter is safe.
+    mutations = [m for m in mutations
+                 if m.get('assessment') in (None, '', 'present')
+                 and m.get('status', 'present') == 'present']
     if mutations:
         # ``genetic_mutations`` remains the structured canonical projection;
         # molecular_markers is its legacy display-compatible summary.
@@ -3466,10 +3469,11 @@ def _get_genetic_mutations(person: Person, snapshot: OmopSnapshot = None) -> dic
         if not gene and code not in ('36908-2', '81252-9') and not marker:
             continue
 
+        from omop_core.services.genomics import _read_note_text
         mutation_data = {
             'id': measurement.measurement_id,
             'gene': (gene or '').lower(),
-            'variant': measurement.value_as_string,
+            'variant': _read_note_text(measurement.value_as_string),
             'test_date': measurement.measurement_date.isoformat() if measurement.measurement_date else None,
         }
         if marker:
@@ -3488,6 +3492,9 @@ def _get_genetic_mutations(person: Person, snapshot: OmopSnapshot = None) -> dic
 
     from omop_core.services.genomics import enrich_variants
     data['genetic_mutations'] = [v for v in enrich_variants(mutations, snapshot) if v.get('gene')]
+    # Default status to 'present' for legacy rows with no stored status component.
+    for v in data['genetic_mutations']:
+        v.setdefault('status', 'present')
     data.update(project_priority_variants(data['genetic_mutations']))
     snapshot.genomics_cache['projection'] = data
     return data
@@ -3868,6 +3875,7 @@ def _compute_derived_fields(patient_info: PatientRecord, *, apply_formulas=True)
         m.get('gene', '').lower() == 'tp53'
         and (m.get('interpretation') or '').lower() == 'pathogenic'
         and m.get('assessment') in (None, '', 'present')
+        and m.get('status', 'present') == 'present'
         for m in mutations
     )
 

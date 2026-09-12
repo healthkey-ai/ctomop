@@ -205,6 +205,7 @@ function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChan
 
       <Section title="Cytogenetics">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
+          <ClinicalField label="Cytogenetic Markers" name="cytogenic_markers" descriptor={descriptors.cytogenic_markers} type="multiselect" value={formData?.cytogenic_markers} onChange={onChange} />
           <ClinicalField label="Cytogenetic Risk" name="cytogenetic_risk" descriptor={descriptors.cytogenetic_risk} unknownField type="select" value={formData?.cytogenetic_risk} options={CYTOGENETIC_RISK_OPTIONS} onChange={onChange} />
 
         </div>

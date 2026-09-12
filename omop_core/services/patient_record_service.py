@@ -662,6 +662,7 @@ class OmopSnapshot:
     meas_by_source: dict        # source_value → [Measurement]
     obs_by_source: dict         # source_value → [Observation]
     death_date_assertion: object | None = None  # Latest UI assertion, including an explicit clear
+    cytogenetic_observations: list = dataclasses.field(default_factory=list)
     # Per-refresh memoization only; never cache database mappings process-wide.
     genomics_cache: dict = dataclasses.field(default_factory=dict, compare=False)
 
@@ -708,6 +709,10 @@ def _build_snapshot(person: Person) -> OmopSnapshot:
 
     death_date_assertion = next((o for o in observations
         if o.observation_source_value == 'patient-record:death_date'), None)
+    from omop_core.services.cytogenetics import SOURCE_PREFIX, LEGACY_SOURCE
+    cytogenetic_observations = [o for o in observations if
+        (o.observation_source_value or '').startswith(SOURCE_PREFIX)
+        or o.observation_source_value == LEGACY_SOURCE]
     from omop_core.services.omop_projection import without_cleared_history
     measurements = without_cleared_history(measurements, 'measurement')
     observations = without_cleared_history(observations, 'observation')
@@ -741,6 +746,7 @@ def _build_snapshot(person: Person) -> OmopSnapshot:
         procedures=procedures,
         death=death,
         death_date_assertion=death_date_assertion,
+        cytogenetic_observations=cytogenetic_observations,
         meas_by_code=dict(meas_by_code),
         obs_by_code=dict(obs_by_code),
         meas_by_source=dict(meas_by_source),
@@ -3243,6 +3249,9 @@ def _get_sct_cytogenetic_data(person: Person, snapshot: OmopSnapshot = None) -> 
                 t.strip() for t in val.split(',') if t.strip()
             ]
 
+    from omop_core.services.cytogenetics import values_from_rows
+    if snapshot.cytogenetic_observations:
+        data['cytogenic_markers'] = ', '.join(values_from_rows(snapshot.cytogenetic_observations))
     return data
 
 

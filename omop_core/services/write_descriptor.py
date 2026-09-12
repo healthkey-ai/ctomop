@@ -898,4 +898,6 @@ def build_writable_field_descriptor():
             'source_value': 'patient-record:' + field,
         }
     descriptor['death_date']['reason'] = 'Corrections are dated OMOP observations; earlier facts remain as history.'
+    from omop_core.services.cytogenetics import FIELD, descriptor as cytogenetic_descriptor
+    descriptor[FIELD] = cytogenetic_descriptor()
     return descriptor

@@ -2,7 +2,6 @@ import { useState, useEffect, useMemo, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { Upload, FileText, Trash2, LogOut, Settings, Globe } from "lucide-react";
 import api from "@/api/axios";
-import { clearTokens } from "@/utils/oauth";
 import { useAuth } from "@/hooks/useAuth";
 import { PaginationControls } from "@/components/labs/PaginationControls";
 import { useLocalPagination } from "@/lib/pagination";
@@ -55,7 +54,7 @@ const getErrorMessage = (err: unknown, fallback: string) => {
 
 export default function PatientList() {
   const navigate = useNavigate();
-  const { currentUser } = useAuth();
+  const { currentUser, logout } = useAuth();
   const [patients, setPatients] = useState<Patient[]>([]);
   const [patientCount, setPatientCount] = useState(0);
   const [filterOptions, setFilterOptions] = useState<FilterOptions>({
@@ -193,8 +192,7 @@ export default function PatientList() {
   const canManageMappings = !!(currentUser?.is_staff || currentUser?.is_org_admin);
 
   const handleLogout = () => {
-    clearTokens();
-    navigate("/login");
+    void logout();
   };
 
   return (

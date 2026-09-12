@@ -35,9 +35,11 @@ const fields = [
   ['evidence_source', 'Interpretation evidence / source'],
   ['genomic_reference_sequence_id', 'Genomic reference sequence ID'],
   ['zygosity', 'Zygosity'],
+  ['status', 'Finding status'],
 ] as const;
 
-const suggestions: Record<string, string[]> = {
+/** Fields rendered as `<select>` dropdowns with a fixed value set. */
+const selectOptions: Record<string, string[]> = {
   origin: ['Germline', 'Somatic', 'Unknown'],
   interpretation: ['Pathogenic', 'Likely pathogenic', 'VUS', 'Likely benign', 'Benign', 'Uncertain'],
   genome_assembly: ['GRCh38', 'GRCh37'],
@@ -45,6 +47,9 @@ const suggestions: Record<string, string[]> = {
   genomic_source_class: ['Germline', 'Somatic', 'De novo', 'Unknown'],
   variant_analysis_method_type: ['Sequencing', 'Next generation sequencing', 'Sanger sequencing', 'PCR', 'FISH', 'Microarray'],
   assessment: ['present', 'absent', 'not_tested', 'no_call', 'indeterminate'],
+  status: ['present', 'absent', 'indeterminate'],
+  zygosity: ['Heterozygous', 'Homozygous', 'Hemizygous', 'Unknown'],
+  chromosome: ['1','2','3','4','5','6','7','8','9','10','11','12','13','14','15','16','17','18','19','20','21','22','X','Y'],
 };
 
 function errorMessage(error: unknown): string {
@@ -188,19 +193,29 @@ export default function GenomicsTab({ formData, readOnly = false }: {
     {draft && <form className="rounded-md border p-4 space-y-4" onSubmit={e => { e.preventDefault(); void save(); }}>
       {error && <p role="alert" className="text-sm text-red-600">{error}</p>}
       <fieldset disabled={busy} className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        {fields.map(([key, label]) => <label key={key} className="space-y-1 text-sm">
-          <span className="block font-medium">{label}{key === 'gene' ? ' *' : ''}</span>
-          <input className="w-full rounded-md border bg-background px-3 py-2" required={key === 'gene'}
-            type={key.endsWith('_date') ? 'date' : key === 'allelic_frequency' ? 'number' : 'text'}
-            readOnly={key === 'gene' && !!draft.marker_key}
-            min={key === 'allelic_frequency' ? 0 : undefined}
-            max={key === 'allelic_frequency' ? (draft.allelic_frequency_unit === '1' ? 1 : 100) : undefined}
-            step={key === 'allelic_frequency' ? '0.00001' : undefined}
-            maxLength={key === 'gene' ? 50 : 10000}
-            list={suggestions[key] ? `genomics-${key}` : undefined}
-            value={draft[key] ?? ''} onChange={e => setDraft({ ...draft, [key]: e.target.value })} />
-          {suggestions[key] && <datalist id={`genomics-${key}`}>{suggestions[key].map(value => <option key={value} value={value} />)}</datalist>}
-        </label>)}
+        {fields.map(([key, label]) => {
+          const opts = selectOptions[key];
+          const draftMarker = markerFor(draft);
+          const aliasList = key === 'variant_name' && draftMarker?.kind === 'abnormality' ? [draftMarker.label, ...draftMarker.aliases] : undefined;
+          return <label key={key} className="space-y-1 text-sm">
+            <span className="block font-medium">{label}{key === 'gene' ? ' *' : ''}</span>
+            {opts ? <select className="w-full rounded-md border bg-background px-3 py-2"
+              value={draft[key] ?? ''} onChange={e => setDraft({ ...draft, [key]: e.target.value })}>
+              <option value="">— Select —</option>
+              {opts.map(v => <option key={v} value={v}>{v}</option>)}
+            </select>
+            : <input className="w-full rounded-md border bg-background px-3 py-2" required={key === 'gene'}
+              type={key.endsWith('_date') ? 'date' : key === 'allelic_frequency' ? 'number' : 'text'}
+              readOnly={key === 'gene' && !!draft.marker_key}
+              min={key === 'allelic_frequency' ? 0 : undefined}
+              max={key === 'allelic_frequency' ? (draft.allelic_frequency_unit === '1' ? 1 : 100) : undefined}
+              step={key === 'allelic_frequency' ? '0.00001' : undefined}
+              maxLength={key === 'gene' ? 50 : 10000}
+              list={aliasList ? `genomics-aliases-${key}` : undefined}
+              value={draft[key] ?? ''} onChange={e => setDraft({ ...draft, [key]: e.target.value })} />}
+            {aliasList && <datalist id={`genomics-aliases-${key}`}>{aliasList.map(v => <option key={v} value={v} />)}</datalist>}
+          </label>;
+        })}
         <label className="space-y-1 text-sm"><span className="block font-medium">Allelic frequency unit</span>
           <select className="w-full rounded-md border bg-background px-3 py-2" value={draft.allelic_frequency_unit || '%'} onChange={e => setDraft({ ...draft, allelic_frequency_unit: e.target.value })}>
             <option value="%">Percent (0–100)</option><option value="1">Fraction (0–1)</option>

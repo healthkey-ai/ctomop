@@ -104,8 +104,10 @@ describe('Genomics tab', () => {
     expect(screen.getByLabelText('Variant / transcript DNA change (HGVS)')).toHaveValue('c.68_69delAG');
     fireEvent.change(screen.getByLabelText('Interpretation'), { target: { value: 'Likely pathogenic' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save variant' }));
-    expect(await screen.findByText('Likely pathogenic')).toBeInTheDocument();
+    await waitFor(() => expect(mocks.patch).toHaveBeenCalled());
     expect(mocks.patch).toHaveBeenCalledWith(`${url}123/`, expect.objectContaining({ id: 123, genome_assembly: 'GRCh38', interpretation: 'Likely pathogenic' }));
+    expect(await screen.findByText('Variant saved.')).toBeInTheDocument();
+    expect(screen.getByText('Likely pathogenic')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
     fireEvent.change(screen.getByLabelText('Gene *'), { target: { value: 'Changed' } });
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
@@ -146,5 +148,54 @@ describe('Genomics tab', () => {
     render(<GenomicsTab formData={{ person_id: 42 }} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Retry' }));
     await waitFor(() => expect(screen.getByText('BRCA1')).toBeInTheDocument());
+  });
+
+  it('renders select dropdowns for enumerated fields in edit form', async () => {
+    render(<GenomicsTab formData={{ person_id: 42 }} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    for (const field of ['Origin', 'Interpretation', 'Genome assembly', 'Variant category', 'Genomic source class', 'Variant analysis method type', 'Result assessment', 'Finding status', 'Zygosity', 'Chromosome']) {
+      const el = screen.getByLabelText(field);
+      expect(el.tagName).toBe('SELECT');
+    }
+    // Free-text fields remain inputs
+    for (const field of ['Variant name', 'Variant / transcript DNA change (HGVS)', 'Transcript reference sequence ID']) {
+      const el = screen.getByLabelText(field);
+      expect(el.tagName).toBe('INPUT');
+    }
+  });
+
+  it('populates select dropdowns with the correct options', async () => {
+    render(<GenomicsTab formData={{ person_id: 42 }} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    const origin = screen.getByLabelText('Origin') as HTMLSelectElement;
+    const optionTexts = Array.from(origin.options).map(o => o.text);
+    expect(optionTexts).toContain('Germline');
+    expect(optionTexts).toContain('Somatic');
+    expect(optionTexts).toContain('Unknown');
+    expect(optionTexts).toContain('— Select —');
+  });
+
+  it('shows variant name datalist suggestions for abnormality markers', async () => {
+    const abnormality = {
+      key: 'del17p', field_name: 'genomics_del17p', gene: 'TP53',
+      label: 'del(17p)', kind: 'abnormality', aliases: ['del(17p)', 'del(17p13)', 'del17p13'],
+      writable: true, expert_review: '',
+    };
+    mocks.get.mockImplementation(async path => ({
+      data: path.includes('genomics-catalog') ? { markers: [abnormality] } : [],
+    }));
+    render(<GenomicsTab formData={{ person_id: 42, disease: 'CLL' }} />);
+    await screen.findByText('TP53');
+    fireEvent.click(screen.getByRole('row', { name: 'TP53 del(17p)' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Edit result' }));
+    const variantInput = screen.getByLabelText('Variant name') as HTMLInputElement;
+    expect(variantInput.tagName).toBe('INPUT');
+    expect(variantInput.getAttribute('list')).toBeTruthy();
+    const datalist = document.getElementById(variantInput.getAttribute('list')!);
+    expect(datalist).not.toBeNull();
+    const suggestions = Array.from(datalist!.querySelectorAll('option')).map(o => o.value);
+    expect(suggestions).toContain('del(17p)');
+    expect(suggestions).toContain('del(17p13)');
+    expect(suggestions).toContain('del17p13');
   });
 });

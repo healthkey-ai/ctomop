@@ -13,8 +13,9 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 from django.core.management.base import BaseCommand, CommandError
+from django.db import transaction
 
-from omop_core.models import Concept, PatientRecord
+from omop_core.models import Concept, FieldConceptMapping, PatientRecord
 from omop_core.services.genomics import delete_variant, list_variants, save_variant
 from omop_core.services.genomics_catalog import disease_code
 
@@ -112,6 +113,13 @@ _ABNORMALITY_LABELS = {
     'del13q': 'del(13q)', 'trisomy12': 'Trisomy 12',
 }
 
+_SLUG_MAP = {
+    'BC': 'breast-cancer', 'MM': 'multiple-myeloma',
+    'FL': 'follicular-lymphoma', 'MCL': 'mantle-cell-lymphoma',
+    'CLL': 'chronic-lymphocytic-leukemia',
+}
+_SLUG_TO_CODE = {v: k for k, v in _SLUG_MAP.items()}
+
 _INTERPRETATIONS = ['Pathogenic', 'Likely pathogenic', 'VUS', 'Likely benign', 'Benign']
 _ORIGINS = ['Germline', 'Somatic']
 _METHODS = ['NGS', 'Sanger sequencing', 'PCR']
@@ -184,7 +192,7 @@ class Command(BaseCommand):
         dry_run = options['dry_run']
         overwrite = options['overwrite']
 
-        # Precondition: required OMOP concepts must exist.
+        # Precondition: required OMOP concepts and genomics field mappings must exist.
         if not dry_run:
             missing = []
             if not Concept.objects.filter(pk=0).exists():
@@ -193,6 +201,14 @@ class Command(BaseCommand):
                 missing.append('Concept(pk=32817)')
             if missing:
                 raise CommandError(f'Required OMOP concepts missing: {", ".join(missing)}. Load vocabularies first.')
+            genomics_mappings = FieldConceptMapping.objects.filter(
+                field_name__startswith='genomics_', status='approved',
+            ).count()
+            if genomics_mappings == 0:
+                raise CommandError(
+                    'No approved genomics FieldConceptMapping rows found. '
+                    'Run migrations (0224_seed_genomics_mappings) first.'
+                )
 
         # Build queryset.
         qs = PatientRecord.objects.select_related('person').exclude(
@@ -206,12 +222,7 @@ class Command(BaseCommand):
             code = disease_code(options['disease'])
             if code is None:
                 raise CommandError(f'Unknown disease code: {options["disease"]}')
-            slug_map = {
-                'BC': 'breast-cancer', 'MM': 'multiple-myeloma',
-                'FL': 'follicular-lymphoma', 'MCL': 'mantle-cell-lymphoma',
-                'CLL': 'chronic-lymphocytic-leukemia',
-            }
-            qs = qs.filter(disease_slug=slug_map[code])
+            qs = qs.filter(disease_slug=_SLUG_MAP[code])
 
         if options['patient']:
             val = options['patient']
@@ -222,11 +233,7 @@ class Command(BaseCommand):
                 qs = qs.filter(email=val)
 
         # Filter to patients whose disease_slug maps to a known pool.
-        known_slugs = {
-            'breast-cancer', 'multiple-myeloma', 'follicular-lymphoma',
-            'mantle-cell-lymphoma', 'chronic-lymphocytic-leukemia',
-        }
-        qs = qs.filter(disease_slug__in=known_slugs)
+        qs = qs.filter(disease_slug__in=_SLUG_MAP.values())
 
         if not overwrite:
             qs = qs.filter(genetic_mutations=[])
@@ -235,6 +242,8 @@ class Command(BaseCommand):
 
         total_eligible = qs.count()
         if total_eligible == 0:
+            if options['patient']:
+                self._diagnose_patient(options['patient'], overwrite)
             self.stdout.write('No eligible patients found.')
             return
 
@@ -255,7 +264,7 @@ class Command(BaseCommand):
         seeded = 0
         total_variants = 0
         for pr in patients:
-            code = disease_code(pr.disease_slug)
+            code = _SLUG_TO_CODE.get(pr.disease_slug)
             if code is None:
                 continue
             pool = _DISEASE_POOLS.get(code)
@@ -271,19 +280,23 @@ class Command(BaseCommand):
                 total_variants += len(markers)
                 continue
 
-            # Overwrite: delete existing variants first.
-            if overwrite:
-                existing = list_variants(pr.person)
-                for v in existing:
-                    delete_variant(pr.person, v['id'])
+            try:
+                with transaction.atomic():
+                    if overwrite:
+                        existing = list_variants(pr.person)
+                        for v in existing:
+                            delete_variant(pr.person, v['id'])
 
-            for entry in markers:
-                if entry['kind'] == 'gene':
-                    payload = _build_gene_payload(entry)
-                else:
-                    payload = _build_abnormality_payload(entry)
-                save_variant(pr.person, payload)
-                total_variants += 1
+                    for entry in markers:
+                        if entry['kind'] == 'gene':
+                            payload = _build_gene_payload(entry)
+                        else:
+                            payload = _build_abnormality_payload(entry)
+                        save_variant(pr.person, payload)
+                        total_variants += 1
+            except Exception as e:
+                self.stderr.write(f'  ERROR person_id={pr.person_id}: {e}')
+                continue
 
             seeded += 1
             self.stdout.write(f'  person_id={pr.person_id} ({code}): {len(markers)} variants')
@@ -291,3 +304,19 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS(
             f'Done. Seeded {total_variants} variants across {seeded} patients.'
         ))
+
+    def _diagnose_patient(self, val, overwrite):
+        """Provide a specific error when --patient targets an ineligible patient."""
+        try:
+            pid = int(val)
+            pr = PatientRecord.objects.filter(person_id=pid).first()
+        except ValueError:
+            pr = PatientRecord.objects.filter(email=val).first()
+        if pr is None:
+            raise CommandError(f'Patient not found: {val}')
+        if not pr.disease_slug:
+            raise CommandError(f'Patient {val} has no disease_slug set.')
+        if pr.disease_slug not in _SLUG_MAP.values():
+            raise CommandError(f'Patient {val} has unsupported disease: {pr.disease_slug}')
+        if not overwrite and pr.genetic_mutations:
+            raise CommandError(f'Patient {val} already has variants. Use --overwrite to replace.')

@@ -24,7 +24,8 @@
 - ❌ peripheral_neuropathy_grade (needs Observation)
 
 ### Cancer-Specific Fields
-- ❌ cytogenic_markers, molecular_markers (needs new table)
+- ✅ cytogenetic_markers (PatientRecord-first with Observation projection)
+- ❌ molecular_markers (needs new table)
 - ❌ stem_cell_transplant_history (needs Procedure enhancement)
 - ❌ plasma_cell_leukemia (needs ConditionOccurrence enhancement)
 - ❌ progression (needs Episode enhancement)

@@ -362,7 +362,7 @@ _WRITE_RECIPE_INCOMPLETE = {
     ),
 }
 
-def _curated_writes():
+def _curated_writes(choice_options=None):
     """Editable entries built from reviewer-approved concept mappings.
 
     The curation interface records a decision per field; this is what acts on
@@ -447,6 +447,9 @@ def _curated_writes():
             if options:
                 entry['options'] = [{'value': t} for t in options]
                 entry['multiple'] = row.multiple
+        elif choice_options and row.field_name in choice_options:
+            entry['options'] = choice_options[row.field_name]
+            entry['multiple'] = row.multiple
         entries[row.field_name] = entry
     return entries
 
@@ -534,7 +537,6 @@ def build_writable_field_descriptor():
         concept_id=CONCEPT_LARGEST_LYMPH_NODE_DIMENSION
     ).only('concept_id', 'concept_code', 'concept_name', 'vocabulary_id').first()
 
-    curated = _curated_writes()
     choice_options = {
         field_name: [
             {'value': display, 'code': primary_code}
@@ -542,6 +544,7 @@ def build_writable_field_descriptor():
         ]
         for field_name, choices in _field_choice_options().items()
     }
+    curated = _curated_writes(choice_options)
 
     descriptor = {}
     for field in sorted(PATIENT_RECORD_OMOP_MAPPED_FIELDS - _LIFECYCLE_FIELDS):
@@ -899,5 +902,7 @@ def build_writable_field_descriptor():
         }
     descriptor['death_date']['reason'] = 'Corrections are dated OMOP observations; earlier facts remain as history.'
     from omop_core.services.cytogenetics import FIELD, descriptor as cytogenetic_descriptor
-    descriptor[FIELD] = cytogenetic_descriptor()
+    marker_descriptor = cytogenetic_descriptor()
+    if marker_descriptor is not None:
+        descriptor[FIELD] = marker_descriptor
     return descriptor

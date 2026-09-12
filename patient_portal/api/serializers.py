@@ -365,23 +365,23 @@ class CytogeneticMarkersField(serializers.Field):
         return ', '.join(selections(value)) if value is not None else None
 
     def to_internal_value(self, value):
-        from omop_core.services.cytogenetics import selections
+        from omop_core.services.cytogenetics import selections, VALUES
         try:
             selected = selections(value)
         except ValueError as exc:
             raise serializers.ValidationError(str(exc)) from exc
-        allowed = set(FieldChoice.objects.filter(field_name='cytogenic_markers')
+        allowed = set(VALUES) | set(FieldChoice.objects.filter(field_name='cytogenetic_markers')
                       .values_list('display', flat=True))
         # Legacy imported text may be echoed by autosave. Preserve it without
         # pretending it has an approved concept mapping.
-        existing = selections(getattr(self.parent.instance, 'cytogenic_markers', None))
+        existing = selections(getattr(self.parent.instance, 'cytogenetic_markers', None))
         if set(selected) - allowed - set(existing):
             raise serializers.ValidationError('Select recognized cytogenetic markers.')
         return ', '.join(selected)
 
 
 class PatientRecordSerializer(serializers.ModelSerializer):
-    cytogenic_markers = CytogeneticMarkersField(required=False, allow_null=True)
+    cytogenetic_markers = CytogeneticMarkersField(required=False, allow_null=True)
     person_id = serializers.IntegerField(source='person.person_id', read_only=True)
     patient_name = serializers.SerializerMethodField()
     name = serializers.SerializerMethodField()
@@ -413,6 +413,22 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             # managed by the PATCH handler, not by the client.
             'user_edited_fields', 'custom_fields', 'therapy_overrides',
         )
+
+    def to_internal_value(self, data):
+        """Accept the historical misspelling on writes during API migration."""
+        if 'cytogenic_markers' in data:
+            legacy_value = data.get('cytogenic_markers')
+            data = data.copy()
+            data.pop('cytogenic_markers')
+            if 'cytogenetic_markers' in data and data['cytogenetic_markers'] != legacy_value:
+                raise serializers.ValidationError({
+                    'cytogenetic_markers': (
+                        'Do not send conflicting cytogenic_markers and '
+                        'cytogenetic_markers values.'
+                    ),
+                })
+            data['cytogenetic_markers'] = legacy_value
+        return super().to_internal_value(data)
 
     def get_supportive_therapy_courses(self, obj):
         from patient_portal.api.supportive_therapies import SupportiveTherapySerializer

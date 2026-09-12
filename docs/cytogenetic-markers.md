@@ -1,9 +1,11 @@
 # Cytogenetic marker selections (#1049)
 
-The Disease tab's **Cytogenetic Markers** control is a multiselect. The existing
-`cytogenic_markers` PatientRecord/API key is retained for compatibility. Clients
+The Disease tab's **Cytogenetic Markers** control is a multiselect. The canonical
+PatientRecord/API key is `cytogenetic_markers`; writes also accept the historical
+`cytogenic_markers` spelling for compatibility. Clients
 can PATCH a list or comma-separated text. The server normalizes legacy spellings
-such as `del17p`, `1q_amp`, and `t(4,14)` before saving.
+such as `del(17p13)`, `1q21 amplification`, and `t(4,14)` to the existing matching
+tokens (`del17p`, `1q_amp`, and `t(4;14)`) before saving.
 
 Each selection creates its own Observation through the PatientRecord-first save
 path. `FieldChoiceCode` holds the per-value mapping; the writable descriptor
@@ -12,14 +14,14 @@ option. The field-level approved `FieldConceptMapping` enables this recipe.
 
 | Selected field value | Standard SNOMED code | OMOP concept ID | Standard Observation category |
 | --- | --- | --- | --- |
-| del(17p13) | 67285006 | 4284835 | Deletion of short arm |
+| del17p | 67285006 | 4284835 | Deletion of short arm |
 | t(4;14) | 15897004 | 4049480 | Chromosomal translocation |
 | t(11;14) | 15897004 | 4049480 | Chromosomal translocation |
 | t(14;16) | 15897004 | 4049480 | Chromosomal translocation |
-| 1q21 gain | 41669009 | 4215516 | Alteration of chromosome structure |
-| 1q21 amplification | 41669009 | 4215516 | Alteration of chromosome structure |
+| 1q_gain | 41669009 | 4215516 | Alteration of chromosome structure |
+| 1q_amp | 41669009 | 4215516 | Alteration of chromosome structure |
 | hyperdiploidy | 55597007 | 4208087 | Hyperploidy |
-| del(13q) | 64329008 | 4275261 | Deletion of long arm |
+| del13q | 64329008 | 4275261 | Deletion of long arm |
 | MYC rearrangement | 41669009 | 4215516 | Alteration of chromosome structure |
 
 These category mappings are **broader than the individual markers**. Exact marker
@@ -56,3 +58,8 @@ morphology aggregate replaces the legacy set, followed by a separate coded row
 for each selected supported marker. This lets legacy text be retained or cleared
 without blocking supported selections. The aggregate and individual rows are
 written in one transaction.
+
+Legacy aggregate NOTE references remain readable with the existing patient/fact
+ownership checks. Long retained legacy text still uses that lossless storage.
+Existing scalar curator recipes remain supported; migration 0230 enables the
+per-value standard Observation recipe after the canonical field rename.

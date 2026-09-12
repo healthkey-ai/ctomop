@@ -47,6 +47,14 @@ const DESCRIPTORS: Record<string, unknown> = {
   sct_date: observation('mm-sct-date', 'date'),
   stem_cell_transplant_history: observation('mm-sct-history', 'string', true),
   sct_eligibility: observation('mm-sct-eligibility', 'string', true),
+  cytogenetic_markers: {
+    ...observation('mm-cytogenetic-markers', 'string', true),
+    options: [
+      { value: 'del17p' },
+      { value: 't(4;14)' },
+      { value: '1q_amp' },
+    ],
+  },
 };
 
 vi.mock('@/api/axios', () => ({
@@ -207,6 +215,16 @@ describe('MyelomaSection — SCT fields', () => {
     expect(screen.getByText('Prior SCT Type')).toBeInTheDocument();
     expect(screen.getByText('SCT Date')).toBeInTheDocument();
     expect(screen.getByText('SCT Eligibility')).toBeInTheDocument();
+  });
+
+  it('renders cytogenetic markers from the server descriptor and emits a comma string', () => {
+    const onChange = vi.fn();
+    renderMyeloma({ cytogenetic_markers: 'del17p' }, onChange);
+
+    expect(screen.getByText('Cytogenetic Markers')).toBeInTheDocument();
+    expect(screen.getByTestId('ms-opt-del17p')).toHaveAttribute('aria-pressed', 'true');
+    fireEvent.click(screen.getByTestId('ms-opt-1q_amp'));
+    expect(onChange).toHaveBeenCalledWith('cytogenetic_markers', 'del17p, 1q_amp');
   });
 
   it('keeps the myeloma type fallback options aligned with the requested value set', () => {
@@ -632,7 +650,7 @@ describe('DiseaseTab — cytogenetic marker multiselect', () => {
     __resetWritableFieldsCache();
     (globalThis as Record<string, unknown>).__DESCRIPTORS__ = {
       ...DESCRIPTORS,
-      cytogenic_markers: {
+      cytogenetic_markers: {
         ...observation('cytogenetic:', 'string', true),
         options: [{ value: 't(4;14)' }, { value: 't(11;14)' }, { value: '1q21 amplification' }],
       },
@@ -644,13 +662,13 @@ describe('DiseaseTab — cytogenetic marker multiselect', () => {
   it('adds and removes individual choices without discarding other selections', () => {
     const onChange = vi.fn();
     const { rerender } = render(<DiseaseTab {...BASE_PROPS}
-      formData={{ cytogenic_markers: 't(4;14)' }} onChange={onChange} />);
+      formData={{ cytogenetic_markers: 't(4;14)' }} onChange={onChange} />);
     expect(screen.getByText('Cytogenetic Markers')).toBeInTheDocument();
     fireEvent.click(screen.getByTestId('ms-opt-t(11;14)'));
-    expect(onChange).toHaveBeenLastCalledWith('cytogenic_markers', 't(4;14), t(11;14)');
+    expect(onChange).toHaveBeenLastCalledWith('cytogenetic_markers', 't(4;14), t(11;14)');
     rerender(<DiseaseTab {...BASE_PROPS}
-      formData={{ cytogenic_markers: 't(4;14), t(11;14)' }} onChange={onChange} />);
+      formData={{ cytogenetic_markers: 't(4;14), t(11;14)' }} onChange={onChange} />);
     fireEvent.click(screen.getByTestId('ms-opt-t(4;14)'));
-    expect(onChange).toHaveBeenLastCalledWith('cytogenic_markers', 't(11;14)');
+    expect(onChange).toHaveBeenLastCalledWith('cytogenetic_markers', 't(11;14)');
   });
 });

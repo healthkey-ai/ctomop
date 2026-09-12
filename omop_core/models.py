@@ -2716,7 +2716,7 @@ class PatientRecord(models.Model):
     peripheral_neuropathy_grade = models.IntegerField(blank=True, null=True)
 
     # Cancer-specific fields
-    cytogenic_markers = models.TextField(blank=True, null=True)
+    cytogenetic_markers = models.TextField(blank=True, null=True)
     molecular_markers = models.TextField(blank=True, null=True)
     stem_cell_transplant_history = models.JSONField(blank=True, null=True, default=list)
     sct_date = models.DateField(blank=True, null=True)

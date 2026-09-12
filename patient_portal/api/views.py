@@ -1014,7 +1014,10 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
         return self._patch_record(request, person, patient_info)
 
-    _STAFF_ONLY_FIELDS = frozenset({'validated', 'validated_by', 'validation_date'})
+    _STAFF_ONLY_FIELDS = frozenset({
+        'validated', 'validated_by', 'validation_date',
+        'suppress_demographics_for_others',
+    })
 
     def _genomics_access(self, request, pk):
         person, record, error = self._resolve_patient_with_auth(request, pk)
@@ -1081,9 +1084,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         priority_edits = {key: patch_data.pop(key) for key in list(patch_data) if key in patient_fields()}
         priority_edits = {key: value for key, value in priority_edits.items() if value != getattr(patient_info, key)}
 
-        # Validation fields are staff-only; patients use /me/confirm/ instead.
+        # Sensitive profile fields are staff-only; patients attest via /me/confirm/.
         # Silent drop (not 400) because auto-save sends the full GET representation.
-        if not getattr(request.user, 'is_staff', False) and not is_service_token(request):
+        if not getattr(request.user, 'is_staff', False):
             for f in self._STAFF_ONLY_FIELDS:
                 patch_data.pop(f, None)
         # language_skills are PersonLanguageSkill rows, not PatientRecord columns.

@@ -24,11 +24,12 @@ _CDM_TEXT_WIDTH = 60  # CDM conformant column width for value_as_string.
 # genetic variant panel; local narrative fields explicitly remain unmapped.
 FIELDS = {a['key']: (a['code'], a['table'].title()) for a in catalog()['attributes']}
 # Components added after the frozen v1 catalog; seeded by later migrations.
-FIELDS['status'] = ('genomics:status', 'Observation')
-FIELDS['clone_fraction'] = ('genomics:clone_fraction', 'Measurement')
-FIELDS['transcript_dna_change'] = ('genomics:transcript_dna_change', 'Measurement')
-FIELDS['coverage_depth'] = ('genomics:coverage_depth', 'Measurement')
-FIELDS['amino_acid_change_type'] = ('genomics:amino_acid_change_type', 'Measurement')
+# Fallback domains match LOINC's standard domain where a LOINC exists.
+FIELDS['status'] = ('genomics:status', 'Measurement')          # LOINC 69548-6 → Measurement
+FIELDS['clone_fraction'] = ('genomics:clone_fraction', 'Measurement')  # no LOINC
+FIELDS['transcript_dna_change'] = ('genomics:transcript_dna_change', 'Measurement')  # LOINC 48004-6 → Measurement
+FIELDS['coverage_depth'] = ('genomics:coverage_depth', 'Observation')  # LOINC 82121-5 → Observation
+FIELDS['amino_acid_change_type'] = ('genomics:amino_acid_change_type', 'Measurement')  # LOINC 48006-1 → Measurement
 
 # Variant-level components that do not apply to absent findings.
 _VARIANT_LEVEL_FIELDS = frozenset({

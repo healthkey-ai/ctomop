@@ -21,8 +21,13 @@ def seed(apps, schema_editor):
     recipes = [(m['field_name'], '81252-9', 'measurement', 'genomics:' + m['key'], 'json') for m in data['markers']]
     recipes += [('genetic_mutations.' + a['key'], a['code'], a['table'], a['code'], a['value_kind']) for a in data['attributes']]
     for field, code, table, source, kind in recipes:
+        # Resolve without domain filter — the concept's own domain is
+        # authoritative.  Marker parents stay in Measurement regardless
+        # (event linking depends on it).
         standard = Concept.objects.using(using).filter(vocabulary_id='LOINC', concept_code=code,
-            standard_concept='S', invalid_reason__isnull=True, domain_id=table.title()).first()
+            standard_concept='S', invalid_reason__isnull=True).first() if not code.startswith('genomics:') else None
+        if standard and not field.startswith('genomics_'):
+            table = standard.domain_id.lower()
         Mapping.objects.using(using).get_or_create(field_name=field, defaults={
             'concept': standard or zero,
             'vocabulary_id': 'LOINC' if not code.startswith('genomics:') else '',

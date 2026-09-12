@@ -224,11 +224,17 @@ def test_status_defaults_to_present_on_new_write(setup):
     person, _, _ = setup
     variant = save_variant(person, {'gene': 'TP53'})
     assert variant['status'] == 'present'
-    # Status component is stored in OMOP.
-    assert Observation.objects.filter(
-        person=person, observation_event_id=variant['id'],
-        observation_source_value='genomics:status',
-    ).exists()
+    # Status component is stored in OMOP (table depends on LOINC domain).
+    assert (
+        Measurement.objects.filter(
+            person=person, measurement_event_id=variant['id'],
+            measurement_source_value='genomics:status',
+        ).exists()
+        or Observation.objects.filter(
+            person=person, observation_event_id=variant['id'],
+            observation_source_value='genomics:status',
+        ).exists()
+    )
 
 
 def test_status_defaults_to_present_for_legacy_rows(setup):

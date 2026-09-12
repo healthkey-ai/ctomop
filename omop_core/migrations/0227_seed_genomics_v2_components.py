@@ -1,17 +1,18 @@
 """Seed new genomic component recipes: clone_fraction, transcript_dna_change,
 coverage_depth and amino_acid_change_type.
 
-None of the LOINCs (82121-5, 48004-6, 48006-1) resolve in the installed
-vocabulary, so all use genomics: source keys with concept 0.
+Each resolves its LOINC code if loaded; falls back to genomics: source key
+with concept 0 and a default domain when the vocabulary is absent.
 """
 from django.db import migrations
 from django.utils import timezone
 
 _RECIPES = [
-    # (field_name, source_value, omop_table, value_kind, unit, notes)
+    # (field_name, source_value, loinc_code, default_table, value_kind, unit, notes)
     (
         'genetic_mutations.clone_fraction',
         'genomics:clone_fraction',
+        None,
         'measurement',
         'number',
         '%',
@@ -20,6 +21,7 @@ _RECIPES = [
     (
         'genetic_mutations.transcript_dna_change',
         'genomics:transcript_dna_change',
+        '48004-6',
         'measurement',
         'string',
         '',
@@ -29,6 +31,7 @@ _RECIPES = [
     (
         'genetic_mutations.coverage_depth',
         'genomics:coverage_depth',
+        '82121-5',
         'measurement',
         'number',
         '',
@@ -37,6 +40,7 @@ _RECIPES = [
     (
         'genetic_mutations.amino_acid_change_type',
         'genomics:amino_acid_change_type',
+        '48006-1',
         'measurement',
         'string',
         '',
@@ -51,13 +55,20 @@ def seed_v2_components(apps, schema_editor):
     Concept = apps.get_model('omop_core', 'Concept')
     Mapping = apps.get_model('omop_core', 'FieldConceptMapping')
     zero = Concept.objects.using(using).filter(pk=0).first()
-    for field_name, source_value, omop_table, value_kind, unit, notes in _RECIPES:
+    for field_name, source_value, loinc_code, default_table, value_kind, unit, notes in _RECIPES:
+        standard = None
+        if loinc_code:
+            standard = Concept.objects.using(using).filter(
+                vocabulary_id='LOINC', concept_code=loinc_code,
+                standard_concept='S', invalid_reason__isnull=True,
+            ).first()
+        omop_table = standard.domain_id.lower() if standard else default_table
         Mapping.objects.using(using).get_or_create(
             field_name=field_name,
             defaults={
-                'concept': zero,
-                'vocabulary_id': '',
-                'concept_code': '',
+                'concept': standard or zero,
+                'vocabulary_id': 'LOINC' if loinc_code else '',
+                'concept_code': loinc_code or '',
                 'source_value': source_value,
                 'omop_table': omop_table,
                 'value_kind': value_kind,

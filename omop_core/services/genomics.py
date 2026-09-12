@@ -23,6 +23,12 @@ _CDM_TEXT_WIDTH = 60  # CDM conformant column width for value_as_string.
 # field: (source code, fallback OMOP domain). LOINCs from the discrete
 # genetic variant panel; local narrative fields explicitly remain unmapped.
 FIELDS = {a['key']: (a['code'], a['table'].title()) for a in catalog()['attributes']}
+# Correct catalog domains that disagree with LOINC (the catalog is frozen).
+# The seed migration resolves without domain filtering, so the mapping's
+# omop_table is correct; these fix the FIELDS fallback domain.
+FIELDS['genomic_dna_change'] = ('81290-9', 'Observation')
+FIELDS['variant_analysis_method_type'] = ('81304-8', 'Observation')
+FIELDS['variant_category'] = ('83005-9', 'Observation')
 # Components added after the frozen v1 catalog; seeded by later migrations.
 # Fallback domains match LOINC's standard domain where a LOINC exists.
 FIELDS['status'] = ('genomics:status', 'Measurement')          # LOINC 69548-6 → Measurement
